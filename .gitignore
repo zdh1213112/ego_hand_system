@@ -1,0 +1,45 @@
+# Build and test artifacts
+/build/
+/build-*/
+/output/*
+!/output/.gitkeep
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Python environments and caches
+/.venv/
+/python_deps/
+__pycache__/
+*.py[cod]
+*.so
+
+# Local data and recordings
+/data/
+/recordings/
+/third_party/*
+!/third_party/README.md
+*.mp4
+*.avi
+*.mov
+*.wav
+
+# Downloaded model files are intentionally not redistributed
+/models/*.task
+/models/mano/*
+!/models/mano/README.md
+*.pkl
+*.npz
+
+# Editors and operating systems
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local secrets/configuration
+.env
+.env.*
+!.env.example
