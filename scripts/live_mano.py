@@ -226,12 +226,26 @@ class LiveManoFitter:
         target = torch.as_tensor(target_np[None], dtype=torch.float32, device=self.device)
         valid = torch.as_tensor(valid_np[None], dtype=torch.bool, device=self.device)
         confidence = torch.as_tensor(confidence_np[None], dtype=torch.float32, device=self.device)
+        left_quality_np = np.asarray(
+            match.get("left_2d_quality", np.full(21, match["left"]["score"])),
+            dtype=np.float32,
+        )
+        right_quality_np = np.asarray(
+            match.get("right_2d_quality", np.full(21, match["right"]["score"])),
+            dtype=np.float32,
+        )
+        left_quality = torch.as_tensor(
+            left_quality_np[None], dtype=torch.float32, device=self.device
+        )
+        right_quality = torch.as_tensor(
+            right_quality_np[None], dtype=torch.float32, device=self.device
+        )
         left_px = torch.as_tensor(
-            np.asarray(match["left"]["pixels"], dtype=np.float32)[None],
+            np.asarray(match.get("left_points", match["left"]["pixels"]), dtype=np.float32)[None],
             dtype=torch.float32, device=self.device,
         )
         right_px = torch.as_tensor(
-            np.asarray(match["right"]["pixels"], dtype=np.float32)[None],
+            np.asarray(match.get("right_points", match["right"]["pixels"]), dtype=np.float32)[None],
             dtype=torch.float32, device=self.device,
         )
 
@@ -287,9 +301,14 @@ class LiveManoFitter:
             loss3d = robust_weighted_loss(joints - target, weights3d, 0.005)
             left_prediction = project_rectified(joints, self.rotation, self.p1)
             right_prediction = project_rectified(joints, self.rotation, self.p2)
-            weights2d = torch.maximum(confidence, torch.tensor(0.08, device=self.device))
-            loss2d = robust_weighted_loss((left_prediction - left_px) / 100.0, weights2d, 0.015)
-            loss2d += robust_weighted_loss((right_prediction - right_px) / 100.0, weights2d, 0.015)
+            weights2d_left = torch.clamp(left_quality, min=0.03, max=1.0)
+            weights2d_right = torch.clamp(right_quality, min=0.03, max=1.0)
+            loss2d = robust_weighted_loss(
+                (left_prediction - left_px) / 100.0, weights2d_left, 0.015
+            )
+            loss2d += robust_weighted_loss(
+                (right_prediction - right_px) / 100.0, weights2d_right, 0.015
+            )
             temporal = (pose - state["previous_pose"]).square().mean()
             temporal += 0.25 * (orient - state["previous_orient"]).square().mean()
             temporal += 8.0 * (transl - state["previous_transl"]).square().mean()

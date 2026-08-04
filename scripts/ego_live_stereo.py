@@ -25,10 +25,12 @@ import yaml
 
 from mediapipe_left_baseline import HAND_CONNECTIONS, camera_matrices, create_stereo_rectification
 from mediapipe_stereo_triangulate import (
+    FINGERTIP_INDICES,
     associate_hands,
     detect,
     draw_observation,
     make_options,
+    prepare_stereo_matching_images,
     triangulate,
 )
 from render_mano_overlay_angles import (
@@ -68,6 +70,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-depth-m", type=float, default=0.15)
     parser.add_argument("--max-depth-m", type=float, default=1.5)
     parser.add_argument("--balance", type=float, default=0.0)
+    refinement = parser.add_mutually_exclusive_group()
+    refinement.add_argument("--stereo-refine", action="store_true", dest="stereo_refine")
+    refinement.add_argument("--no-stereo-refine", action="store_false", dest="stereo_refine")
+    parser.set_defaults(stereo_refine=True)
+    parser.add_argument("--refine-window", type=int, default=17)
+    parser.add_argument("--refine-tip-window", type=int, default=25)
+    parser.add_argument("--refine-max-x-shift-px", type=float, default=18.0)
+    parser.add_argument("--refine-max-y-residual-px", type=float, default=3.0)
+    parser.add_argument("--refine-max-fb-error-px", type=float, default=2.0)
+    parser.add_argument("--refine-max-lk-error", type=float, default=32.0)
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--process-every", type=int, default=1,
                         help="run stereo inference every N captured frame pairs")
@@ -398,6 +410,25 @@ class OnlineStereoFilter:
             * np.clip((disparity - 2.0) / 24.0, 0.10, 1.0)
             * handedness
         )
+        attempted = np.asarray(
+            match.get("refinement_attempted", np.zeros(21, dtype=bool)), dtype=bool
+        )
+        used = np.asarray(
+            match.get("refinement_used", np.zeros(21, dtype=bool)), dtype=bool
+        )
+        refinement_quality = np.asarray(
+            match.get("refinement_quality", np.zeros(21)), dtype=np.float64
+        )
+        refinement_factor = np.ones(21, dtype=np.float64)
+        refinement_factor[attempted & used] = (
+            0.55 + 0.45 * refinement_quality[attempted & used]
+        )
+        refinement_factor[attempted & ~used] = 0.50
+        failed_tips = FINGERTIP_INDICES[
+            attempted[FINGERTIP_INDICES] & ~used[FINGERTIP_INDICES]
+        ]
+        refinement_factor[failed_tips] = 0.38
+        quality *= refinement_factor
         quality[~match["valid"]] = 0.0
         return np.clip(quality, 0.0, 1.0)
 
@@ -733,7 +764,8 @@ def main() -> int:
     fields = (
         "capture_index", "left_index", "right_index", "left_timestamp_us", "right_timestamp_us",
         "track_id", "handedness", "landmark_index", "raw_valid", "filtered_valid", "predicted",
-        "depth_quality", "x_left_camera_m", "y_left_camera_m", "z_left_camera_m",
+        "depth_quality", "refinement_used", "refinement_quality",
+        "x_left_camera_m", "y_left_camera_m", "z_left_camera_m",
     )
     angle_fields = [
         "capture_index", "left_index", "right_index", "left_timestamp_us",
@@ -751,7 +783,8 @@ def main() -> int:
     latency_samples: list[float] = []
     timing_totals = {
         "wait": 0.0, "decode": 0.0, "rectify": 0.0, "detect": 0.0,
-        "stereo_csv": 0.0, "mano": 0.0, "render": 0.0, "display_record": 0.0,
+        "refine_triangulate": 0.0, "stereo_csv": 0.0, "mano": 0.0,
+        "render": 0.0, "display_record": 0.0,
     }
     base_timestamp_us = None
     last_left_ms = -1
@@ -829,10 +862,16 @@ def main() -> int:
                 right_hands = right_future.result()
                 timing_totals["detect"] += time.perf_counter() - stage_started
                 stage_started = time.perf_counter()
+                matching_images = (
+                    prepare_stereo_matching_images(left_rectified, right_rectified)
+                    if args.stereo_refine else None
+                )
                 matches = [
-                    triangulate(candidate, rectification, args)
+                    triangulate(candidate, rectification, args, matching_images)
                     for candidate in associate_hands(left_hands, right_hands)
                 ]
+                timing_totals["refine_triangulate"] += time.perf_counter() - stage_started
+                stage_started = time.perf_counter()
                 timestamp_s = 0.5e-6 * (packet["left_timestamp_us"] + packet["right_timestamp_us"])
                 tracker.assign(matches, timestamp_s)
                 for match in matches:
@@ -851,6 +890,8 @@ def main() -> int:
                             "filtered_valid": int(filtered_valid),
                             "predicted": int(match["predicted_3d"][joint]),
                             "depth_quality": f"{match['depth_quality'][joint]:.6f}",
+                            "refinement_used": int(match["refinement_used"][joint]),
+                            "refinement_quality": f"{match['refinement_quality'][joint]:.6f}",
                             "x_left_camera_m": f"{point[0]:.9f}" if filtered_valid else "nan",
                             "y_left_camera_m": f"{point[1]:.9f}" if filtered_valid else "nan",
                             "z_left_camera_m": f"{point[2]:.9f}" if filtered_valid else "nan",

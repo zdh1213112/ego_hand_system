@@ -27,6 +27,13 @@ from mediapipe_left_baseline import (
 )
 
 
+FINGERTIP_INDICES = np.asarray((4, 8, 12, 16, 20), dtype=np.int64)
+NON_FINGERTIP_INDICES = np.asarray(
+    [index for index in range(21) if index not in set(FINGERTIP_INDICES.tolist())],
+    dtype=np.int64,
+)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run MediaPipe on paired EGO stereo frames and triangulate 21 hand landmarks."
@@ -44,6 +51,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-depth-m", type=float, default=0.15)
     parser.add_argument("--max-depth-m", type=float, default=3.0)
     parser.add_argument("--max-reprojection-px", type=float, default=8.0)
+    refinement = parser.add_mutually_exclusive_group()
+    refinement.add_argument(
+        "--stereo-refine", action="store_true", dest="stereo_refine",
+        help="refine stereo landmarks with epipolar-constrained subpixel LK matching",
+    )
+    refinement.add_argument(
+        "--no-stereo-refine", action="store_false", dest="stereo_refine",
+        help="triangulate the two independent MediaPipe predictions without local refinement",
+    )
+    parser.set_defaults(stereo_refine=True)
+    parser.add_argument("--refine-window", type=int, default=17)
+    parser.add_argument("--refine-tip-window", type=int, default=25)
+    parser.add_argument("--refine-max-x-shift-px", type=float, default=18.0)
+    parser.add_argument("--refine-max-y-residual-px", type=float, default=3.0)
+    parser.add_argument("--refine-max-fb-error-px", type=float, default=2.0)
+    parser.add_argument("--refine-max-lk-error", type=float, default=32.0)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--max-pairs", type=int, default=0)
     parser.add_argument("--no-video", action="store_true")
@@ -143,9 +166,202 @@ def associate_hands(left_hands: list[dict], right_hands: list[dict]) -> list[dic
     return best[2]
 
 
-def triangulate(candidate: dict, rectification: dict, args: argparse.Namespace) -> dict:
-    left_points = candidate["left"]["pixels"]
-    right_points = candidate["right"]["pixels"]
+def prepare_stereo_matching_images(
+    left_rectified: np.ndarray, right_rectified: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create low-cost grayscale images used only for sparse stereo refinement."""
+    if left_rectified.ndim == 3:
+        left_gray = cv2.cvtColor(left_rectified, cv2.COLOR_BGR2GRAY)
+    else:
+        left_gray = left_rectified
+    if right_rectified.ndim == 3:
+        right_gray = cv2.cvtColor(right_rectified, cv2.COLOR_BGR2GRAY)
+    else:
+        right_gray = right_rectified
+    return np.ascontiguousarray(left_gray), np.ascontiguousarray(right_gray)
+
+
+def _refine_lk_group(
+    left_gray: np.ndarray,
+    right_gray: np.ndarray,
+    left_points: np.ndarray,
+    right_points: np.ndarray,
+    indices: np.ndarray,
+    window: int,
+    args: argparse.Namespace,
+) -> dict[str, np.ndarray]:
+    count = len(indices)
+    empty_float = np.full(count, np.nan, dtype=np.float64)
+    empty_bool = np.zeros(count, dtype=bool)
+    if count == 0:
+        return {
+            "points": np.empty((0, 2), dtype=np.float64), "accepted": empty_bool,
+            "quality": empty_float, "forward_error": empty_float,
+            "fb_error": empty_float, "vertical_residual": empty_float,
+            "x_shift": empty_float,
+        }
+
+    window = max(7, int(window) | 1)
+    start = np.asarray(left_points[indices], dtype=np.float32).reshape(-1, 1, 2)
+    initial = np.asarray(right_points[indices], dtype=np.float32).copy()
+    # Rectified correspondences should lie on the same row. MediaPipe supplies the
+    # semantic x initial value; the left landmark supplies the epipolar y initial value.
+    initial[:, 1] = left_points[indices, 1]
+    initial = initial.reshape(-1, 1, 2)
+    criteria = (
+        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+        24,
+        0.005,
+    )
+    refined, status, forward_error = cv2.calcOpticalFlowPyrLK(
+        left_gray, right_gray, start, initial,
+        winSize=(window, window), maxLevel=0, criteria=criteria,
+        flags=cv2.OPTFLOW_USE_INITIAL_FLOW, minEigThreshold=1e-4,
+    )
+    if refined is None or status is None or forward_error is None:
+        return {
+            "points": initial[:, 0].astype(np.float64), "accepted": empty_bool,
+            "quality": np.zeros(count, dtype=np.float64),
+            "forward_error": empty_float, "fb_error": empty_float,
+            "vertical_residual": empty_float, "x_shift": empty_float,
+        }
+
+    backward_initial = start.copy()
+    backward, backward_status, _ = cv2.calcOpticalFlowPyrLK(
+        right_gray, left_gray, refined, backward_initial,
+        winSize=(window, window), maxLevel=0, criteria=criteria,
+        flags=cv2.OPTFLOW_USE_INITIAL_FLOW, minEigThreshold=1e-4,
+    )
+    refined = refined[:, 0].astype(np.float64)
+    status = status[:, 0].astype(bool)
+    # OpenCV may leave NaN/sentinel values for points whose LK status is false.
+    # Keep the native floating dtype here; the status/finite mask rejects them below.
+    forward_error = forward_error[:, 0].copy()
+    forward_error = np.where(
+        np.isfinite(forward_error),
+        np.clip(forward_error, 0.0, 1.0e4),
+        np.inf,
+    ).astype(np.float64, copy=False)
+    if backward is None or backward_status is None:
+        backward = np.full_like(refined, np.nan)
+        backward_status = np.zeros(count, dtype=bool)
+    else:
+        backward = backward[:, 0].astype(np.float64)
+        backward_status = backward_status[:, 0].astype(bool)
+
+    fb_error = np.linalg.norm(backward - left_points[indices], axis=1)
+    vertical_residual = np.abs(refined[:, 1] - left_points[indices, 1])
+    x_shift = np.abs(refined[:, 0] - right_points[indices, 0])
+    disparity = left_points[indices, 0] - refined[:, 0]
+    finite = (
+        np.all(np.isfinite(refined), axis=1)
+        & np.isfinite(forward_error)
+        & np.isfinite(fb_error)
+    )
+    accepted = (
+        status & backward_status & finite
+        & (forward_error <= float(getattr(args, "refine_max_lk_error", 32.0)))
+        & (fb_error <= float(getattr(args, "refine_max_fb_error_px", 2.0)))
+        & (vertical_residual <= float(getattr(args, "refine_max_y_residual_px", 3.0)))
+        & (x_shift <= float(getattr(args, "refine_max_x_shift_px", 18.0)))
+        & (disparity > 2.0) & (disparity < 300.0)
+    )
+
+    photometric = np.exp(-np.square(np.minimum(forward_error, 240.0) / 24.0))
+    forward_backward = np.exp(-np.square(fb_error / 1.25))
+    epipolar = np.exp(-np.square(vertical_residual / 1.75))
+    quality = np.cbrt(np.clip(photometric * forward_backward * epipolar, 0.0, 1.0))
+    quality[~accepted] = 0.0
+    return {
+        "points": refined,
+        "accepted": accepted,
+        "quality": quality,
+        "forward_error": forward_error,
+        "fb_error": fb_error,
+        "vertical_residual": vertical_residual,
+        "x_shift": x_shift,
+    }
+
+
+def refine_stereo_correspondences(
+    left_points: np.ndarray,
+    right_points: np.ndarray,
+    matching_images: tuple[np.ndarray, np.ndarray] | None,
+    args: argparse.Namespace,
+) -> dict[str, np.ndarray]:
+    """Refine right-view pixels and symmetrically enforce the rectified epipolar row."""
+    raw_left = np.asarray(left_points, dtype=np.float64)
+    raw_right = np.asarray(right_points, dtype=np.float64)
+    refined_left = raw_left.copy()
+    refined_right = raw_right.copy()
+    attempted = np.zeros(21, dtype=bool)
+    accepted = np.zeros(21, dtype=bool)
+    quality = np.zeros(21, dtype=np.float64)
+    forward_error = np.full(21, np.nan, dtype=np.float64)
+    fb_error = np.full(21, np.nan, dtype=np.float64)
+    vertical_residual = np.full(21, np.nan, dtype=np.float64)
+    x_shift = np.full(21, np.nan, dtype=np.float64)
+
+    enabled = bool(getattr(args, "stereo_refine", True))
+    if matching_images is None or not enabled:
+        return {
+            "left_points": refined_left, "right_points": refined_right,
+            "attempted": attempted, "accepted": accepted, "quality": quality,
+            "forward_error": forward_error, "fb_error": fb_error,
+            "vertical_residual": vertical_residual, "x_shift": x_shift,
+        }
+
+    left_gray, right_gray = matching_images
+    groups = (
+        (NON_FINGERTIP_INDICES, int(getattr(args, "refine_window", 17))),
+        (FINGERTIP_INDICES, int(getattr(args, "refine_tip_window", 25))),
+    )
+    for indices, window in groups:
+        result = _refine_lk_group(
+            left_gray, right_gray, raw_left, raw_right, indices, window, args
+        )
+        attempted[indices] = True
+        accepted[indices] = result["accepted"]
+        quality[indices] = result["quality"]
+        forward_error[indices] = result["forward_error"]
+        fb_error[indices] = result["fb_error"]
+        vertical_residual[indices] = result["vertical_residual"]
+        x_shift[indices] = result["x_shift"]
+        for local_index, landmark_index in enumerate(indices):
+            if not result["accepted"][local_index]:
+                continue
+            # The symmetric row correction is the least-squares adjustment that
+            # enforces the horizontal epipolar constraint without moving x in the
+            # left reference view.
+            shared_y = 0.5 * (
+                raw_left[landmark_index, 1] + result["points"][local_index, 1]
+            )
+            refined_left[landmark_index, 1] = shared_y
+            refined_right[landmark_index] = (
+                result["points"][local_index, 0], shared_y
+            )
+
+    return {
+        "left_points": refined_left, "right_points": refined_right,
+        "attempted": attempted, "accepted": accepted, "quality": quality,
+        "forward_error": forward_error, "fb_error": fb_error,
+        "vertical_residual": vertical_residual, "x_shift": x_shift,
+    }
+
+
+def triangulate(
+    candidate: dict,
+    rectification: dict,
+    args: argparse.Namespace,
+    matching_images: tuple[np.ndarray, np.ndarray] | None = None,
+) -> dict:
+    raw_left_points = np.asarray(candidate["left"]["pixels"], dtype=np.float64)
+    raw_right_points = np.asarray(candidate["right"]["pixels"], dtype=np.float64)
+    refinement = refine_stereo_correspondences(
+        raw_left_points, raw_right_points, matching_images, args
+    )
+    left_points = refinement["left_points"]
+    right_points = refinement["right_points"]
     homogeneous = cv2.triangulatePoints(
         rectification["p1"], rectification["p2"], left_points.T, right_points.T
     )
@@ -164,6 +380,7 @@ def triangulate(candidate: dict, rectification: dict, args: argparse.Namespace) 
     )
     disparity = left_points[:, 0] - right_points[:, 0]
     epipolar = np.abs(left_points[:, 1] - right_points[:, 1])
+    raw_epipolar = np.abs(raw_left_points[:, 1] - raw_right_points[:, 1])
     finite = np.all(np.isfinite(points_rectified), axis=1) & np.isfinite(reprojection)
     valid = (
         finite
@@ -181,12 +398,42 @@ def triangulate(candidate: dict, rectification: dict, args: argparse.Namespace) 
         center = np.median(points_left[valid], axis=0)
     else:
         center = np.array([np.nan, np.nan, np.nan])
+    left_2d_quality = np.full(21, float(candidate["left"]["score"]), dtype=np.float64)
+    right_2d_quality = np.full(21, float(candidate["right"]["score"]), dtype=np.float64)
+    attempted = refinement["attempted"]
+    used = refinement["accepted"]
+    refined_quality = refinement["quality"]
+    if np.any(attempted):
+        left_2d_quality[attempted & used] *= 0.75 + 0.25 * refined_quality[attempted & used]
+        right_2d_quality[attempted & used] *= 0.35 + 0.65 * refined_quality[attempted & used]
+        left_2d_quality[attempted & ~used] *= 0.60
+        right_2d_quality[attempted & ~used] *= 0.25
+        failed_tips = attempted & ~used
+        failed_tips[NON_FINGERTIP_INDICES] = False
+        left_2d_quality[failed_tips] *= 0.75
+        right_2d_quality[failed_tips] *= 0.60
+    left_2d_quality *= np.exp(-np.square(raw_epipolar / 18.0))
+    right_2d_quality *= np.exp(-np.square(raw_epipolar / 14.0))
     return {
         **candidate,
+        "left_points": left_points,
+        "right_points": right_points,
+        "raw_left_points": raw_left_points,
+        "raw_right_points": raw_right_points,
+        "refinement_attempted": refinement["attempted"],
+        "refinement_used": refinement["accepted"],
+        "refinement_quality": refinement["quality"],
+        "refinement_lk_error": refinement["forward_error"],
+        "refinement_fb_error": refinement["fb_error"],
+        "refinement_y_residual": refinement["vertical_residual"],
+        "refinement_x_shift": refinement["x_shift"],
+        "left_2d_quality": np.clip(left_2d_quality, 0.0, 1.0),
+        "right_2d_quality": np.clip(right_2d_quality, 0.0, 1.0),
         "points_rectified": points_rectified,
         "points_left": points_left,
         "disparity": disparity,
         "epipolar": epipolar,
+        "raw_epipolar": raw_epipolar,
         "reprojection": reprojection,
         "valid": valid,
         "center": center,
@@ -326,13 +573,19 @@ def main() -> int:
     frame_fields = [
         "pair_index", "left_index", "right_index", "left_timestamp_us", "right_timestamp_us",
         "timestamp_delta_us", "left_hands", "right_hands", "matched_hands", "valid_3d_points",
+        "refined_points", "median_refinement_quality",
         "median_epipolar_px", "median_reprojection_px",
     ]
     landmark_fields = [
         "pair_index", "left_index", "right_index", "track_id", "match_index",
         "left_hand_index", "right_hand_index", "left_handedness", "right_handedness",
         "left_handedness_score", "right_handedness_score", "landmark_index",
+        "raw_left_x_rectified_px", "raw_left_y_rectified_px",
+        "raw_right_x_rectified_px", "raw_right_y_rectified_px",
         "left_x_rectified_px", "left_y_rectified_px", "right_x_rectified_px", "right_y_rectified_px",
+        "refinement_attempted", "refinement_used", "refinement_quality",
+        "refinement_lk_error", "refinement_fb_error_px", "refinement_y_residual_px",
+        "refinement_x_shift_px",
         "disparity_px", "epipolar_error_px", "valid_3d", "reprojection_error_px",
         "x_rectified_m", "y_rectified_m", "z_rectified_m", "x_left_camera_m", "y_left_camera_m", "z_left_camera_m",
     ]
@@ -348,6 +601,9 @@ def main() -> int:
     all_valid_epipolar = []
     all_valid_reprojection = []
     all_valid_depth = []
+    all_refinement_quality = []
+    refinement_attempted_total = 0
+    refinement_used_total = 0
     start_time = time.perf_counter()
     first_timestamp_us = min(left_timestamps[0], right_timestamps[0])
     last_left_ms = -1
@@ -380,10 +636,21 @@ def main() -> int:
             last_right_ms = right_ms
             left_hands = detect(left_landmarker, left_rectified, left_ms, image_size)
             right_hands = detect(right_landmarker, right_rectified, right_ms, image_size)
-            matches = [triangulate(candidate, rectification, args) for candidate in associate_hands(left_hands, right_hands)]
+            matching_images = (
+                prepare_stereo_matching_images(left_rectified, right_rectified)
+                if args.stereo_refine else None
+            )
+            matches = [
+                triangulate(candidate, rectification, args, matching_images)
+                for candidate in associate_hands(left_hands, right_hands)
+            ]
             tracker.assign(matches)
 
             frame_valid = int(sum(np.count_nonzero(match["valid"]) for match in matches))
+            frame_refined = int(sum(np.count_nonzero(match["refinement_used"]) for match in matches))
+            frame_refinement_quality = np.concatenate([
+                match["refinement_quality"][match["refinement_used"]] for match in matches
+            ]) if matches and frame_refined else np.array([])
             valid_epipolar = np.concatenate([match["epipolar"][match["valid"]] for match in matches]) if matches else np.array([])
             valid_reprojection = np.concatenate([match["reprojection"][match["valid"]] for match in matches]) if matches else np.array([])
             frame_writer.writerow({
@@ -397,6 +664,11 @@ def main() -> int:
                 "right_hands": len(right_hands),
                 "matched_hands": len(matches),
                 "valid_3d_points": frame_valid,
+                "refined_points": frame_refined,
+                "median_refinement_quality": (
+                    f"{np.median(frame_refinement_quality):.6f}"
+                    if len(frame_refinement_quality) else "nan"
+                ),
                 "median_epipolar_px": f"{np.median(valid_epipolar):.6f}" if len(valid_epipolar) else "nan",
                 "median_reprojection_px": f"{np.median(valid_reprojection):.6f}" if len(valid_reprojection) else "nan",
             })
@@ -418,10 +690,33 @@ def main() -> int:
                         "left_handedness_score": f"{match['left']['score']:.8f}",
                         "right_handedness_score": f"{match['right']['score']:.8f}",
                         "landmark_index": landmark_index,
-                        "left_x_rectified_px": f"{match['left']['pixels'][landmark_index, 0]:.6f}",
-                        "left_y_rectified_px": f"{match['left']['pixels'][landmark_index, 1]:.6f}",
-                        "right_x_rectified_px": f"{match['right']['pixels'][landmark_index, 0]:.6f}",
-                        "right_y_rectified_px": f"{match['right']['pixels'][landmark_index, 1]:.6f}",
+                        "raw_left_x_rectified_px": f"{match['raw_left_points'][landmark_index, 0]:.6f}",
+                        "raw_left_y_rectified_px": f"{match['raw_left_points'][landmark_index, 1]:.6f}",
+                        "raw_right_x_rectified_px": f"{match['raw_right_points'][landmark_index, 0]:.6f}",
+                        "raw_right_y_rectified_px": f"{match['raw_right_points'][landmark_index, 1]:.6f}",
+                        "left_x_rectified_px": f"{match['left_points'][landmark_index, 0]:.6f}",
+                        "left_y_rectified_px": f"{match['left_points'][landmark_index, 1]:.6f}",
+                        "right_x_rectified_px": f"{match['right_points'][landmark_index, 0]:.6f}",
+                        "right_y_rectified_px": f"{match['right_points'][landmark_index, 1]:.6f}",
+                        "refinement_attempted": int(match["refinement_attempted"][landmark_index]),
+                        "refinement_used": int(match["refinement_used"][landmark_index]),
+                        "refinement_quality": f"{match['refinement_quality'][landmark_index]:.6f}",
+                        "refinement_lk_error": (
+                            f"{match['refinement_lk_error'][landmark_index]:.6f}"
+                            if np.isfinite(match["refinement_lk_error"][landmark_index]) else "nan"
+                        ),
+                        "refinement_fb_error_px": (
+                            f"{match['refinement_fb_error'][landmark_index]:.6f}"
+                            if np.isfinite(match["refinement_fb_error"][landmark_index]) else "nan"
+                        ),
+                        "refinement_y_residual_px": (
+                            f"{match['refinement_y_residual'][landmark_index]:.6f}"
+                            if np.isfinite(match["refinement_y_residual"][landmark_index]) else "nan"
+                        ),
+                        "refinement_x_shift_px": (
+                            f"{match['refinement_x_shift'][landmark_index]:.6f}"
+                            if np.isfinite(match["refinement_x_shift"][landmark_index]) else "nan"
+                        ),
                         "disparity_px": f"{match['disparity'][landmark_index]:.6f}",
                         "epipolar_error_px": f"{match['epipolar'][landmark_index]:.6f}",
                         "valid_3d": int(valid),
@@ -443,6 +738,11 @@ def main() -> int:
             all_valid_reprojection.extend(valid_reprojection.tolist())
             for match in matches:
                 all_valid_depth.extend(match["points_left"][match["valid"], 2].tolist())
+                attempted = match["refinement_attempted"]
+                used = match["refinement_used"]
+                refinement_attempted_total += int(np.count_nonzero(attempted))
+                refinement_used_total += int(np.count_nonzero(used))
+                all_refinement_quality.extend(match["refinement_quality"][used].tolist())
 
             if writer is not None:
                 annotated_left = left_rectified.copy()
@@ -497,6 +797,13 @@ def main() -> int:
         "track_count": len(observed_track_ids),
         "valid_3d_points": valid_points_total,
         "valid_3d_rate_of_matched": valid_points_total / (matched_hand_instances * 21) if matched_hand_instances else 0.0,
+        "refinement_attempted_points": refinement_attempted_total,
+        "refinement_used_points": refinement_used_total,
+        "refinement_acceptance_rate": (
+            refinement_used_total / refinement_attempted_total
+            if refinement_attempted_total else 0.0
+        ),
+        "refinement_quality_median": percentile(all_refinement_quality, 50),
         "epipolar_abs_px_median": percentile(all_valid_epipolar, 50),
         "epipolar_abs_px_p95": percentile(all_valid_epipolar, 95),
         "reprojection_px_median": percentile(all_valid_reprojection, 50),
@@ -519,6 +826,13 @@ def main() -> int:
             "min_depth_m": args.min_depth_m,
             "max_depth_m": args.max_depth_m,
             "max_reprojection_px": args.max_reprojection_px,
+            "stereo_refine": args.stereo_refine,
+            "refine_window": args.refine_window,
+            "refine_tip_window": args.refine_tip_window,
+            "refine_max_x_shift_px": args.refine_max_x_shift_px,
+            "refine_max_y_residual_px": args.refine_max_y_residual_px,
+            "refine_max_fb_error_px": args.refine_max_fb_error_px,
+            "refine_max_lk_error": args.refine_max_lk_error,
         },
         "coordinate_note": "x_left_camera/y_left_camera/z_left_camera are metric coordinates in the original left optical frame",
     }
@@ -529,6 +843,11 @@ def main() -> int:
     print(f"Pairs with stereo hand matches: {pairs_with_matches} ({summary['stereo_match_pair_rate']:.1%})")
     print(f"Matched hand instances: {matched_hand_instances}")
     print(f"Valid 3D landmarks: {valid_points_total} ({summary['valid_3d_rate_of_matched']:.1%})")
+    print(
+        "Stereo refinement: "
+        f"{refinement_used_total}/{refinement_attempted_total} "
+        f"({summary['refinement_acceptance_rate']:.1%})"
+    )
     print(f"Epipolar median/P95: {summary['epipolar_abs_px_median']:.3f}/{summary['epipolar_abs_px_p95']:.3f} px")
     print(f"Reprojection median/P95: {summary['reprojection_px_median']:.3f}/{summary['reprojection_px_p95']:.3f} px")
     print(f"Processing speed: {summary['processing_fps']:.2f} stereo fps")

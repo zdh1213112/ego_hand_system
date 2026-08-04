@@ -9,6 +9,7 @@ EGO COLOR_LEFT / COLOR_RIGHT MJPG
   -> KB 鱼眼双目校正
   -> 左右 MediaPipe 21点并行推理
   -> 极线约束的跨相机关联
+  -> 校正图稀疏LK前后向匹配与指尖亚像素细化
   -> 双目三角化（左相机光学坐标系，米）
   -> 深度/重投影/极线质量门控
   -> 2D运动 + 3D位置/深度的轨迹ID关联
@@ -122,6 +123,47 @@ scripts/run_ego_live.sh --max-frames 60 --no-display --record
 `depth_quality`。质量差或深度突跳的观测不会直接覆盖轨迹，而是短时使用
 速度预测，灰色骨架表示预测点。
 
+### 稀疏极线亚像素细化
+
+左右 MediaPipe 仍负责提供21个关节的语义初值。程序在校正灰度图上使用稀疏
+Lucas–Kanade 前后向匹配细化右目位置，并以左目 y 作为水平极线初值；指尖
+使用更大的局部窗口。修正只有同时满足以下条件才会被采用：
+
+- LK光度误差通过门限；
+- 左到右、右到左的回查误差通过门限；
+- 相对水平极线的垂直残差通过门限；
+- 相对 MediaPipe 右目初值的水平移动没有超过门限；
+- 修正后视差仍为合理的正值。
+
+未通过的点保留原始 MediaPipe 像素，不会被强制移动；但其深度质量和右目
+MANO 2D权重会降低，指尖失败时惩罚更强。实时CSV新增
+`refinement_used/refinement_quality`，退出时阶段耗时新增
+`refine_triangulate`。
+
+默认参数适合当前1600×1300校正图：
+
+```bash
+scripts/run_ego_live.sh \
+  --refine-window 17 \
+  --refine-tip-window 25 \
+  --refine-max-x-shift-px 18 \
+  --refine-max-y-residual-px 3 \
+  --refine-max-fb-error-px 2
+```
+
+需要对照旧行为时可禁用：
+
+```bash
+scripts/run_ego_live.sh --no-stereo-refine
+```
+
+在参考录像完整398对回归中，跨相机匹配保持395对、轨迹保持2条；修正接受率
+为22.9%，有效3D点由11,018增至11,126（75.1%增至75.8%），五个指尖平均
+有效率由68.8%增至69.6%。极线误差中位数由2.828 px降至1.752 px，重投影
+误差中位数由1.414 px降至0.876 px；处理速度由15.11变为15.06双目对/秒。
+该结果说明细化生效且没有牺牲轨迹连续性或实时吞吐，但仍需真机快速运动、
+互相遮挡和边缘视场测试。
+
 ## 实时 MANO 与21自由度
 
 每只手首次出现时用双目3D掌部点做刚体初始化，随后固定该手的10维 MANO
@@ -161,6 +203,15 @@ scripts/run_ego_live.sh --mano-iterations 5 --mano-initial-iterations 30
 `--mano-iterations 2` 不再表示质量差的帧永远只计算两次。后台采集线程会丢弃
 已经过时的帧，而不是让它们在管道中排队，因此界面中的 `drop` 增长是主动的
 低延迟策略，不是双目同步失败。
+
+如果新细化在低纹理或运动模糊场景带来额外开销，可先比较：
+
+```bash
+scripts/run_ego_live.sh --no-stereo-refine
+```
+
+退出时检查 `Stage averages` 中的 `detect`、`refine_triangulate` 和 `mano`，不要
+仅根据窗口观感判断瓶颈。
 
 默认 `--capture-queue 1` 优先降低延迟；USB2成批到帧时若更看重连续性，可试：
 

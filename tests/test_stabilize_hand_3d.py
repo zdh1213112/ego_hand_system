@@ -18,6 +18,24 @@ SPEC.loader.exec_module(MODULE)
 
 
 class StabilizeHand3DTests(unittest.TestCase):
+    def test_stereo_confidence_uses_disparity_and_refinement_quality(self):
+        row = {
+            "landmark_index": "8",
+            "epipolar_error_px": "0.5",
+            "reprojection_error_px": "0.4",
+            "disparity_px": "40.0",
+            "left_handedness_score": "0.95",
+            "right_handedness_score": "0.95",
+            "refinement_attempted": "1",
+            "refinement_used": "1",
+            "refinement_quality": "0.9",
+        }
+        good = MODULE.confidence_from_row(row)
+        failed = dict(row, refinement_used="0", refinement_quality="0.0")
+        low_disparity = dict(row, disparity_px="4.0")
+        self.assertLess(MODULE.confidence_from_row(failed), good * 0.5)
+        self.assertLess(MODULE.confidence_from_row(low_disparity), good * 0.2)
+
     def test_only_short_internal_gaps_are_interpolated(self):
         points = np.full((1, 9, 21, 3), np.nan)
         valid = np.zeros((1, 9, 21), dtype=bool)

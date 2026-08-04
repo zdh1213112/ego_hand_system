@@ -71,9 +71,20 @@ def parse_args() -> argparse.Namespace:
 def confidence_from_row(row: dict) -> float:
     epipolar = float(row["epipolar_error_px"])
     reprojection = float(row["reprojection_error_px"])
+    disparity = float(row.get("disparity_px", 24.0))
     handedness = min(float(row["left_handedness_score"]), float(row["right_handedness_score"]))
     geometry = np.exp(-0.5 * (epipolar / 8.0) ** 2) * np.exp(-0.5 * (reprojection / 4.0) ** 2)
-    return float(np.clip(geometry * (0.5 + 0.5 * handedness), 0.02, 1.0))
+    disparity_quality = float(np.clip((disparity - 2.0) / 24.0, 0.10, 1.0))
+    refinement_factor = 1.0
+    if row.get("refinement_attempted", "0") == "1":
+        if row.get("refinement_used", "0") == "1":
+            refinement_factor = 0.55 + 0.45 * float(row.get("refinement_quality", 0.0))
+        else:
+            refinement_factor = 0.38 if int(row["landmark_index"]) in (4, 8, 12, 16, 20) else 0.50
+    return float(np.clip(
+        geometry * disparity_quality * (0.5 + 0.5 * handedness) * refinement_factor,
+        0.02, 1.0,
+    ))
 
 
 def load_stereo_csv(path: Path):
@@ -86,7 +97,7 @@ def load_stereo_csv(path: Path):
         "pair_index", "track_id", "landmark_index", "valid_3d",
         "x_left_camera_m", "y_left_camera_m", "z_left_camera_m",
         "x_rectified_m", "y_rectified_m", "z_rectified_m",
-        "epipolar_error_px", "reprojection_error_px",
+        "disparity_px", "epipolar_error_px", "reprojection_error_px",
     }
     missing = required - set(rows[0])
     if missing:

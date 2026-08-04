@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -13,6 +14,7 @@ SPEC = importlib.util.spec_from_file_location("ego_live_stereo", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+import mediapipe_stereo_triangulate as STEREO
 
 
 def match(px, xyz, label="Left"):
@@ -25,6 +27,73 @@ def match(px, xyz, label="Left"):
 
 
 class DepthAwareTrackTests(unittest.TestCase):
+    @staticmethod
+    def refinement_args():
+        return SimpleNamespace(
+            stereo_refine=True,
+            refine_window=17,
+            refine_tip_window=25,
+            refine_max_x_shift_px=18.0,
+            refine_max_y_residual_px=3.0,
+            refine_max_fb_error_px=2.0,
+            refine_max_lk_error=32.0,
+        )
+
+    def test_sparse_stereo_refinement_recovers_subpixel_correspondence(self):
+        rng = np.random.default_rng(7)
+        left = rng.integers(0, 256, size=(140, 220), dtype=np.uint8)
+        left = MODULE.cv2.GaussianBlur(left, (5, 5), 0.8)
+        disparity = 14
+        right = np.zeros_like(left)
+        right[:, :-disparity] = left[:, disparity:]
+        left_points = np.asarray([
+            (65 + (joint % 5) * 26, 40 + (joint // 5) * 20)
+            for joint in range(21)
+        ], dtype=np.float64)
+        right_points = left_points.copy()
+        right_points[:, 0] -= disparity - 1.7
+        right_points[:, 1] += 1.2
+        result = STEREO.refine_stereo_correspondences(
+            left_points, right_points, (left, right), self.refinement_args()
+        )
+        self.assertGreaterEqual(np.count_nonzero(result["accepted"]), 18)
+        used = result["accepted"]
+        expected_x = left_points[:, 0] - disparity
+        self.assertLess(np.median(np.abs(result["right_points"][used, 0] - expected_x[used])), 0.45)
+        np.testing.assert_allclose(
+            result["left_points"][used, 1], result["right_points"][used, 1], atol=1e-6
+        )
+
+    def test_sparse_stereo_refinement_rejects_textureless_regions(self):
+        image = np.full((120, 180), 127, dtype=np.uint8)
+        left_points = np.tile((90.0, 60.0), (21, 1))
+        right_points = np.tile((75.0, 61.0), (21, 1))
+        result = STEREO.refine_stereo_correspondences(
+            left_points, right_points, (image, image), self.refinement_args()
+        )
+        self.assertEqual(np.count_nonzero(result["accepted"]), 0)
+
+    def test_failed_tip_refinement_reduces_depth_quality(self):
+        base = {
+            **match((100, 100), (0.0, 0.0, 0.25)),
+            "valid": np.ones(21, dtype=bool),
+            "epipolar": np.zeros(21),
+            "reprojection": np.zeros(21),
+            "disparity": np.full(21, 60.0),
+            "refinement_attempted": np.ones(21, dtype=bool),
+            "refinement_used": np.ones(21, dtype=bool),
+            "refinement_quality": np.ones(21),
+        }
+        good = MODULE.OnlineStereoFilter.quality(base)
+        failed = dict(base)
+        failed["refinement_used"] = base["refinement_used"].copy()
+        failed["refinement_quality"] = base["refinement_quality"].copy()
+        failed["refinement_used"][8] = False
+        failed["refinement_quality"][8] = 0.0
+        degraded = MODULE.OnlineStereoFilter.quality(failed)
+        self.assertLess(degraded[8], good[8] * 0.5)
+        self.assertAlmostEqual(degraded[9], good[9])
+
     def test_latest_packet_reader_discards_older_packets(self):
         class FakeBridge:
             def __init__(self):
