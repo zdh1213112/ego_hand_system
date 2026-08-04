@@ -12,6 +12,7 @@ EGO 双目三维手部重建项目。目前提供：
 - 左右双路 MediaPipe、跨相机手部关联、时序轨迹和21点双目三角化。
 - MANO 前处理：离群管理、短缺口补全、时序滤波、骨长约束和已校验 NPZ 输入契约。
 - MANO 网格原始鱼眼画面叠加、双手实时角度仪表板和角度 CSV 导出。
+- EGO `2bc5:1201` 真机双目实时流、设备标定读取、在线三角化和深度感知跟踪。
 
 > Git 跟踪的仓库只包含源码与测试。本地工作包可以同时放置录像、运行输出和模型，
 > 但 `.gitignore` 会阻止它们被误提交。请参阅 [`models/README.md`](models/README.md)。
@@ -37,6 +38,15 @@ third_party/  外部 MANO 源码，被 Git 忽略
 conda env create -f environment.yml
 conda activate ego-hand
 unset PYTHONPATH
+```
+
+RTX 50 系列实时 MANO 使用 CUDA 12.8 PyTorch。本机已验证组合为
+`torch 2.11.0+cu128`；环境还需要 `typeguard==4.4.4`。可在已创建环境中执行：
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
+  torch==2.11.0+cu128
+python -m pip install typeguard==4.4.4
 ```
 
 ## 构建
@@ -65,6 +75,41 @@ ctest --test-dir build --output-on-failure
 output/session_check/stereo_raw.jpg
 output/session_check/stereo_rectified.jpg
 ```
+
+## EGO 真机实时双目 MANO 跟踪
+
+本地工作包需包含 `third_party/orbbec_sdk`。一键构建并启动：
+
+```bash
+cd /home/zdh/ego_hand_system
+scripts/run_ego_live.sh
+```
+
+启动日志应优先显示 `connection=USB3.x`。如果显示 `USB2.0`，双路
+1600×1300 MJPEG通常只能得到约8–12个完整帧对/秒，应更换直连USB3端口、
+线缆并避开USB2集线器；这属于输入带宽限制，不是CUDA是否启用的问题。
+
+保存实时标注视频：
+
+```bash
+scripts/run_ego_live.sh --record
+```
+
+启动脚本默认显示原始左鱼眼画面上的双手 MANO 网格、每手 21-DOF 面板和
+独立3D预览。仅查看双目21点诊断画面时使用：
+
+```bash
+scripts/run_ego_live.sh --no-mano
+```
+
+实时程序从 EGO Flash 读取当前设备的 KB 双目标定，按 SDK `FrameSet` 和设备
+时间戳获得左右帧，输出左相机光学坐标系下的米制3D。轨迹关联联合使用左图
+速度预测、三维手掌中心、Z深度和 handedness 软约束；关节点根据极线误差、
+重投影误差和视差做质量加权滤波。详见
+[`docs/EGO_REALTIME.md`](docs/EGO_REALTIME.md)。关于“界面为什么像单目”、
+MediaPipe world landmarks 与真实相机深度的区别、鱼眼去畸变/双目校正要求及
+完整坐标流程，参阅
+[`docs/STEREO_DEPTH_AND_DISTORTION_PIPELINE.md`](docs/STEREO_DEPTH_AND_DISTORTION_PIPELINE.md)。
 
 ## 标定板极线误差验证
 

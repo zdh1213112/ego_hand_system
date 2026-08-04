@@ -10,9 +10,11 @@ dependencies:
       - numpy==2.2.6
       - PyYAML==6.0.3
       - python-dateutil==2.9.0.post0
-      - torch @ https://download.pytorch.org/whl/cpu/torch-2.7.1%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.11.0+cu128
       - scipy==1.15.3
       - trimesh==4.7.4
       - chumpy==0.70
+      - typeguard==4.4.4
 variables:
   PYTHONNOUSERSITE: "1"

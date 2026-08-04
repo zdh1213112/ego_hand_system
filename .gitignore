@@ -1,6 +1,8 @@
 # Build and test artifacts
 /build/
 /build-*/
+/Log/
+**/Log/
 /output/*
 !/output/.gitkeep
 .pytest_cache/
