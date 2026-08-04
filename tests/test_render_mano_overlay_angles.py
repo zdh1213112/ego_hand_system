@@ -82,6 +82,57 @@ class RenderManoOverlayAnglesTests(unittest.TestCase):
         self.assertEqual(sum("bend" in key for key in MODULE.ANGLE_KEYS), 15)
         self.assertEqual(sum("spread" in key for key in MODULE.ANGLE_KEYS), 5)
 
+    def test_kinematic_contract_is_five_plus_four_times_four(self):
+        self.assertEqual(len(MODULE.KINEMATIC_KEYS), 21)
+        self.assertEqual(len(MODULE.KINEMATIC_LAYOUT["thumb"]), 5)
+        for finger in ("index", "middle", "ring", "pinky"):
+            self.assertEqual(len(MODULE.KINEMATIC_LAYOUT[finger]), 4)
+
+    def test_mano_pose_projects_to_flexion_and_abduction_axes(self):
+        joints = np.zeros((21, 3), dtype=np.float64)
+        joints[0] = (0.0, 0.0, 0.0)
+        chains = {
+            "thumb": ((1, (-0.025, 0.015, 0.0)), (2, (-0.045, 0.035, 0.0)),
+                      (3, (-0.055, 0.055, 0.0)), (4, (-0.060, 0.072, 0.0))),
+            "index": ((5, (0.030, 0.040, 0.0)), (6, (0.030, 0.070, 0.0)),
+                      (7, (0.030, 0.095, 0.0)), (8, (0.030, 0.115, 0.0))),
+            "middle": ((9, (0.008, 0.045, 0.0)), (10, (0.008, 0.080, 0.0)),
+                       (11, (0.008, 0.108, 0.0)), (12, (0.008, 0.130, 0.0))),
+            "ring": ((13, (-0.012, 0.042, 0.0)), (14, (-0.012, 0.074, 0.0)),
+                     (15, (-0.012, 0.100, 0.0)), (16, (-0.012, 0.120, 0.0))),
+            "pinky": ((17, (-0.032, 0.032, 0.0)), (18, (-0.032, 0.058, 0.0)),
+                      (19, (-0.032, 0.080, 0.0)), (20, (-0.032, 0.098, 0.0))),
+        }
+        for entries in chains.values():
+            for index, point in entries:
+                joints[index] = point
+        axes = MODULE.build_kinematic_axes(joints)
+        pose = np.zeros((1, 15, 3), dtype=np.float64)
+        pose[0, 0] = 0.5 * axes["index_mcp_flex"] + 0.2 * axes["palm_normal"]
+        values = MODULE.extract_kinematic_sequence(pose, axes, "Right")
+        by_name = dict(zip(MODULE.KINEMATIC_KEYS, values[0]))
+        self.assertAlmostEqual(by_name["index_mcp_flex_rad"], 0.5, places=7)
+        self.assertAlmostEqual(by_name["index_mcp_abduction_rad"], 0.2, places=7)
+
+    def test_left_hand_flexion_sign_is_mirrored(self):
+        axes = {
+            "palm_normal": np.asarray([0.0, 0.0, 1.0]),
+            "thumb_cmc_flex": np.asarray([1.0, 0.0, 0.0]),
+            "thumb_cmc_opposition": np.asarray([0.0, 1.0, 0.0]),
+            "thumb_mcp_flex": np.asarray([1.0, 0.0, 0.0]),
+            "thumb_ip_flex": np.asarray([1.0, 0.0, 0.0]),
+        }
+        for finger in ("index", "middle", "ring", "pinky"):
+            for joint in ("mcp", "pip", "dip"):
+                axes[f"{finger}_{joint}_flex"] = np.asarray([1.0, 0.0, 0.0])
+        pose = np.zeros((1, 15, 3), dtype=np.float64)
+        pose[0, 0, 0] = 0.4
+        right = MODULE.extract_kinematic_sequence(pose, axes, "Right")[0]
+        left = MODULE.extract_kinematic_sequence(pose, axes, "Left")[0]
+        index = MODULE.KINEMATIC_KEYS.index("index_mcp_flex_rad")
+        self.assertAlmostEqual(right[index], 0.4)
+        self.assertAlmostEqual(left[index], -0.4)
+
 
 if __name__ == "__main__":
     unittest.main()

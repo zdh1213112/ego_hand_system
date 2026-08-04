@@ -188,25 +188,32 @@ python scripts/fit_mano_sequence.py \
 xdg-open output/mano_fit_refined/mano_fit_both_hands.mp4
 ```
 
-### 相机画面网格叠加与关节角
+### 21自由度网格叠加与双手3D预览
 
-将精修后的 MANO 778 顶点按 EGO KB 鱼眼内参直接投影回原始左相机画面，并在右侧显示每只手的几何弯曲角与张开角：
+将精修后的 MANO 778 顶点按 EGO KB 鱼眼内参直接投影回原始左相机画面。右侧同时显示左右手21自由度弧度条和独立 MANO 3D 预览：
 
 ```bash
 python scripts/render_mano_overlay_angles.py \
   --session "/path/to/Orbbec_Ego_<serial>_<time>" \
   --mano-fit output/mano_fit_refined \
+  --mano-source third_party/MANO \
+  --model-dir models/mano \
   --stereo-frames output/mediapipe_stereo/stereo_frames.csv \
-  --output output/mano_overlay_angles
+  --output output/mano_overlay_21dof
 ```
 
 直接查看正式结果：
 
 ```bash
-xdg-open output/mano_overlay_angles/mano_overlay_angles.mp4
+xdg-open output/mano_overlay_21dof/mano_overlay_21dof.mp4
 ```
 
-`mano_joint_angles.csv` 同时保存未滤波的 `*_raw` 值和仪表板使用的 5 帧局部中值。弯曲角定义为相邻两段三维骨方向的夹角，`0°` 表示伸直；它不是 MANO 轴角分量，也不应直接视为医学标定的解剖关节角。
+21自由度定义为：
+
+- 拇指：CMC屈伸、CMC张合、CMC对掌旋转、MCP屈伸、IP屈伸；
+- 其余四指：MCP屈伸、MCP张合、PIP屈伸、DIP屈伸。
+
+`mano_joint_angles_21dof.csv` 保存未滤波弧度、5帧局部中值弧度和对应角度；`mano_pose_axis_angle.csv` 保存全部15×3 MANO mean-relative 轴角分量；原有 `mano_joint_angles.csv` 继续保存20个几何角。两类角都尚未经过医学解剖轴标定。
 
 ## 测试
 
