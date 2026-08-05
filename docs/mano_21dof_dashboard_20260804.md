@@ -59,6 +59,7 @@
 - `output/mano_overlay_21dof/mano_joint_angles_21dof.csv`
 - `output/mano_overlay_21dof/mano_joint_angles.csv`
 - `output/mano_overlay_21dof/mano_pose_axis_angle.csv`
+- `output/mano_overlay_21dof/hand_end_effector_6d.csv`
 - `output/mano_overlay_21dof/summary.json`
 
 ## 复现
@@ -75,4 +76,34 @@ python scripts/render_mano_overlay_angles.py \
   --model-dir models/mano \
   --stereo-frames output/mediapipe_stereo/stereo_frames.csv \
   --output output/mano_overlay_21dof
+```
+
+## 手部末端 6D Pose
+
+![MANO 21自由度和手部末端6D Pose示意图](images/mano_21dof_6dpose_explainer.png)
+
+项目同时输出掌心末端坐标系的6D位姿。坐标统一表达在左相机光学坐标系中：相机 `+X` 向右、`+Y` 向下、`+Z` 向前，位置单位为米。
+
+- 原点：腕点与食指、中指、无名指、小指 MCP 点的平均位置；
+- 局部 `+Y`：腕点指向中指 MCP；
+- 局部 `+Z`：经过左右手归一化的掌面法向；
+- 局部 `+X`：补全右手坐标系；
+- RPY：ZYX 约定，`R = Rz(yaw) Ry(pitch) Rx(roll)`；
+- 四元数顺序：`qx, qy, qz, qw`。
+
+离线文件为 `hand_end_effector_6d.csv`。实时模式将相同字段写入 `output/ego_live/live_mano_21dof.csv`，并在画面手掌处显示红色X、绿色Y、蓝色Z坐标轴。
+
+## 掌心末端移动轨迹
+
+末端轨迹使用上述掌心坐标系原点 `P(t)`，不是腕关节点轨迹。画面中每只手显示最近120帧的渐隐轨迹、当前末端圆点和左相机光学坐标系下的 `x/y/z mm`。相邻帧位移超过0.12米时会断开轨迹，避免跟踪重置后画出错误长线。
+
+离线 `hand_end_effector_6d.csv` 额外提供两组相对位移：
+
+- `dx/dy/dz_camera_m`：相对于该轨迹第一帧，在左相机光学坐标系中的位移；
+- `dx/dy/dz_hand0_m`：同一位移旋转到第一帧掌心坐标系，适合表达“相对初始手姿向前、向侧面、沿掌面法向移动了多少”。
+
+实时 `live_mano_21dof.csv` 中对应字段以 `hand_dx_...` 开头。轨迹长度可通过 `--mano-trajectory-length` 调整，例如保留约10秒（30 FPS）的路径：
+
+```bash
+./scripts/run_ego_live.sh --mano --mano-trajectory-length 300
 ```

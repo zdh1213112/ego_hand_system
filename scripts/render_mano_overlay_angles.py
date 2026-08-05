@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -130,6 +131,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--panel-width", type=int, default=650)
     parser.add_argument("--mesh-alpha", type=float, default=0.38)
     parser.add_argument("--angle-radius", type=int, default=2)
+    parser.add_argument("--trajectory-length", type=int, default=120,
+                        help="number of recent frames drawn for each palm trajectory")
+    parser.add_argument("--trajectory-max-jump-m", type=float, default=0.12,
+                        help="break a trajectory segment when the palm jumps farther than this")
     parser.add_argument("--start-pair", type=int, default=0)
     parser.add_argument("--max-pairs", type=int, default=0)
     parser.add_argument("--no-video", action="store_true")
@@ -141,6 +146,83 @@ def unit(vector: np.ndarray) -> np.ndarray:
     if not np.isfinite(norm) or norm < 1e-9:
         return np.full(3, np.nan, dtype=np.float64)
     return np.asarray(vector, dtype=np.float64) / norm
+
+
+def rotation_matrix_to_rpy(rotation: np.ndarray) -> np.ndarray:
+    """Return ZYX roll/pitch/yaw where R = Rz(yaw) Ry(pitch) Rx(roll)."""
+    rotation = np.asarray(rotation, dtype=np.float64)
+    pitch = math.asin(float(np.clip(-rotation[2, 0], -1.0, 1.0)))
+    cosine = math.cos(pitch)
+    if abs(cosine) > 1e-7:
+        roll = math.atan2(rotation[2, 1], rotation[2, 2])
+        yaw = math.atan2(rotation[1, 0], rotation[0, 0])
+    else:
+        roll = math.atan2(-rotation[1, 2], rotation[1, 1])
+        yaw = 0.0
+    return np.asarray((roll, pitch, yaw), dtype=np.float64)
+
+
+def rotation_matrix_to_quaternion(rotation: np.ndarray) -> np.ndarray:
+    """Return quaternion in x,y,z,w order."""
+    rotation = np.asarray(rotation, dtype=np.float64)
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * scale
+        qx = (rotation[2, 1] - rotation[1, 2]) / scale
+        qy = (rotation[0, 2] - rotation[2, 0]) / scale
+        qz = (rotation[1, 0] - rotation[0, 1]) / scale
+    else:
+        diagonal = np.diag(rotation)
+        index = int(np.argmax(diagonal))
+        if index == 0:
+            scale = math.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2.0
+            qw = (rotation[2, 1] - rotation[1, 2]) / scale
+            qx = 0.25 * scale
+            qy = (rotation[0, 1] + rotation[1, 0]) / scale
+            qz = (rotation[0, 2] + rotation[2, 0]) / scale
+        elif index == 1:
+            scale = math.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2.0
+            qw = (rotation[0, 2] - rotation[2, 0]) / scale
+            qx = (rotation[0, 1] + rotation[1, 0]) / scale
+            qy = 0.25 * scale
+            qz = (rotation[1, 2] + rotation[2, 1]) / scale
+        else:
+            scale = math.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2.0
+            qw = (rotation[1, 0] - rotation[0, 1]) / scale
+            qx = (rotation[0, 2] + rotation[2, 0]) / scale
+            qy = (rotation[1, 2] + rotation[2, 1]) / scale
+            qz = 0.25 * scale
+    quaternion = np.asarray((qx, qy, qz, qw), dtype=np.float64)
+    return quaternion / max(float(np.linalg.norm(quaternion)), 1e-12)
+
+
+def compute_hand_end_effector_pose(joints: np.ndarray, handedness: str) -> dict[str, np.ndarray]:
+    """Construct a stable palm-centred 6D pose in the left camera optical frame.
+
+    Local +Y points from wrist toward the middle MCP. Local +Z is the
+    handedness-normalized palm normal, and +X completes the right-handed frame.
+    """
+    joints = np.asarray(joints, dtype=np.float64)
+    if joints.shape != (21, 3) or not np.isfinite(joints).all():
+        raise ValueError("expected finite (21, 3) hand joints")
+    wrist = joints[0]
+    index_mcp, middle_mcp, ring_mcp, pinky_mcp = joints[[5, 9, 13, 17]]
+    origin = np.mean(joints[[0, 5, 9, 13, 17]], axis=0)
+    mirror = 1.0 if handedness == "Right" else -1.0
+    z_axis = unit(np.cross(index_mcp - wrist, pinky_mcp - wrist) * -mirror)
+    y_hint = unit(middle_mcp - wrist)
+    x_axis = unit(np.cross(y_hint, z_axis))
+    y_axis = unit(np.cross(z_axis, x_axis))
+    if not all(np.isfinite(axis).all() for axis in (x_axis, y_axis, z_axis)):
+        raise RuntimeError("cannot construct hand end-effector frame")
+    rotation = np.column_stack((x_axis, y_axis, z_axis))
+    return {
+        "position_m": origin,
+        "rotation_matrix": rotation,
+        "rpy_rad": rotation_matrix_to_rpy(rotation),
+        "quaternion_xyzw": rotation_matrix_to_quaternion(rotation),
+    }
 
 
 def bend_angle(parent: np.ndarray, joint: np.ndarray, child: np.ndarray) -> float:
@@ -300,6 +382,21 @@ def median_filter(values: np.ndarray, radius: int) -> np.ndarray:
     return output
 
 
+def trajectory_displacements(
+    positions_m: np.ndarray,
+    initial_rotation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    positions = np.asarray(positions_m, dtype=np.float64)
+    rotation = np.asarray(initial_rotation, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 3 or len(positions) == 0:
+        raise ValueError("positions must be a non-empty (frames, 3) array")
+    if rotation.shape != (3, 3):
+        raise ValueError("initial_rotation must be (3, 3)")
+    delta_camera = positions - positions[0]
+    delta_hand0 = (rotation.T @ delta_camera.T).T
+    return delta_camera, delta_hand0
+
+
 def load_tracks(
     directory: Path,
     angle_radius: int,
@@ -336,6 +433,27 @@ def load_tracks(
             track["hand_pose_axis_angle"], track["kinematic_axes"], track["handedness"]
         )
         track["kinematic"] = median_filter(track["kinematic_raw"], angle_radius)
+        end_poses = [
+            compute_hand_end_effector_pose(joints, track["handedness"])
+            for joints in track["joints"]
+        ]
+        track["end_effector_position_m"] = np.stack([
+            pose["position_m"] for pose in end_poses
+        ])
+        track["end_effector_rotation_matrix"] = np.stack([
+            pose["rotation_matrix"] for pose in end_poses
+        ])
+        track["end_effector_rpy_rad"] = np.stack([pose["rpy_rad"] for pose in end_poses])
+        track["end_effector_quaternion_xyzw"] = np.stack([
+            pose["quaternion_xyzw"] for pose in end_poses
+        ])
+        origin_rotation = track["end_effector_rotation_matrix"][0]
+        (
+            track["end_effector_delta_camera_m"],
+            track["end_effector_delta_hand0_m"],
+        ) = trajectory_displacements(
+            track["end_effector_position_m"], origin_rotation
+        )
         tracks.append(track)
     if not tracks:
         raise FileNotFoundError(f"no track_*.npz files in {directory}")
@@ -399,6 +517,61 @@ def shade_color(color: tuple[int, int, int], scale: float) -> tuple[int, int, in
     return tuple(int(np.clip(channel * scale, 0, 255)) for channel in color)
 
 
+def draw_end_effector_trajectory(
+    image: np.ndarray,
+    positions_m: np.ndarray,
+    camera_matrix: np.ndarray,
+    distortion: np.ndarray,
+    color: tuple[int, int, int],
+    maximum_frames: int = 120,
+    maximum_jump_m: float = 0.12,
+) -> None:
+    positions = np.asarray(positions_m, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 3 or maximum_frames <= 0:
+        return
+    positions = positions[-maximum_frames:]
+    finite = np.isfinite(positions).all(axis=1) & (positions[:, 2] > 0.03)
+    if not np.any(finite):
+        return
+    safe_positions = positions.copy()
+    safe_positions[~finite] = np.asarray((0.0, 0.0, 1.0))
+    pixels = project_fisheye(safe_positions, camera_matrix, distortion)
+    count = len(positions)
+    for index in range(1, count):
+        if not (finite[index - 1] and finite[index]):
+            continue
+        if np.linalg.norm(positions[index] - positions[index - 1]) > maximum_jump_m:
+            continue
+        progress = index / max(count - 1, 1)
+        segment_color = shade_color(color, 0.22 + 0.78 * progress)
+        thickness = max(1, int(round(1.0 + 3.0 * progress)))
+        cv2.line(
+            image, tuple(np.rint(pixels[index - 1]).astype(int)),
+            tuple(np.rint(pixels[index]).astype(int)), segment_color,
+            thickness, cv2.LINE_AA,
+        )
+    current_index = int(np.flatnonzero(finite)[-1])
+    current_pixel = tuple(np.rint(pixels[current_index]).astype(int))
+    cv2.circle(image, current_pixel, 8, color, -1, cv2.LINE_AA)
+    position_mm = positions[current_index] * 1000.0
+    text = f"x {position_mm[0]:+.0f}  y {position_mm[1]:+.0f}  z {position_mm[2]:+.0f} mm"
+    (text_width, text_height), _ = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1
+    )
+    x = int(np.clip(current_pixel[0] + 12, 4, max(image.shape[1] - text_width - 12, 4)))
+    y = int(np.clip(current_pixel[1] - 12, text_height + 10, image.shape[0] - 8))
+    overlay = image.copy()
+    cv2.rectangle(
+        overlay, (x - 5, y - text_height - 6), (x + text_width + 6, y + 5),
+        (12, 15, 20), -1, cv2.LINE_AA,
+    )
+    cv2.addWeighted(overlay, 0.78, image, 0.22, 0.0, image)
+    cv2.putText(
+        image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+        (245, 245, 245), 1, cv2.LINE_AA,
+    )
+
+
 def draw_mesh(
     image: np.ndarray,
     vertices: np.ndarray,
@@ -409,6 +582,7 @@ def draw_mesh(
     color: tuple[int, int, int],
     alpha: float,
     label: str,
+    handedness: str | None = None,
 ) -> None:
     height, width = image.shape[:2]
     vertex_px = project_fisheye(vertices, camera_matrix, distortion)
@@ -450,6 +624,21 @@ def draw_mesh(
         image, label, (int(wrist[0]) + 12, int(wrist[1]) - 12),
         cv2.FONT_HERSHEY_SIMPLEX, 0.62, color, 2, cv2.LINE_AA,
     )
+    if handedness in ("Left", "Right"):
+        end_pose = compute_hand_end_effector_pose(joints, handedness)
+        origin = end_pose["position_m"]
+        rotation = end_pose["rotation_matrix"]
+        axis_length = 0.045
+        axis_points = np.vstack((origin, origin[None, :] + rotation.T * axis_length))
+        axis_pixels = project_fisheye(axis_points, camera_matrix, distortion)
+        origin_pixel = tuple(np.rint(axis_pixels[0]).astype(int))
+        for axis_index, (axis_name, axis_color) in enumerate(
+            (("X", (0, 0, 255)), ("Y", (0, 220, 0)), ("Z", (255, 80, 40)))
+        ):
+            endpoint = tuple(np.rint(axis_pixels[axis_index + 1]).astype(int))
+            cv2.arrowedLine(image, origin_pixel, endpoint, axis_color, 3, cv2.LINE_AA, tipLength=0.18)
+            cv2.putText(image, axis_name, endpoint, cv2.FONT_HERSHEY_SIMPLEX,
+                        0.48, axis_color, 2, cv2.LINE_AA)
 
 
 def draw_bar(
@@ -543,8 +732,18 @@ def draw_hand_card(
                 panel, (bar_x, top + 33), column_width, value, color, KINEMATIC_LIMITS_RAD[key]
             )
     cv2.putText(
-        panel, "CF/CA/OP: thumb CMC   MF/MA/PF/DF: finger joints", (x + 16, y + height - 12),
+        panel, "CF/CA/OP: thumb CMC   MF/MA/PF/DF: finger joints", (x + 16, y + height - 29),
         cv2.FONT_HERSHEY_SIMPLEX, 0.31, (145, 155, 170), 1, cv2.LINE_AA,
+    )
+    position = track["end_effector_position_m"][frame_index]
+    rpy_deg = np.degrees(track["end_effector_rpy_rad"][frame_index])
+    pose_text = (
+        f"6D P[m] {position[0]:+.3f} {position[1]:+.3f} {position[2]:+.3f}   "
+        f"RPY[deg] {rpy_deg[0]:+.1f} {rpy_deg[1]:+.1f} {rpy_deg[2]:+.1f}"
+    )
+    cv2.putText(
+        panel, pose_text, (x + 16, y + height - 11),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.29, (185, 205, 190), 1, cv2.LINE_AA,
     )
 
 
@@ -701,7 +900,10 @@ def main() -> int:
     args = parse_args()
     if args.width <= 0 or args.height <= 0 or not 250 <= args.panel_width < args.width:
         raise ValueError("invalid output dimensions/panel width")
-    if not 0.0 < args.mesh_alpha <= 1.0 or args.angle_radius < 0:
+    if (
+        not 0.0 < args.mesh_alpha <= 1.0 or args.angle_radius < 0
+        or args.trajectory_length < 0 or args.trajectory_max_jump_m <= 0.0
+    ):
         raise ValueError("mesh alpha must be in (0,1] and angle radius non-negative")
     session = args.session.resolve()
     fit_dir = args.mano_fit.resolve()
@@ -750,6 +952,7 @@ def main() -> int:
     geometric_csv_path = output / "mano_joint_angles.csv"
     kinematic_csv_path = output / "mano_joint_angles_21dof.csv"
     pose_csv_path = output / "mano_pose_axis_angle.csv"
+    pose6d_csv_path = output / "hand_end_effector_6d.csv"
     base_fields = ["pair_index", "left_frame_index", "track_id", "handedness"]
     geometric_fields = base_fields + [f"{key}_raw" for key in ANGLE_KEYS] + list(ANGLE_KEYS)
     kinematic_fields = list(base_fields)
@@ -758,6 +961,14 @@ def main() -> int:
     pose_fields = list(base_fields) + [
         f"{joint}_{axis}_rad" for joint in MANO_POSE_NAMES for axis in ("x", "y", "z")
     ]
+    pose6d_fields = list(base_fields) + [
+        "x_m", "y_m", "z_m",
+        "roll_rad", "pitch_rad", "yaw_rad",
+        "roll_deg", "pitch_deg", "yaw_deg",
+        "dx_camera_m", "dy_camera_m", "dz_camera_m",
+        "dx_hand0_m", "dy_hand0_m", "dz_hand0_m",
+        "qx", "qy", "qz", "qw",
+    ] + [f"r{row}{column}" for row in range(3) for column in range(3)]
     preview_ordinals = set(np.linspace(0, len(frame_rows) - 1, min(6, len(frame_rows)), dtype=int).tolist())
     previews: list[np.ndarray] = []
     frame_state = [0]
@@ -767,13 +978,16 @@ def main() -> int:
 
     with geometric_csv_path.open("w", encoding="utf-8", newline="") as geometric_stream, \
          kinematic_csv_path.open("w", encoding="utf-8", newline="") as kinematic_stream, \
-         pose_csv_path.open("w", encoding="utf-8", newline="") as pose_stream:
+         pose_csv_path.open("w", encoding="utf-8", newline="") as pose_stream, \
+         pose6d_csv_path.open("w", encoding="utf-8", newline="") as pose6d_stream:
         geometric_writer = csv.DictWriter(geometric_stream, fieldnames=geometric_fields)
         kinematic_writer = csv.DictWriter(kinematic_stream, fieldnames=kinematic_fields)
         pose_writer = csv.DictWriter(pose_stream, fieldnames=pose_fields)
+        pose6d_writer = csv.DictWriter(pose6d_stream, fieldnames=pose6d_fields)
         geometric_writer.writeheader()
         kinematic_writer.writeheader()
         pose_writer.writeheader()
+        pose6d_writer.writeheader()
         for ordinal, row in enumerate(frame_rows):
             pair_index = row["pair_index"]
             left_index = row["left_index"]
@@ -817,8 +1031,47 @@ def main() -> int:
                         pose_row[f"{joint_name}_{axis_name}_rad"] = f"{pose[joint_index, axis_index]:.9f}"
                 pose_writer.writerow(pose_row)
 
+                position = track["end_effector_position_m"][track_frame]
+                rpy = track["end_effector_rpy_rad"][track_frame]
+                quaternion = track["end_effector_quaternion_xyzw"][track_frame]
+                rotation_matrix = track["end_effector_rotation_matrix"][track_frame]
+                delta_camera = track["end_effector_delta_camera_m"][track_frame]
+                delta_hand0 = track["end_effector_delta_hand0_m"][track_frame]
+                pose6d_row = dict(base_row)
+                pose6d_row.update({
+                    "x_m": f"{position[0]:.9f}", "y_m": f"{position[1]:.9f}",
+                    "z_m": f"{position[2]:.9f}",
+                    "roll_rad": f"{rpy[0]:.9f}", "pitch_rad": f"{rpy[1]:.9f}",
+                    "yaw_rad": f"{rpy[2]:.9f}",
+                    "roll_deg": f"{np.degrees(rpy[0]):.6f}",
+                    "pitch_deg": f"{np.degrees(rpy[1]):.6f}",
+                    "yaw_deg": f"{np.degrees(rpy[2]):.6f}",
+                    "dx_camera_m": f"{delta_camera[0]:.9f}",
+                    "dy_camera_m": f"{delta_camera[1]:.9f}",
+                    "dz_camera_m": f"{delta_camera[2]:.9f}",
+                    "dx_hand0_m": f"{delta_hand0[0]:.9f}",
+                    "dy_hand0_m": f"{delta_hand0[1]:.9f}",
+                    "dz_hand0_m": f"{delta_hand0[2]:.9f}",
+                    "qx": f"{quaternion[0]:.9f}", "qy": f"{quaternion[1]:.9f}",
+                    "qz": f"{quaternion[2]:.9f}", "qw": f"{quaternion[3]:.9f}",
+                })
+                pose6d_row.update({
+                    f"r{row_index}{column_index}": f"{rotation_matrix[row_index, column_index]:.9f}"
+                    for row_index in range(3) for column_index in range(3)
+                })
+                pose6d_writer.writerow(pose6d_row)
+
             for _, track, track_frame in sorted(visible, reverse=True, key=lambda item: item[0]):
                 color = TRACK_COLORS.get(track["handedness"], (120, 220, 120))
+                draw_end_effector_trajectory(
+                    frame,
+                    track["end_effector_position_m"][:track_frame + 1],
+                    camera_matrix,
+                    distortion,
+                    color,
+                    args.trajectory_length,
+                    args.trajectory_max_jump_m,
+                )
                 draw_mesh(
                     frame,
                     track["vertices"][track_frame],
@@ -829,6 +1082,7 @@ def main() -> int:
                     color,
                     args.mesh_alpha,
                     f"{track['handedness']} T{track['track_id']}",
+                    track["handedness"],
                 )
             canvas = compose_canvas(
                 frame, tracks, frame_indices, (args.width, args.height), args.panel_width,
@@ -893,6 +1147,8 @@ def main() -> int:
         "projection_validation_median_px": float(np.median(projection_residual)),
         "mesh_alpha": args.mesh_alpha,
         "angle_smoothing_radius_frames": args.angle_radius,
+        "trajectory_length_frames": args.trajectory_length,
+        "trajectory_max_jump_m": args.trajectory_max_jump_m,
         "processing_fps": processed / elapsed if elapsed > 0 else 0.0,
         "kinematic_dof_count_per_hand": len(KINEMATIC_KEYS),
         "angle_definitions": {
@@ -905,12 +1161,22 @@ def main() -> int:
             ),
             "raw_mano_pose": "All 15 x 3 mean-relative MANO hand-pose axis-angle components in radians.",
         },
+        "hand_end_effector_6d_definition": {
+            "reference_frame": "left camera optical frame: +X right, +Y down, +Z forward",
+            "origin": "mean of wrist and index/middle/ring/pinky MCP joints",
+            "local_y": "wrist toward middle MCP",
+            "local_z": "handedness-normalized palm normal",
+            "local_x": "completes the right-handed frame",
+            "rpy_convention": "ZYX: R = Rz(yaw) Ry(pitch) Rx(roll)",
+            "quaternion_order": "x,y,z,w",
+        },
         "tracks": angle_summary,
         "outputs": {
             "video": video_path.name if writer is not None else None,
             "geometric_angles_csv": geometric_csv_path.name,
             "kinematic_21dof_csv": kinematic_csv_path.name,
             "mano_pose_axis_angle_csv": pose_csv_path.name,
+            "hand_end_effector_6d_csv": pose6d_csv_path.name,
             "preview_montage": preview_path.name,
         },
     }
@@ -927,6 +1193,7 @@ def main() -> int:
     print(f"Geometric angles CSV: {geometric_csv_path}")
     print(f"21-DOF kinematics CSV: {kinematic_csv_path}")
     print(f"Raw MANO pose CSV: {pose_csv_path}")
+    print(f"Hand end-effector 6D CSV: {pose6d_csv_path}")
     print(f"Preview montage: {preview_path}")
     print(f"Summary: {summary_path}")
     return 0

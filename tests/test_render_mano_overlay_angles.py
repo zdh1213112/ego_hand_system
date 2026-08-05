@@ -18,6 +18,39 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RenderManoOverlayAnglesTests(unittest.TestCase):
+    def test_hand_end_effector_pose_is_right_handed_and_camera_metric(self):
+        joints = np.zeros((21, 3), dtype=np.float64)
+        joints[0] = (0.0, 0.0, 0.40)
+        joints[5] = (-0.03, 0.05, 0.40)
+        joints[9] = (0.0, 0.06, 0.40)
+        joints[13] = (0.015, 0.055, 0.40)
+        joints[17] = (0.03, 0.045, 0.40)
+        for index in set(range(21)) - {0, 5, 9, 13, 17}:
+            joints[index] = joints[0]
+        pose = MODULE.compute_hand_end_effector_pose(joints, "Right")
+        rotation = pose["rotation_matrix"]
+        np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-7)
+        self.assertAlmostEqual(float(np.linalg.det(rotation)), 1.0, places=7)
+        np.testing.assert_allclose(pose["rpy_rad"], np.zeros(3), atol=1e-7)
+        np.testing.assert_allclose(
+            pose["quaternion_xyzw"], np.asarray((0.0, 0.0, 0.0, 1.0)), atol=1e-7
+        )
+        np.testing.assert_allclose(
+            pose["position_m"], joints[[0, 5, 9, 13, 17]].mean(axis=0), atol=1e-9
+        )
+
+    def test_left_hand_frame_uses_handedness_normalized_palm_normal(self):
+        joints = np.zeros((21, 3), dtype=np.float64)
+        joints[0] = (0.0, 0.0, 0.40)
+        joints[5] = (0.03, 0.05, 0.40)
+        joints[9] = (0.0, 0.06, 0.40)
+        joints[13] = (-0.015, 0.055, 0.40)
+        joints[17] = (-0.03, 0.045, 0.40)
+        for index in set(range(21)) - {0, 5, 9, 13, 17}:
+            joints[index] = joints[0]
+        pose = MODULE.compute_hand_end_effector_pose(joints, "Left")
+        np.testing.assert_allclose(pose["rotation_matrix"], np.eye(3), atol=1e-7)
+
     def test_bend_angle_is_zero_when_straight(self):
         angle = MODULE.bend_angle(
             np.asarray([0.0, 0.0, 0.0]),
@@ -57,6 +90,37 @@ class RenderManoOverlayAnglesTests(unittest.TestCase):
         values = np.asarray([[10.0], [10.0], [90.0], [10.0], [10.0]])
         filtered = MODULE.median_filter(values, radius=1)
         np.testing.assert_allclose(filtered[:, 0], 10.0)
+
+    def test_trajectory_displacements_include_initial_hand_frame(self):
+        positions = np.asarray([
+            [0.10, 0.20, 0.30],
+            [0.10, 0.22, 0.30],
+            [0.08, 0.22, 0.31],
+        ])
+        initial_rotation = np.asarray([
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        delta_camera, delta_hand0 = MODULE.trajectory_displacements(
+            positions, initial_rotation
+        )
+        np.testing.assert_allclose(delta_camera[0], np.zeros(3))
+        np.testing.assert_allclose(delta_camera[1], (0.0, 0.02, 0.0))
+        np.testing.assert_allclose(delta_hand0[1], (0.02, 0.0, 0.0), atol=1e-12)
+
+    def test_trajectory_draws_path_and_metric_label(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        camera_matrix = np.asarray([
+            [400.0, 0.0, 320.0], [0.0, 400.0, 240.0], [0.0, 0.0, 1.0]
+        ])
+        positions = np.asarray([
+            [-0.03, 0.0, 0.40], [0.0, 0.0, 0.40], [0.03, 0.0, 0.40]
+        ])
+        MODULE.draw_end_effector_trajectory(
+            image, positions, camera_matrix, np.zeros(4), (0, 180, 255)
+        )
+        self.assertGreater(int(np.count_nonzero(image)), 0)
 
     def test_raw_and_rectified_fisheye_projection_agree(self):
         camera_matrix = np.asarray([

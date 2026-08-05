@@ -19,6 +19,7 @@ from fit_mano_sequence import (
 )
 from render_mano_overlay_angles import (
     build_kinematic_axes,
+    compute_hand_end_effector_pose,
     extract_kinematic_sequence,
     load_rest_joints,
 )
@@ -42,6 +43,7 @@ class LiveManoFitter:
         max_orient_step_deg: float = 75.0,
         max_translation_step_m: float = 0.08,
         low_quality_freeze: float = 0.22,
+        trajectory_length: int = 120,
         angle_window: int = 5,
         profile_dir: Path | None = None,
     ):
@@ -64,6 +66,7 @@ class LiveManoFitter:
         self.max_orient_step_deg = max_orient_step_deg
         self.max_translation_step_m = max_translation_step_m
         self.low_quality_freeze = low_quality_freeze
+        self.trajectory_length = max(int(trajectory_length), 1)
         self.angle_window = angle_window
         self.model_dir = model_dir.resolve()
         self.mano = import_mano(mano_source.resolve())
@@ -198,6 +201,9 @@ class LiveManoFitter:
             "high_loss_updates": 0,
             "reset_pending": False,
             "angle_history": deque(maxlen=self.angle_window),
+            "trajectory_history": deque(maxlen=self.trajectory_length),
+            "trajectory_origin_position": None,
+            "trajectory_origin_rotation": None,
             "last_result": None,
         }
 
@@ -442,6 +448,17 @@ class LiveManoFitter:
         )[0]
         state["angle_history"].append(angles.copy())
         smoothed_angles = np.median(np.stack(state["angle_history"]), axis=0)
+        end_effector_pose = compute_hand_end_effector_pose(
+            joints[0].detach().cpu().numpy(), handedness
+        )
+        if state["trajectory_origin_position"] is None:
+            state["trajectory_origin_position"] = end_effector_pose["position_m"].copy()
+            state["trajectory_origin_rotation"] = end_effector_pose["rotation_matrix"].copy()
+        delta_camera = (
+            end_effector_pose["position_m"] - state["trajectory_origin_position"]
+        )
+        delta_hand0 = state["trajectory_origin_rotation"].T @ delta_camera
+        state["trajectory_history"].append(end_effector_pose["position_m"].copy())
         if final_loss > 0.25:
             state["high_loss_updates"] += 1
         else:
@@ -456,6 +473,13 @@ class LiveManoFitter:
             "hand_pose_axis_angle": axis_angle,
             "kinematic_raw": angles,
             "kinematic": smoothed_angles,
+            "end_effector_position_m": end_effector_pose["position_m"],
+            "end_effector_rotation_matrix": end_effector_pose["rotation_matrix"],
+            "end_effector_rpy_rad": end_effector_pose["rpy_rad"],
+            "end_effector_quaternion_xyzw": end_effector_pose["quaternion_xyzw"],
+            "end_effector_delta_camera_m": delta_camera,
+            "end_effector_delta_hand0_m": delta_hand0,
+            "trajectory_positions_m": np.stack(state["trajectory_history"]),
             "loss": final_loss,
             "fit_ms": (time.perf_counter() - started) * 1000.0,
             "iterations": performed_iterations,

@@ -37,6 +37,7 @@ from render_mano_overlay_angles import (
     KINEMATIC_KEYS,
     TRACK_COLORS as MANO_TRACK_COLORS,
     compose_canvas as compose_mano_canvas,
+    draw_end_effector_trajectory as draw_mano_trajectory,
     draw_mesh as draw_mano_mesh,
 )
 
@@ -112,6 +113,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mano-max-orient-step-deg", type=float, default=75.0)
     parser.add_argument("--mano-max-translation-step-m", type=float, default=0.08)
     parser.add_argument("--mano-low-quality-freeze", type=float, default=0.22)
+    parser.add_argument("--mano-trajectory-length", type=int, default=120)
+    parser.add_argument("--mano-trajectory-max-jump-m", type=float, default=0.12)
     parser.add_argument("--mano-angle-window", type=int, default=5)
     parser.add_argument("--mano-width", type=int, default=1920)
     parser.add_argument("--mano-height", type=int, default=1080)
@@ -652,10 +655,16 @@ def compose_live_mano(
             MANO_TRACK_COLORS.get(result["handedness"], (120, 220, 120))
             if result.get("observed", True) else (145, 145, 145)
         )
+        draw_mano_trajectory(
+            frame, result.get("trajectory_positions_m", result["end_effector_position_m"][None]),
+            camera_matrix, distortion, color,
+            args.mano_trajectory_length, args.mano_trajectory_max_jump_m,
+        )
         draw_mano_mesh(
             frame, result["vertices"], result["joints"], result["faces"],
             camera_matrix, distortion, color, args.mesh_alpha,
             f"{result['handedness']} T{result['track_id']}",
+            result["handedness"],
         )
     tracks = []
     frame_indices: dict[int, int] = {}
@@ -670,6 +679,12 @@ def compose_live_mano(
             "joints": result["joints"][None],
             "faces": result["faces"],
             "kinematic": result["kinematic"][None],
+            "end_effector_position_m": result["end_effector_position_m"][None],
+            "end_effector_rotation_matrix": result["end_effector_rotation_matrix"][None],
+            "end_effector_rpy_rad": result["end_effector_rpy_rad"][None],
+            "end_effector_quaternion_xyzw": result["end_effector_quaternion_xyzw"][None],
+            "end_effector_delta_camera_m": result["end_effector_delta_camera_m"][None],
+            "end_effector_delta_hand0_m": result["end_effector_delta_hand0_m"][None],
         })
         if track_id in current_results:
             frame_indices[track_id] = 0
@@ -703,8 +718,10 @@ def main() -> int:
         or args.mano_extra_iterations < 0 or args.mano_loss_threshold <= 0
         or args.mano_pose_prior < 0 or args.mano_temporal_weight < 0
         or not 0.0 <= args.mano_rigid_blend <= 1.0 or args.mano_angle_window < 1
+        or args.mano_trajectory_length < 1
+        or args.mano_trajectory_max_jump_m <= 0.0
     ):
-        raise ValueError("MANO iteration counts must be positive")
+        raise ValueError("invalid MANO fitting or trajectory parameters")
     bridge_path = args.bridge.resolve()
     sdk_config = args.sdk_config.resolve()
     model_path = args.model.resolve()
@@ -753,6 +770,7 @@ def main() -> int:
             max_orient_step_deg=args.mano_max_orient_step_deg,
             max_translation_step_m=args.mano_max_translation_step_m,
             low_quality_freeze=args.mano_low_quality_freeze,
+            trajectory_length=args.mano_trajectory_length,
             angle_window=args.mano_angle_window,
             profile_dir=profile_dir if profile_dir.is_dir() else None,
         )
@@ -780,6 +798,15 @@ def main() -> int:
     ]
     for key in KINEMATIC_KEYS:
         angle_fields.extend((f"{key}_raw", key, key.replace("_rad", "_deg")))
+    angle_fields.extend([
+        "hand_x_m", "hand_y_m", "hand_z_m",
+        "hand_dx_camera_m", "hand_dy_camera_m", "hand_dz_camera_m",
+        "hand_dx_hand0_m", "hand_dy_hand0_m", "hand_dz_hand0_m",
+        "hand_roll_rad", "hand_pitch_rad", "hand_yaw_rad",
+        "hand_roll_deg", "hand_pitch_deg", "hand_yaw_deg",
+        "hand_qx", "hand_qy", "hand_qz", "hand_qw",
+    ])
+    angle_fields.extend(f"hand_r{row}{column}" for row in range(3) for column in range(3))
     writer = None
     frame_count = 0
     inference_count = 0
@@ -933,6 +960,37 @@ def main() -> int:
                                 angle_row[f"{key}_raw"] = f"{raw_value:.9f}"
                                 angle_row[key] = f"{value:.9f}"
                                 angle_row[key.replace("_rad", "_deg")] = f"{np.degrees(value):.6f}"
+                            position = result["end_effector_position_m"]
+                            rpy = result["end_effector_rpy_rad"]
+                            quaternion = result["end_effector_quaternion_xyzw"]
+                            rotation_matrix = result["end_effector_rotation_matrix"]
+                            delta_camera = result["end_effector_delta_camera_m"]
+                            delta_hand0 = result["end_effector_delta_hand0_m"]
+                            angle_row.update({
+                                "hand_x_m": f"{position[0]:.9f}",
+                                "hand_y_m": f"{position[1]:.9f}",
+                                "hand_z_m": f"{position[2]:.9f}",
+                                "hand_dx_camera_m": f"{delta_camera[0]:.9f}",
+                                "hand_dy_camera_m": f"{delta_camera[1]:.9f}",
+                                "hand_dz_camera_m": f"{delta_camera[2]:.9f}",
+                                "hand_dx_hand0_m": f"{delta_hand0[0]:.9f}",
+                                "hand_dy_hand0_m": f"{delta_hand0[1]:.9f}",
+                                "hand_dz_hand0_m": f"{delta_hand0[2]:.9f}",
+                                "hand_roll_rad": f"{rpy[0]:.9f}",
+                                "hand_pitch_rad": f"{rpy[1]:.9f}",
+                                "hand_yaw_rad": f"{rpy[2]:.9f}",
+                                "hand_roll_deg": f"{np.degrees(rpy[0]):.6f}",
+                                "hand_pitch_deg": f"{np.degrees(rpy[1]):.6f}",
+                                "hand_yaw_deg": f"{np.degrees(rpy[2]):.6f}",
+                                "hand_qx": f"{quaternion[0]:.9f}",
+                                "hand_qy": f"{quaternion[1]:.9f}",
+                                "hand_qz": f"{quaternion[2]:.9f}",
+                                "hand_qw": f"{quaternion[3]:.9f}",
+                            })
+                            angle_row.update({
+                                f"hand_r{row}{column}": f"{rotation_matrix[row, column]:.9f}"
+                                for row in range(3) for column in range(3)
+                            })
                             angle_writer.writerow(angle_row)
                 timing_totals["mano"] += time.perf_counter() - stage_started
                 inference_elapsed = time.perf_counter() - inference_started
