@@ -54,6 +54,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w-pose", type=float, default=0.003)
     parser.add_argument("--w-shape", type=float, default=0.015)
     parser.add_argument("--w-temporal", type=float, default=0.08)
+    parser.add_argument("--w-rigid-temporal", type=float, default=0.01,
+                        help="separate velocity penalty for global rotation/translation")
+    parser.add_argument("--w-acceleration", type=float, default=0.004,
+                        help="pose and rigid acceleration penalty")
+    parser.add_argument("--boundary-weight", type=float, default=0.10,
+                        help="anchor the overlap shared with the previous pose window")
+    parser.add_argument("--max-orient-step-deg", type=float, default=75.0,
+                        help="maximum base global rotation update before image-motion scaling")
+    parser.add_argument("--max-translation-step-m", type=float, default=0.08,
+                        help="maximum base translation update before image-motion scaling")
+    parser.add_argument("--max-pose-step", type=float, default=0.0,
+                        help="optional PCA pose-vector cap; 0 relies on velocity/acceleration losses")
+    parser.add_argument("--image-rigid-alignment", action=argparse.BooleanOptionalAction,
+                        default=False, help="experimental palm-only image-space translation correction")
+    parser.add_argument("--image-alignment-max-m", type=float, default=0.025)
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="auto")
     parser.add_argument("--rigid-initialization", action="store_true", help="initialize each frame with Kabsch")
     parser.add_argument("--no-video", action="store_true")
@@ -173,6 +188,152 @@ def weighted_kabsch(source: np.ndarray, target: np.ndarray, weights: np.ndarray)
     return rotation
 
 
+def observation_transition_profile(
+        valid: np.ndarray, confidence: np.ndarray, left_px: np.ndarray,
+        right_px: np.ndarray, max_orient_step_deg: float = 75.0,
+        max_translation_step_m: float = 0.08,
+        max_pose_step: float = 0.0) -> dict[str, np.ndarray]:
+    """Build quality-aware temporal weights and physically plausible step limits.
+
+    Image motion is deliberately used only to decide how much a state is allowed
+    to change.  It cannot directly rotate the hand, which prevents a bad 2D
+    landmark from causing a large MANO solution switch.
+    """
+    valid = np.asarray(valid, dtype=bool)
+    confidence = np.nan_to_num(np.asarray(confidence, dtype=np.float32), nan=0.0)
+    frame_count = valid.shape[0]
+    observed_count = valid.sum(axis=1).astype(np.float32)
+    mean_confidence = (confidence * valid).sum(axis=1) / np.maximum(observed_count, 1.0)
+    coverage = np.sqrt(np.clip(observed_count / max(valid.shape[1], 1), 0.0, 1.0))
+    quality = np.clip(mean_confidence * coverage, 0.0, 1.0)
+
+    image_motion = np.zeros(frame_count, dtype=np.float32)
+    for frame in range(1, frame_count):
+        displacements = []
+        for pixels in (left_px, right_px):
+            previous = np.asarray(pixels[frame - 1])
+            current = np.asarray(pixels[frame])
+            finite = np.isfinite(previous).all(axis=-1) & np.isfinite(current).all(axis=-1)
+            if np.any(finite):
+                displacements.extend(
+                    np.linalg.norm(current[finite] - previous[finite], axis=-1).tolist()
+                )
+        if displacements:
+            image_motion[frame] = float(np.median(displacements))
+
+    transition_quality = np.minimum(quality, np.roll(quality, 1))
+    transition_quality[0] = quality[0]
+    temporal_strength = np.clip(
+        0.45 + 2.4 * (1.0 - transition_quality)
+        + 0.45 * np.exp(-image_motion / 12.0),
+        0.45, 3.0,
+    ).astype(np.float32)
+
+    # A reliable, visibly fast hand may move farther.  Low-quality observations
+    # instead receive a smaller trust region, even if their detector position jumps.
+    motion_factor = 0.75 + 0.50 * np.clip(image_motion / 35.0, 0.0, 1.0)
+    quality_factor = 0.80 + 0.20 * transition_quality
+    limit_factor = np.clip(motion_factor * quality_factor, 0.60, 1.25)
+    orient_limit = np.deg2rad(max_orient_step_deg) * limit_factor
+    translation_limit = max_translation_step_m * limit_factor
+    if max_pose_step > 0.0:
+        pose_limit = max_pose_step * np.clip(
+            (0.60 + 0.40 * transition_quality)
+            * (0.80 + 0.40 * np.clip(image_motion / 35.0, 0.0, 1.0)),
+            0.50, 1.20,
+        )
+    else:
+        pose_limit = np.full(frame_count, np.inf, dtype=np.float32)
+    return {
+        "quality": quality.astype(np.float32),
+        "image_motion_px": image_motion,
+        "temporal_strength": temporal_strength,
+        "orient_limit_rad": orient_limit.astype(np.float32),
+        "translation_limit_m": translation_limit.astype(np.float32),
+        "pose_limit": pose_limit.astype(np.float32),
+    }
+
+
+def limit_parameter_transitions_(pose, orient, transl, frame_ids, profile) -> None:
+    """Clamp frame-to-frame updates in-place without changing the first state."""
+    import torch
+
+    ids = [int(value) for value in frame_ids.detach().cpu().tolist()]
+    with torch.no_grad():
+        for frame in ids:
+            if frame <= 0:
+                continue
+            for parameter, limit_key in ((pose, "pose_limit"), (transl, "translation_limit_m")):
+                delta = parameter[frame] - parameter[frame - 1]
+                norm = torch.linalg.vector_norm(delta)
+                limit = profile[limit_key][frame]
+                if bool(torch.isfinite(limit) & (norm > limit)):
+                    parameter[frame].copy_(
+                        parameter[frame - 1] + delta * (limit / norm.clamp_min(1e-8))
+                    )
+
+            # Axis-angle vectors are not Euclidean coordinates: equivalent
+            # rotations can lie far apart around +/-pi.  Clamp the true
+            # relative SO(3) rotation and convert it back to axis-angle.
+            previous_vector = orient[frame - 1].detach().cpu().numpy().astype(np.float64)
+            current_vector = orient[frame].detach().cpu().numpy().astype(np.float64)
+            previous_rotation, _ = cv2.Rodrigues(previous_vector)
+            current_rotation, _ = cv2.Rodrigues(current_vector)
+            relative_rotation = current_rotation @ previous_rotation.T
+            relative_vector, _ = cv2.Rodrigues(relative_rotation)
+            relative_vector = relative_vector[:, 0]
+            relative_angle = float(np.linalg.norm(relative_vector))
+            limit = float(profile["orient_limit_rad"][frame])
+            if np.isfinite(limit) and relative_angle > limit:
+                limited_relative, _ = cv2.Rodrigues(relative_vector * (limit / relative_angle))
+                limited_rotation = limited_relative @ previous_rotation
+                limited_vector, _ = cv2.Rodrigues(limited_rotation)
+                orient[frame].copy_(torch.as_tensor(
+                    limited_vector[:, 0], dtype=orient.dtype, device=orient.device
+                ))
+
+
+def image_space_translation_alignment(
+        joints, left_px, rotation, projection, quality, maximum_m: float):
+    """Return a small robust translation that aligns the MANO palm in the image."""
+    import torch
+
+    frame_count = joints.shape[0]
+    correction = torch.zeros((frame_count, 3), dtype=joints.dtype, device=joints.device)
+    predicted = project_rectified(joints, rotation, projection)
+    rectified = torch.einsum("ij,bkj->bki", rotation, joints)
+    palm = (0, 5, 9, 13, 17)
+    fx = projection[0, 0].abs().clamp_min(1e-6)
+    fy = projection[1, 1].abs().clamp_min(1e-6)
+    rotation_inverse = rotation.T
+    for frame in range(frame_count):
+        finite = torch.isfinite(left_px[frame]).all(dim=-1)
+        selected = [joint for joint in palm if bool(finite[joint])]
+        if len(selected) < 3 or float(quality[frame]) < 0.08:
+            continue
+        indices = torch.as_tensor(selected, dtype=torch.long, device=joints.device)
+        residual = left_px[frame, indices] - predicted[frame, indices]
+        pixel_offset = residual.median(dim=0).values
+        depth = rectified[frame, indices, 2].median().clamp_min(0.05)
+        delta_rectified = torch.stack((
+            pixel_offset[0] * depth / fx,
+            pixel_offset[1] * depth / fy,
+            torch.zeros((), dtype=joints.dtype, device=joints.device),
+        ))
+        delta = rotation_inverse @ delta_rectified
+        norm = torch.linalg.vector_norm(delta)
+        if bool(norm > maximum_m):
+            delta = delta * (maximum_m / norm.clamp_min(1e-8))
+        correction[frame] = delta
+
+    # A centred three-frame median removes isolated landmark spikes without
+    # introducing the visible phase delay of a causal low-pass filter.
+    smoothed = correction.clone()
+    for frame in range(1, frame_count - 1):
+        smoothed[frame] = correction[frame - 1:frame + 2].median(dim=0).values
+    return smoothed
+
+
 def initialize_rigid_parameters(model, target, valid, confidence, pca_components: int, device):
     import torch
 
@@ -238,6 +399,18 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     p2 = torch.as_tensor(observations["p2"], dtype=torch.float32, device=device)
     frame_count = target.shape[0]
 
+    transition_profile_np = observation_transition_profile(
+        observations["valid"], observations["confidence"], observations["left_px"],
+        observations["right_px"],
+        max_orient_step_deg=getattr(args, "max_orient_step_deg", 75.0),
+        max_translation_step_m=getattr(args, "max_translation_step_m", 0.08),
+        max_pose_step=getattr(args, "max_pose_step", 0.0),
+    )
+    transition_profile = {
+        key: torch.as_tensor(value, dtype=torch.float32, device=device)
+        for key, value in transition_profile_np.items()
+    }
+
     initial = observations.get("initial")
     if initial is not None:
         pose = torch.as_tensor(
@@ -277,7 +450,11 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     shape_count = min(args.shape_frames, frame_count)
     shape_ids = torch.topk(quality, k=shape_count).indices.sort().values
 
-    def objective(ids, include_temporal: bool):
+    def weighted_transition_mean(delta, weights):
+        per_transition = delta.square().mean(dim=-1)
+        return (per_transition * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def objective(ids, include_temporal: bool, boundary=None):
         batch_betas = betas.expand(len(ids), -1)
         vertices, joints, _ = run_model(
             model, batch_betas, orient[ids], pose[ids], transl[ids]
@@ -296,13 +473,50 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         loss2d += robust_weighted_loss((right_prediction - right_px[ids]) / 100.0, weights2d_right, 0.02)
         pose_prior = pose[ids].square().mean()
         shape_prior = betas.square().mean()
-        temporal = torch.tensor(0.0, device=device)
+        pose_temporal = torch.tensor(0.0, device=device)
+        rigid_temporal = torch.tensor(0.0, device=device)
+        acceleration = torch.tensor(0.0, device=device)
         if include_temporal and len(ids) > 1:
-            temporal = (pose[ids[1:]] - pose[ids[:-1]]).square().mean()
-            temporal += 0.25 * (orient[ids[1:]] - orient[ids[:-1]]).square().mean()
-            temporal += 5.0 * (transl[ids[1:]] - transl[ids[:-1]]).square().mean()
+            transition_weights = transition_profile["temporal_strength"][ids[1:]]
+            pose_temporal = weighted_transition_mean(
+                pose[ids[1:]] - pose[ids[:-1]], transition_weights
+            )
+            rigid_temporal = 0.25 * weighted_transition_mean(
+                orient[ids[1:]] - orient[ids[:-1]], transition_weights
+            )
+            rigid_temporal += 5.0 * weighted_transition_mean(
+                transl[ids[1:]] - transl[ids[:-1]], transition_weights
+            )
+            if len(ids) > 2:
+                acceleration_weights = torch.maximum(
+                    transition_weights[1:], transition_weights[:-1]
+                )
+                acceleration = weighted_transition_mean(
+                    pose[ids[2:]] - 2.0 * pose[ids[1:-1]] + pose[ids[:-2]],
+                    acceleration_weights,
+                )
+                acceleration += 0.25 * weighted_transition_mean(
+                    orient[ids[2:]] - 2.0 * orient[ids[1:-1]] + orient[ids[:-2]],
+                    acceleration_weights,
+                )
+                acceleration += 5.0 * weighted_transition_mean(
+                    transl[ids[2:]] - 2.0 * transl[ids[1:-1]] + transl[ids[:-2]],
+                    acceleration_weights,
+                )
+        boundary_loss = torch.tensor(0.0, device=device)
+        if boundary is not None and len(boundary["ids"]):
+            anchor_ids = boundary["ids"]
+            boundary_loss = (pose[anchor_ids] - boundary["pose"]).square().mean()
+            boundary_loss += 0.25 * (orient[anchor_ids] - boundary["orient"]).square().mean()
+            boundary_loss += 5.0 * (transl[anchor_ids] - boundary["transl"]).square().mean()
+        temporal = (
+            getattr(args, "w_temporal", 0.08) * pose_temporal
+            + getattr(args, "w_rigid_temporal", 0.01) * rigid_temporal
+            + getattr(args, "w_acceleration", 0.004) * acceleration
+            + getattr(args, "boundary_weight", 0.10) * boundary_loss
+        )
         total = (args.w_3d * loss3d + args.w_2d * loss2d + args.w_pose * pose_prior
-                 + args.w_shape * shape_prior + args.w_temporal * temporal)
+                 + args.w_shape * shape_prior + temporal)
         return total, (loss3d, loss2d, pose_prior, shape_prior, temporal), vertices, joints
 
     if args.shape_iterations > 0:
@@ -327,18 +541,38 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         window_starts.append(frame_count - window_size)
     for window_start in window_starts:
         window_ids = all_ids[window_start:min(frame_count, window_start + window_size)]
+        boundary = None
+        if window_start > 0 and effective_overlap > 0:
+            anchor_ids = window_ids[:min(effective_overlap, len(window_ids))]
+            boundary = {
+                "ids": anchor_ids,
+                "pose": pose[anchor_ids].detach().clone(),
+                "orient": orient[anchor_ids].detach().clone(),
+                "transl": transl[anchor_ids].detach().clone(),
+            }
         for _ in range(args.pose_iterations):
             optimizer.zero_grad(set_to_none=True)
-            loss, _, _, _ = objective(window_ids, True)
+            loss, _, _, _ = objective(window_ids, True, boundary)
             loss.backward()
             torch.nn.utils.clip_grad_norm_([pose, orient, transl], 5.0)
             optimizer.step()
+        limit_parameter_transitions_(pose, orient, transl, window_ids, transition_profile)
 
     with torch.no_grad():
-        total, terms, vertices, joints = objective(all_ids, True)
         vertices, joints, model_output = run_model(
             model, betas.expand(frame_count, -1), orient, pose, transl
         )
+        image_alignment = torch.zeros_like(transl)
+        if getattr(args, "image_rigid_alignment", False):
+            image_alignment = image_space_translation_alignment(
+                joints, left_px, rotation, p1, transition_profile["quality"],
+                getattr(args, "image_alignment_max_m", 0.025),
+            )
+            transl.add_(image_alignment)
+            vertices, joints, model_output = run_model(
+                model, betas.expand(frame_count, -1), orient, pose, transl
+            )
+        total, terms, _, _ = objective(all_ids, True)
         errors = torch.linalg.vector_norm(joints - target, dim=-1)
         errors = torch.where(valid, errors, torch.nan)
         left_prediction = project_rectified(joints, rotation, p1)
@@ -361,6 +595,10 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             "right_reprojection_error_px": right_pixel_error.cpu().numpy(),
             "loss": float(total.cpu()),
             "loss_terms": [float(term.cpu()) for term in terms],
+            "observation_quality": transition_profile_np["quality"],
+            "image_motion_px": transition_profile_np["image_motion_px"],
+            "temporal_strength": transition_profile_np["temporal_strength"],
+            "image_alignment_m": image_alignment.cpu().numpy(),
         }
         if expanded_hand_pose is not None:
             result["hand_pose_axis_angle"] = expanded_hand_pose.reshape(frame_count, 15, 3).cpu().numpy()

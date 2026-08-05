@@ -27,7 +27,9 @@ class FitManoSequenceTests(unittest.TestCase):
         self.assertEqual(sorted(MODULE.MANO_TO_MEDIAPIPE.tolist()), list(range(21)))
 
     def test_required_model_assets_are_reported(self):
-        source = SCRIPT.parents[1] / "third_party" / "MANO"
+        source = Path(os.environ.get(
+            "MANO_SOURCE", SCRIPT.parents[1] / "third_party" / "MANO"
+        ))
         with self.assertRaisesRegex(FileNotFoundError, "MANO model data"):
             MODULE.validate_source_and_assets(
                 source, Path("/definitely/missing/mano/models")
@@ -82,6 +84,60 @@ class FitManoSequenceTests(unittest.TestCase):
         recovered = MODULE.weighted_kabsch(source, target, np.ones(4))
         np.testing.assert_allclose(recovered, expected, atol=1e-7)
 
+    def test_transition_profile_tightens_when_observation_quality_drops(self):
+        frames = 3
+        valid = np.ones((frames, 21), dtype=bool)
+        valid[2, 4:] = False
+        confidence = np.ones((frames, 21), dtype=np.float32)
+        confidence[2] = 0.25
+        pixels = np.zeros((frames, 21, 2), dtype=np.float32)
+        pixels[1, :, 0] = 30.0
+        pixels[2, :, 0] = 31.0
+        profile = MODULE.observation_transition_profile(
+            valid, confidence, pixels, pixels,
+            max_orient_step_deg=40.0, max_translation_step_m=0.05,
+        )
+        self.assertGreater(profile["temporal_strength"][2], profile["temporal_strength"][1])
+        self.assertLess(profile["orient_limit_rad"][2], profile["orient_limit_rad"][1])
+        self.assertLess(profile["translation_limit_m"][2], profile["translation_limit_m"][1])
+
+    def test_parameter_transition_limits_reject_large_solution_switch(self):
+        import torch
+
+        pose = torch.tensor([[0.0, 0.0], [4.0, 0.0]], dtype=torch.float32)
+        orient = torch.tensor([[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]], dtype=torch.float32)
+        transl = torch.tensor([[0.0, 0.0, 0.2], [0.2, 0.0, 0.2]], dtype=torch.float32)
+        profile = {
+            "pose_limit": torch.tensor([1.0, 0.6]),
+            "orient_limit_rad": torch.tensor([1.0, 0.4]),
+            "translation_limit_m": torch.tensor([1.0, 0.03]),
+        }
+        MODULE.limit_parameter_transitions_(
+            pose, orient, transl, torch.tensor([0, 1]), profile
+        )
+        self.assertLessEqual(float(torch.linalg.vector_norm(pose[1] - pose[0])), 0.60001)
+        self.assertLessEqual(float(torch.linalg.vector_norm(orient[1] - orient[0])), 0.40001)
+        self.assertLessEqual(float(torch.linalg.vector_norm(transl[1] - transl[0])), 0.03001)
+
+    def test_image_alignment_moves_palm_without_rotating_pose(self):
+        import torch
+
+        joints = torch.zeros((3, 21, 3), dtype=torch.float32)
+        joints[..., 2] = 1.0
+        rotation = torch.eye(3)
+        projection = torch.tensor([
+            [100.0, 0.0, 50.0, 0.0],
+            [0.0, 100.0, 60.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ])
+        observed = MODULE.project_rectified(joints, rotation, projection)
+        observed[..., 0] += 10.0
+        correction = MODULE.image_space_translation_alignment(
+            joints, observed, rotation, projection, torch.ones(3), maximum_m=0.2,
+        )
+        np.testing.assert_allclose(correction.numpy()[:, 0], 0.1, atol=1e-6)
+        np.testing.assert_allclose(correction.numpy()[:, 1:], 0.0, atol=1e-6)
+
     def test_synthetic_differentiable_fit_reduces_joint_error(self):
         import torch
 
@@ -120,7 +176,10 @@ class FitManoSequenceTests(unittest.TestCase):
             pca_components=3, shape_frames=4, shape_iterations=25, pose_iterations=35,
             pose_window=32, pose_overlap=4, rigid_initialization=False,
             learning_rate=0.04, w_3d=1.0, w_2d=0.02, w_pose=0.0001,
-            w_shape=0.0001, w_temporal=0.001,
+            w_shape=0.0001, w_temporal=0.001, w_rigid_temporal=0.0001,
+            w_acceleration=0.0, boundary_weight=0.0,
+            max_orient_step_deg=180.0, max_translation_step_m=0.5,
+            max_pose_step=10.0,
         )
         result = MODULE.optimize_track(model, {
             "positions": target, "valid": np.ones((frames, 21), dtype=bool),

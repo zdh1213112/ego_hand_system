@@ -227,6 +227,8 @@ python scripts/fit_mano_sequence.py \
 
 输出中每条轨迹包含 MANO 778顶点、21关节、faces、shape/pose/orientation/translation 参数、关节 CSV 和网格对比视频。
 
+针对移动过程中的 MANO 整手翻转、平移和关节突变，项目现已加入观测质量自适应时序约束、窗口边界锚定、SO(3) 旋转限幅、姿态/刚体速度与加速度约束。验证结果和推荐参数见 [MANO 运动稳定性优化](docs/MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md)。正式对比视频位于 `output/mano_overlay_motion_guard/mano_overlay_21dof.mp4`。
+
 本录像的正式精修结果位于 `output/mano_fit_refined`，可直接查看：
 
 ```bash

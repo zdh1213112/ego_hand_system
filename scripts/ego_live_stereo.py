@@ -109,6 +109,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mano-pose-prior", type=float, default=0.006)
     parser.add_argument("--mano-temporal-weight", type=float, default=0.12)
     parser.add_argument("--mano-rigid-blend", type=float, default=0.65)
+    parser.add_argument("--mano-max-orient-step-deg", type=float, default=75.0)
+    parser.add_argument("--mano-max-translation-step-m", type=float, default=0.08)
+    parser.add_argument("--mano-low-quality-freeze", type=float, default=0.22)
     parser.add_argument("--mano-angle-window", type=int, default=5)
     parser.add_argument("--mano-width", type=int, default=1920)
     parser.add_argument("--mano-height", type=int, default=1080)
@@ -747,6 +750,9 @@ def main() -> int:
             pose_prior_weight=args.mano_pose_prior,
             temporal_weight=args.mano_temporal_weight,
             rigid_blend=args.mano_rigid_blend,
+            max_orient_step_deg=args.mano_max_orient_step_deg,
+            max_translation_step_m=args.mano_max_translation_step_m,
+            low_quality_freeze=args.mano_low_quality_freeze,
             angle_window=args.mano_angle_window,
             profile_dir=profile_dir if profile_dir.is_dir() else None,
         )

@@ -39,6 +39,9 @@ class LiveManoFitter:
         pose_prior_weight: float = 0.006,
         temporal_weight: float = 0.12,
         rigid_blend: float = 0.65,
+        max_orient_step_deg: float = 75.0,
+        max_translation_step_m: float = 0.08,
+        low_quality_freeze: float = 0.22,
         angle_window: int = 5,
         profile_dir: Path | None = None,
     ):
@@ -58,6 +61,9 @@ class LiveManoFitter:
         self.pose_prior_weight = pose_prior_weight
         self.temporal_weight = temporal_weight
         self.rigid_blend = rigid_blend
+        self.max_orient_step_deg = max_orient_step_deg
+        self.max_translation_step_m = max_translation_step_m
+        self.low_quality_freeze = low_quality_freeze
         self.angle_window = angle_window
         self.model_dir = model_dir.resolve()
         self.mano = import_mano(mano_source.resolve())
@@ -182,6 +188,10 @@ class LiveManoFitter:
             "previous_pose": pose.detach().clone(),
             "previous_orient": orient.detach().clone(),
             "previous_transl": transl.detach().clone(),
+            "previous_pose_velocity": torch.zeros_like(pose),
+            "previous_orient_velocity": torch.zeros_like(orient),
+            "previous_transl_velocity": torch.zeros_like(transl),
+            "previous_left_px": None,
             "kinematic_axes": build_kinematic_axes(rest_joints),
             "updates": 0,
             "missed_updates": 0,
@@ -248,6 +258,37 @@ class LiveManoFitter:
             np.asarray(match.get("right_points", match["right"]["pixels"]), dtype=np.float32)[None],
             dtype=torch.float32, device=self.device,
         )
+        current_left_px_np = left_px[0].detach().cpu().numpy()
+        previous_left_px_np = state.get("previous_left_px")
+        image_motion_px = 0.0
+        if previous_left_px_np is not None:
+            finite_motion = (
+                np.isfinite(previous_left_px_np).all(axis=-1)
+                & np.isfinite(current_left_px_np).all(axis=-1)
+            )
+            if np.any(finite_motion):
+                image_motion_px = float(np.median(np.linalg.norm(
+                    current_left_px_np[finite_motion] - previous_left_px_np[finite_motion], axis=1
+                )))
+        observed_np = valid_np & ~np.asarray(match["predicted_3d"], dtype=bool)
+        observed_count = int(np.count_nonzero(observed_np))
+        observation_quality = float(
+            np.mean(confidence_np[observed_np]) * np.sqrt(observed_count / 21.0)
+        ) if observed_count else 0.0
+        observation_quality = float(np.clip(observation_quality, 0.0, 1.0))
+        temporal_strength = float(np.clip(
+            0.45 + 2.4 * (1.0 - observation_quality)
+            + 0.45 * np.exp(-image_motion_px / 12.0),
+            0.45, 3.0,
+        ))
+        motion_factor = 0.75 + 0.50 * min(image_motion_px / 35.0, 1.0)
+        quality_factor = 0.80 + 0.20 * observation_quality
+        limit_factor = float(np.clip(motion_factor * quality_factor, 0.60, 1.25))
+        orient_limit_deg = self.max_orient_step_deg * limit_factor
+        translation_limit_m = self.max_translation_step_m * limit_factor
+        if image_motion_px < 3.0:
+            orient_limit_deg = min(orient_limit_deg, 28.0)
+            translation_limit_m = min(translation_limit_m, 0.035)
 
         model = state["model"]
         optimizer = state["optimizer"]
@@ -255,6 +296,9 @@ class LiveManoFitter:
         orient = state["orient"]
         transl = state["transl"]
         betas = state["betas"]
+        prior_pose = state["previous_pose"].detach().clone()
+        prior_orient = state["previous_orient"].detach().clone()
+        prior_transl = state["previous_transl"].detach().clone()
         initializing = state["updates"] == 0
         iterations = self.initial_iterations if initializing else self.iterations
         if reacquired:
@@ -267,7 +311,6 @@ class LiveManoFitter:
         with torch.no_grad():
             _, current_joints, _ = run_model(model, betas, orient, pose, transl)
             palm = np.asarray((0, 1, 5, 9, 13, 17), dtype=np.int64)
-            observed_np = valid_np & ~np.asarray(match["predicted_3d"], dtype=bool)
             selected = palm[observed_np[palm]]
             if len(selected) >= 3:
                 current_np = current_joints[0].detach().cpu().numpy()
@@ -275,7 +318,12 @@ class LiveManoFitter:
                     current_np[selected], target_np[selected], confidence_np[selected]
                 )
                 delta_vector, _ = cv2.Rodrigues(delta_rotation)
-                blended_rotation, _ = cv2.Rodrigues(delta_vector * self.rigid_blend)
+                delta_angle = float(np.linalg.norm(delta_vector))
+                maximum_delta = np.deg2rad(orient_limit_deg)
+                if delta_angle > maximum_delta:
+                    delta_vector *= maximum_delta / delta_angle
+                rigid_blend = self.rigid_blend * (0.45 + 0.55 * observation_quality)
+                blended_rotation, _ = cv2.Rodrigues(delta_vector * rigid_blend)
                 current_rotation, _ = cv2.Rodrigues(
                     orient[0].detach().cpu().numpy().astype(np.float64)
                 )
@@ -290,6 +338,9 @@ class LiveManoFitter:
                 translation_delta = torch.sum(
                     (target[0, mask] - current_joints[0, mask]) * weights[:, None], dim=0
                 ) / weights.sum().clamp_min(1e-6)
+                translation_norm = torch.linalg.vector_norm(translation_delta)
+                if bool(translation_norm > translation_limit_m):
+                    translation_delta *= translation_limit_m / translation_norm.clamp_min(1e-8)
                 transl.add_(translation_delta[None])
         started = time.perf_counter()
         final_loss = float("nan")
@@ -309,14 +360,24 @@ class LiveManoFitter:
             loss2d += robust_weighted_loss(
                 (right_prediction - right_px) / 100.0, weights2d_right, 0.015
             )
-            temporal = (pose - state["previous_pose"]).square().mean()
-            temporal += 0.25 * (orient - state["previous_orient"]).square().mean()
-            temporal += 8.0 * (transl - state["previous_transl"]).square().mean()
+            pose_velocity = pose - prior_pose
+            orient_velocity = orient - prior_orient
+            transl_velocity = transl - prior_transl
+            temporal = pose_velocity.square().mean()
+            temporal += 0.25 * orient_velocity.square().mean()
+            temporal += 8.0 * transl_velocity.square().mean()
+            acceleration = (pose_velocity - state["previous_pose_velocity"]).square().mean()
+            acceleration += 0.25 * (
+                orient_velocity - state["previous_orient_velocity"]
+            ).square().mean()
+            acceleration += 8.0 * (
+                transl_velocity - state["previous_transl_velocity"]
+            ).square().mean()
             pose_prior = pose.square().mean()
             loss = (
                 loss3d + 0.12 * loss2d
                 + self.pose_prior_weight * pose_prior
-                + self.temporal_weight * temporal
+                + self.temporal_weight * temporal_strength * (temporal + 0.35 * acceleration)
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_([pose, orient, transl], 3.0)
@@ -329,11 +390,52 @@ class LiveManoFitter:
                 break
 
         with torch.no_grad():
+            # Final trust region: reject optimizer solution switches which are
+            # inconsistent with the actual 2D hand motion.
+            pose_delta = pose - prior_pose
+            pose_limit = 6.0 * np.clip(
+                (0.60 + 0.40 * observation_quality)
+                * (0.80 + 0.40 * min(image_motion_px / 35.0, 1.0)), 0.50, 1.20,
+            )
+            pose_norm = torch.linalg.vector_norm(pose_delta)
+            if bool(pose_norm > pose_limit):
+                pose.copy_(prior_pose + pose_delta * (pose_limit / pose_norm.clamp_min(1e-8)))
+            previous_rotation, _ = cv2.Rodrigues(
+                prior_orient[0].detach().cpu().numpy().astype(np.float64)
+            )
+            current_rotation, _ = cv2.Rodrigues(
+                orient[0].detach().cpu().numpy().astype(np.float64)
+            )
+            relative_vector, _ = cv2.Rodrigues(current_rotation @ previous_rotation.T)
+            relative_angle = float(np.linalg.norm(relative_vector))
+            orient_limit = np.deg2rad(orient_limit_deg)
+            if relative_angle > orient_limit:
+                limited_relative, _ = cv2.Rodrigues(
+                    relative_vector * (orient_limit / relative_angle)
+                )
+                limited_vector, _ = cv2.Rodrigues(limited_relative @ previous_rotation)
+                orient.copy_(torch.as_tensor(
+                    limited_vector[:, 0][None], dtype=torch.float32, device=self.device
+                ))
+            translation_delta = transl - prior_transl
+            translation_norm = torch.linalg.vector_norm(translation_delta)
+            if bool(translation_norm > translation_limit_m):
+                transl.copy_(
+                    prior_transl + translation_delta
+                    * (translation_limit_m / translation_norm.clamp_min(1e-8))
+                )
+            if observation_quality < self.low_quality_freeze:
+                keep = 0.20 + 0.60 * (observation_quality / max(self.low_quality_freeze, 1e-6))
+                pose.copy_(prior_pose + keep * (pose - prior_pose))
             vertices, joints, output = run_model(model, betas, orient, pose, transl)
             axis_angle = output.hand_pose.reshape(1, 15, 3)[0].detach().cpu().numpy()
+        state["previous_pose_velocity"] = pose.detach() - prior_pose
+        state["previous_orient_velocity"] = orient.detach() - prior_orient
+        state["previous_transl_velocity"] = transl.detach() - prior_transl
         state["previous_pose"] = pose.detach().clone()
         state["previous_orient"] = orient.detach().clone()
         state["previous_transl"] = transl.detach().clone()
+        state["previous_left_px"] = current_left_px_np.copy()
         state["updates"] += 1
         angles = extract_kinematic_sequence(
             axis_angle[None], state["kinematic_axes"], handedness
@@ -359,6 +461,8 @@ class LiveManoFitter:
             "iterations": performed_iterations,
             "device": str(self.device),
             "observed": True,
+            "observation_quality": observation_quality,
+            "image_motion_px": image_motion_px,
         }
         state["last_result"] = result
         return result
