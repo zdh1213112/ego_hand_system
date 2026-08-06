@@ -269,24 +269,57 @@ python scripts/fit_mano_sequence.py \
   --max-pairs 12
 ```
 
-冒烟测试通过后运行全量：
+冒烟测试通过后运行全量。对于最终输出，推荐使用两阶段 `tuned` 预设，
+不要继续使用一次性全序列默认拟合。第一阶段估计形状并建立稳定初值：
 
 ```bash
 python scripts/fit_mano_sequence.py \
-  --input output/mano_preparation/mano_input.npz \
+  --input output/recording_20260806_105205/mano_preparation/mano_input.npz \
   --mano-source third_party/MANO \
   --model-dir models/mano \
-  --output output/mano_fit
+  --output output/recording_20260806_105205/mano_fit_initial_tuned \
+  --shape-iterations 300 --pose-iterations 120 \
+  --pose-window 24 --pose-overlap 8 --learning-rate 0.008 \
+  --w-3d 1.0 --w-2d 0.8 --w-pose 0.0025 \
+  --w-temporal 0.012 --w-rigid-temporal 0.005 \
+  --w-acceleration 0.006 --boundary-weight 0.04 \
+  --max-orient-step-deg 75 --max-translation-step-m 0.08 \
+  --max-pose-step 6 --no-image-rigid-alignment --device cuda --no-video
+```
+
+第二阶段从初值做低学习率精修：
+
+```bash
+python scripts/fit_mano_sequence.py \
+  --input output/recording_20260806_105205/mano_preparation/mano_input.npz \
+  --mano-source third_party/MANO \
+  --model-dir models/mano \
+  --output output/recording_20260806_105205/mano_fit_final_tuned \
+  --initial-output output/recording_20260806_105205/mano_fit_initial_tuned \
+  --shape-iterations 0 --pose-iterations 80 \
+  --pose-window 24 --pose-overlap 8 --learning-rate 0.0015 \
+  --w-3d 1.0 --w-2d 0.8 --w-pose 0.0025 \
+  --w-temporal 0.012 --w-rigid-temporal 0.005 \
+  --w-acceleration 0.006 --boundary-weight 0.04 \
+  --max-orient-step-deg 75 --max-translation-step-m 0.08 \
+  --max-pose-step 6 --no-image-rigid-alignment --device cuda --no-video
 ```
 
 输出中每条轨迹包含 MANO 778顶点、21关节、faces、shape/pose/orientation/translation 参数、关节 CSV 和网格对比视频。
 
 针对移动过程中的 MANO 整手翻转、平移和关节突变，项目现已加入观测质量自适应时序约束、窗口边界锚定、SO(3) 旋转限幅、姿态/刚体速度与加速度约束。验证结果和推荐参数见 [MANO 运动稳定性优化](docs/MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md)。正式对比视频位于 `output/mano_overlay_motion_guard/mano_overlay_21dof.mp4`。
 
-本录像的正式精修结果位于 `output/mano_fit_refined`，可直接查看：
+`20260806_105205` 录像的稳定候选是 `mano_fit_final_tuned`，对应可视化是
+`mano_overlay_trajectory_tuned`。同一份双目/MediaPipe输入下，tuned版掌心位置
+逐帧变化P95由右手26.95 mm、左手28.28 mm降至22.64 mm、18.87 mm；左右图
+重投影误差也明显下降。这证明主要跳变来自 MANO 拟合策略，而不是 Basalt VIO。
+当前左手在严重运动/遮挡段仍可能出现姿态跳变，因此 tuned 是推荐基线，不代表
+所有异常都已消除。
+
+直接查看稳定候选：
 
 ```bash
-xdg-open output/mano_fit_refined/mano_fit_both_hands.mp4
+xdg-open output/recording_20260806_105205/mano_overlay_trajectory_tuned/mano_overlay_21dof.mp4
 ```
 
 ### 21自由度网格叠加与双手3D预览
@@ -350,8 +383,17 @@ export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
 python scripts/run_basalt_offline.py \
-  --session recordings/Orbbec_Ego_AZER764008C_20260805_171119
+  --session recordings/Orbbec_Ego_AZER764008C_20260806_105205 \
+  --hand-pose-csv output/recording_20260806_105205/mano_overlay_trajectory_tuned/hand_end_effector_6d.csv \
+  --world-output output/recording_20260806_105205/basalt_world/world_hand_trajectory_tuned
 ```
+
+未传 `--hand-pose-csv` 时，脚本会优先选择
+`mano_overlay_trajectory_tuned/hand_end_effector_6d.csv`，不存在时才回退到旧版
+`mano_overlay_trajectory`。已有世界轨迹若来自不同的 MANO CSV，脚本会要求使用
+新的 `--output-root`，避免静默复用不稳定旧结果。
+只更换 MANO 拟合时推荐使用新的 `--world-output`：它会复用已有 Basalt 数据集和
+相机轨迹，只重新执行手部6D到世界坐标的融合与可视化。
 
 主要输出：
 

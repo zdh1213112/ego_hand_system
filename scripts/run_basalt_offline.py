@@ -21,6 +21,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session", required=True, type=Path)
     parser.add_argument("--hand-pose-csv", type=Path)
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument(
+        "--world-output", type=Path,
+        help="world-hand output directory; allows reusing one Basalt dataset with a new MANO fit",
+    )
     parser.add_argument("--image-scale", type=float, default=0.5)
     parser.add_argument("--max-delta-us", type=int, default=1500)
     parser.add_argument("--max-pairs", type=int, default=0)
@@ -46,10 +50,12 @@ def session_output_name(session: Path) -> str:
 
 
 def default_hand_pose(project_root: Path, session: Path) -> Path:
-    return (
-        project_root / "output" / session_output_name(session)
-        / "mano_overlay_trajectory" / "hand_end_effector_6d.csv"
-    )
+    session_output = project_root / "output" / session_output_name(session)
+    candidates = [
+        session_output / "mano_overlay_trajectory_tuned" / "hand_end_effector_6d.csv",
+        session_output / "mano_overlay_trajectory" / "hand_end_effector_6d.csv",
+    ]
+    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 def run(command: list[str], *, cwd: Path | None = None, env: dict | None = None) -> None:
@@ -97,7 +103,11 @@ def main() -> int:
     )
 
     dataset = output_root / "dataset"
-    world_output = output_root / "world_hand_trajectory"
+    world_output = (
+        args.world_output.resolve()
+        if args.world_output
+        else output_root / "world_hand_trajectory"
+    )
     output_root.mkdir(parents=True, exist_ok=True)
 
     dataset_outputs = [
@@ -160,8 +170,17 @@ def main() -> int:
         if summary_path.is_file():
             with summary_path.open("r", encoding="utf-8") as stream:
                 summary = json.load(stream)
-            print(f"Reuse world-hand result: {world_output} ({summary.get('frames', '?')} frames)")
-            return 0
+            recorded_hand_pose = Path(summary.get("hand_pose_csv", "")).resolve()
+            if recorded_hand_pose == hand_pose_csv:
+                print(f"Reuse world-hand result: {world_output} ({summary.get('frames', '?')} frames)")
+                return 0
+            raise RuntimeError(
+                "existing world-hand output was generated from a different MANO 6D CSV:\n"
+                f"  existing: {recorded_hand_pose}\n"
+                f"  requested: {hand_pose_csv}\n"
+                "Choose a fresh --output-root so the tuned pose is not silently mixed "
+                "with an older result."
+            )
         raise RuntimeError(
             f"partial/non-empty world output: {world_output}. Choose a fresh --output-root."
         )
