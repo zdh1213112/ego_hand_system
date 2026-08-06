@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "public_submodules": {
+    "MANO": {
+      "path": "third_party/MANO",
+      "url": "https://github.com/otaheri/MANO.git",
+      "revision": "5869ab059c1bf31cc724f57eaf93e041135e8960",
+      "license_file": "third_party/MANO/LICENSE"
+    },
+    "basalt": {
+      "path": "third_party/basalt",
+      "url": "https://github.com/VladyslavUsenko/basalt.git",
+      "revision": "6d8637b9d68ea18a1a63c1baa72818779e156932",
+      "release": "0.1.7",
+      "license_file": "third_party/basalt/LICENSE"
+    }
+  },
+  "local_assets": {
+    "mediapipe_hand_landmarker": {
+      "version": "float16/1",
+      "required_files": ["models/hand_landmarker.task"],
+      "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+      "checksum_file": "models/hand_landmarker.task",
+      "install": "Run scripts/install_mediapipe_model.sh."
+    },
+    "mano_models": {
+      "required_files": ["models/mano/MANO_LEFT.pkl", "models/mano/MANO_RIGHT.pkl"],
+      "tested_sha256": {
+        "MANO_LEFT.pkl": "c4022f7083f2ca7c78b2b3d595abbab52debd32b09d372b16923a801f0ea6a30",
+        "MANO_RIGHT.pkl": "45d60aa3b27ef9107a7afd4e00808f307fd91111e1cfa35afd5c4a62de264767"
+      },
+      "install": "Download MANO models after accepting the license, then run scripts/install_mano_models.py --source PATH."
+    },
+    "orbbec_sdk_linux_x86_64": {
+      "version": "2.9.0",
+      "required_files": [
+        "third_party/orbbec_sdk/include/libobsensor/ObSensor.hpp",
+        "third_party/orbbec_sdk/lib/libOrbbecSDK.so.2.9.0",
+        "third_party/orbbec_sdk/OrbbecSDKConfig.xml"
+      ],
+      "install": "Copy the Linux x86_64 OrbbecSDK 2.9.0 runtime from the EGO delivery package into third_party/orbbec_sdk/."
+    },
+    "basalt_runtime_linux_x86_64": {
+      "version": "0.1.7",
+      "required_files": [
+        "third_party/basalt_runtime/bin/basalt_vio",
+        "third_party/basalt_runtime/lib/libbasalt.so",
+        "third_party/basalt_runtime/VERSION"
+      ],
+      "artifact": "basalt-0.1.7-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "8ab56b2ab27315a9c64cb8ae9c99d0d4d894e2cc87bc9841d8defe30b86e6d24",
+      "install": "Download the official Basalt 0.1.7 Linux x86_64 release or build third_party/basalt, then place basalt_vio and libbasalt.so under third_party/basalt_runtime/."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+[submodule "third_party/MANO"]
+	path = third_party/MANO
+	url = https://github.com/otaheri/MANO.git
+[submodule "third_party/basalt"]
+	path = third_party/basalt
+	url = https://github.com/VladyslavUsenko/basalt.git

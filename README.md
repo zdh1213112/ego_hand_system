@@ -32,6 +32,56 @@ data/         本地录像数据，被 Git 忽略
 third_party/  外部 MANO 源码，被 Git 忽略
 ```
 
+## 初始化外部依赖
+
+公开源码依赖使用固定提交的 Git submodule。推荐克隆方式（不会下载仅源码编译需要的 vcpkg）：
+
+```bash
+git clone https://github.com/zdh1213112/ego_hand_system.git
+cd ego_hand_system
+./scripts/setup_third_party.sh
+```
+
+也可以手工初始化顶层 submodule：
+
+```bash
+git submodule update --init third_party/MANO third_party/basalt
+./scripts/setup_third_party.sh
+```
+
+`third_party/MANO` 和 `third_party/basalt` 会自动获取。MANO许可模型、
+OrbbecSDK二进制和Basalt平台运行时不会上传到GitHub；初始化脚本会检查缺项并
+显示下载或复制位置。完整说明见 [`third_party/README.md`](third_party/README.md)。
+
+公开的 MediaPipe 手部模型会由初始化脚本自动下载并校验。MANO模型下载后可用
+下面的命令安装，参数可以是官方压缩包或解压目录：
+
+```bash
+python scripts/install_mano_models.py --source /path/to/MANO/archive_or_directory
+```
+
+如果你有合法的私有资产包，可以直接在项目根目录解压，保持以下路径：
+
+```text
+models/hand_landmarker.task
+models/mano/MANO_LEFT.pkl
+models/mano/MANO_RIGHT.pkl
+third_party/orbbec_sdk/
+third_party/basalt_runtime/
+```
+
+然后运行：
+
+```bash
+python scripts/check_third_party.py --require-mano --require-live --require-basalt
+```
+
+如果这是你有权使用的私有资产压缩包，也可以运行：
+
+```bash
+./scripts/install_local_assets.sh --archive /path/ego_hand_assets.tar.gz
+```
+
 ## Python 环境
 
 ```bash

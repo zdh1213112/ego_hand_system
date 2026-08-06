@@ -21,6 +21,9 @@ __pycache__/
 /recordings/
 /third_party/*
 !/third_party/README.md
+!/third_party/manifest.json
+!/third_party/MANO
+!/third_party/basalt
 *.mp4
 *.avi
 *.mov
