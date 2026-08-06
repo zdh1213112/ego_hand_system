@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="交互理解 EGO Hand System 中的 MANO 21 自由度。">
+  <title>EGO Hand · 21-DOF 交互学习器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="返回页面顶部">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>EGO HAND</strong><small>21-DOF EXPLORER</small></span>
+      </a>
+      <div class="header-note"><span class="live-dot"></span>交互教学模型 · 数值单位为角度</div>
+    </header>
+
+    <section class="intro">
+      <div>
+        <p class="eyebrow">从一根手指开始理解</p>
+        <h1>把 21 个自由度，<br><em>亲手转一遍。</em></h1>
+      </div>
+      <p class="lead">点击手上的关节，或从右侧选择一个自由度。拖动滑块后，观察它控制的是哪个关节、绕哪条轴，以及正方向如何运动。</p>
+    </section>
+
+    <section class="workspace">
+      <div class="viewer-card">
+        <div class="viewer-toolbar">
+          <div class="segmented" role="group" aria-label="选择左右手">
+            <button type="button" data-hand="Right" class="active">右手</button>
+            <button type="button" data-hand="Left">左手</button>
+          </div>
+          <div class="viewer-actions">
+            <button type="button" class="icon-button" id="resetView" title="恢复观察角度" aria-label="恢复观察角度">↗</button>
+            <button type="button" class="text-button" id="resetPose">重置姿态</button>
+          </div>
+        </div>
+
+        <div class="canvas-wrap" id="canvasWrap">
+          <canvas id="handCanvas" aria-label="可旋转的三维手部骨架"></canvas>
+          <div class="canvas-tip"><span>拖动</span>旋转视角&nbsp;&nbsp;·&nbsp;&nbsp;<span>滚轮</span>缩放&nbsp;&nbsp;·&nbsp;&nbsp;<span>点击关节</span>选择</div>
+          <div class="axis-legend" aria-hidden="true"><i class="axis-x"></i>X <i class="axis-y"></i>Y <i class="axis-z"></i>Z</div>
+        </div>
+
+        <div class="selected-readout">
+          <div class="readout-index" id="selectedIndex">01</div>
+          <div class="readout-copy">
+            <p><span id="selectedFinger">拇指</span><b>·</b><span id="selectedJoint">CMC 屈伸</span></p>
+            <small id="selectedHint">拇指根部弯曲 / 伸直</small>
+          </div>
+          <output id="selectedValue">0°</output>
+        </div>
+      </div>
+
+      <aside class="controls-card">
+        <div class="controls-heading">
+          <div><p class="eyebrow">选择一个动作</p><h2>21 个自由度</h2></div>
+          <div class="count-ring"><strong id="dofCount">21</strong><span>DOF</span></div>
+        </div>
+
+        <div class="quick-presets" aria-label="姿态预设">
+          <button type="button" data-preset="open" class="active">张开</button>
+          <button type="button" data-preset="fist">握拳</button>
+          <button type="button" data-preset="pinch">捏取</button>
+          <button type="button" data-preset="point">指向</button>
+        </div>
+
+        <nav class="finger-tabs" id="fingerTabs" aria-label="选择手指"></nav>
+        <div class="dof-list" id="dofList"></div>
+
+        <div class="slider-panel">
+          <div class="slider-labels"><span id="rangeMin">−45°</span><strong id="sliderTitle">CMC 屈伸</strong><span id="rangeMax">80°</span></div>
+          <input id="angleSlider" type="range" min="-45" max="80" step="1" value="0" aria-label="调整所选自由度角度">
+          <div class="slider-actions">
+            <button type="button" id="minusAngle" aria-label="减少五度">−5°</button>
+            <button type="button" id="zeroAngle">归零</button>
+            <button type="button" id="plusAngle" aria-label="增加五度">+5°</button>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="lesson-grid">
+      <article class="lesson-card lesson-main">
+        <p class="eyebrow">当前自由度在做什么？</p>
+        <div class="lesson-title"><span id="lessonCode">CF</span><div><h2 id="lessonName">CMC 屈伸</h2><p id="lessonEnglish">Carpometacarpal flexion</p></div></div>
+        <p id="lessonDescription">控制拇指从掌面向内弯曲或向外伸展，是形成抓握包络的重要动作。</p>
+        <div class="direction-row"><span>负方向</span><div><i></i></div><span>正方向</span></div>
+        <p class="direction-copy"><b id="negativeMeaning">伸展</b><span>0° 为 MANO 平均姿态附近</span><b id="positiveMeaning">屈曲</b></p>
+      </article>
+
+      <article class="lesson-card anatomy-card">
+        <p class="eyebrow">先认清关节层级</p>
+        <h2>从手掌到指尖</h2>
+        <ol class="joint-chain">
+          <li><span>MCP</span><p><b>掌指关节</b><small>手指与手掌相连的“指根”</small></p></li>
+          <li><span>PIP</span><p><b>近端指间关节</b><small>手指中间的第一道弯</small></p></li>
+          <li><span>DIP</span><p><b>远端指间关节</b><small>最靠近指尖的一道弯</small></p></li>
+        </ol>
+        <p class="thumb-note"><b>拇指是例外：</b>它使用 CMC、MCP、IP，并且 CMC 同时承担屈伸、张合和对掌三个旋转分量。</p>
+      </article>
+
+      <article class="lesson-card data-card">
+        <p class="eyebrow">和项目输出对应</p>
+        <h2 id="fieldName">thumb_cmc_flex_rad</h2>
+        <div class="value-conversion"><strong id="radValue">0.000</strong><span>rad</span><i>=</i><strong id="degValue">0.0</strong><span>deg</span></div>
+        <p>网页使用角度方便学习；EGO CSV 中保存的是弧度。换算公式为：</p>
+        <code>deg = rad × 180 / π</code>
+        <div class="important-note"><span>!</span><p>这里的 21-DOF 是<strong>手指局部旋转</strong>。它不包含整只手在左相机坐标系里的位置和朝向；后者属于 Hand 6D Pose。</p></div>
+      </article>
+    </section>
+
+    <footer>
+      <p>EGO Hand System · Interactive learning aid</p>
+      <p>教学骨架用于理解项目中的运动学定义，不作为医学量角工具。</p>
+    </footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
