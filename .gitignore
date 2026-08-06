@@ -30,10 +30,10 @@ __pycache__/
 *.wav
 
 # Downloaded model files are intentionally not redistributed
-/models/*.task
-/models/mano/*
+#/models/*.task
+#/models/mano/*
 !/models/mano/README.md
-*.pkl
+#*.pkl
 *.npz
 
 # Editors and operating systems
