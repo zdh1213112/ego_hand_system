@@ -278,3 +278,32 @@ ctest --test-dir build --output-on-failure
 - `cam_0` 为左/参考相机，`cam_1` 为右相机；
 - `KB` 畸变使用 OpenCV `cv::fisheye` API；
 - 第一阶段输出坐标系为左相机光学坐标系。
+
+## Basalt 双目惯性 VIO 与世界坐标手部轨迹
+
+项目现已支持把 EGO 双目、PTS、KB 鱼眼标定和约 1000 Hz IMU 转为 Basalt 输入，估计左相机的米制重力对齐世界轨迹，再将相机坐标下的手部末端 6D 位姿转换为世界坐标：
+
+```text
+T_world_hand = T_world_imu · T_imu_camera · T_camera_hand
+```
+
+进入环境后可一条命令运行当前录制：
+
+```bash
+cd /home/zdh/ego_hand_system
+conda activate ego-hand
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+
+python scripts/run_basalt_offline.py \
+  --session recordings/Orbbec_Ego_AZER764008C_20260805_171119
+```
+
+主要输出：
+
+- `dataset/trajectory.csv`：Basalt IMU 世界轨迹；
+- `world_hand_trajectory/camera_trajectory_world.csv`：左相机世界 6D 位姿；
+- `world_hand_trajectory/hand_trajectory_world.csv`：左右手末端世界 6D 位姿；
+- `world_hand_trajectory/world_hand_trajectory_overlay.mp4`：世界固定轨迹在当前相机画面上的重投影。
+
+当前录制已完整跑通 1182 对双目帧和 40260 对 IMU 样本。详细的数据转换、时间偏移、坐标系定义、运行时安装、验收结果和局限见 [Basalt 双目惯性 VIO 与手部世界轨迹](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md)。
