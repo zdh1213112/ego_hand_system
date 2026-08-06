@@ -53,11 +53,15 @@ git submodule update --init third_party/MANO third_party/basalt
 OrbbecSDK二进制和Basalt平台运行时不会上传到GitHub；初始化脚本会检查缺项并
 显示下载或复制位置。完整说明见 [`third_party/README.md`](third_party/README.md)。
 
-公开的 MediaPipe 手部模型会由初始化脚本自动下载并校验。MANO模型下载后可用
-下面的命令安装，参数可以是官方压缩包或解压目录：
+公开的 MediaPipe 手部模型会由初始化脚本自动下载并校验。MANO v1.2 官方模型
+下载地址（下载即表示同意 MANO 官网许可条款）：
+
+<https://download.is.tue.mpg.de/download.php?domain=mano&resume=1&sfile=mano_v1_2.zip>
+
+下载 `mano_v1_2.zip` 后可用下面的命令安装，参数可以是官方压缩包或解压目录：
 
 ```bash
-python scripts/install_mano_models.py --source /path/to/MANO/archive_or_directory
+python scripts/install_mano_models.py --source /path/to/mano_v1_2.zip
 ```
 
 如果你有合法的私有资产包，可以直接在项目根目录解压，保持以下路径：
