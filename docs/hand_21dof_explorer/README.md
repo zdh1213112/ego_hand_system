@@ -15,6 +15,7 @@ python -m http.server 8000 --directory docs/hand_21dof_explorer
 页面没有 npm 或网络依赖，支持：
 
 - 左右手切换；
+- 掌心/手背一键切换，并用掌纹、指甲和文字提示区分正反面；
 - 21 个自由度逐项选择和角度调节；
 - 张开、握拳、捏取和指向预设；
 - 拖动旋转、滚轮缩放及点击关节选择；
@@ -22,3 +23,9 @@ python -m http.server 8000 --directory docs/hand_21dof_explorer
 - 关节层级、正负方向以及 21-DOF 与 Hand 6D Pose 的区别说明。
 
 教学骨架用于解释项目的运动学约定，不作为医学或临床量角工具。
+
+可使用查询参数直接打开指定视图，例如：
+
+```text
+index.html?hand=Left&surface=back
+```

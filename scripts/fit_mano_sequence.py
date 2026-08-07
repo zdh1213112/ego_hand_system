@@ -51,6 +51,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=0.025)
     parser.add_argument("--w-3d", type=float, default=1.0)
     parser.add_argument("--w-2d", type=float, default=0.12)
+    parser.add_argument(
+        "--w-pinch", type=float, default=0.0,
+        help="thumb-index distance loss weight, active only for observed near-contact frames",
+    )
+    parser.add_argument(
+        "--pinch-threshold-m", type=float, default=0.025,
+        help="maximum observed thumb-index tip distance that activates the pinch loss",
+    )
+    parser.add_argument(
+        "--w-contact-tips", type=float, default=0.0,
+        help="near-contact thumb/index absolute 3D and 2D tip alignment weight",
+    )
+    parser.add_argument(
+        "--contact-tip-threshold-m", type=float, default=0.035,
+        help="observed thumb-index distance that activates absolute tip alignment",
+    )
+    parser.add_argument(
+        "--min-fit-observed-points", type=int, default=12,
+        help="minimum real 3D landmarks required for a frame to influence MANO fitting",
+    )
     parser.add_argument("--w-pose", type=float, default=0.003)
     parser.add_argument("--w-shape", type=float, default=0.015)
     parser.add_argument("--w-temporal", type=float, default=0.08)
@@ -163,6 +183,67 @@ def robust_weighted_loss(residual, weight, scale: float):
     norm = torch.linalg.vector_norm(safe_residual, dim=-1)
     robust = torch.sqrt(norm.square() + scale * scale) - scale
     return (robust * weight).sum() / weight.sum().clamp_min(1.0)
+
+
+def image_observation_weights(confidence, pixels, valid_mask):
+    import torch
+    finite = torch.isfinite(pixels).all(dim=-1)
+    valid = valid_mask & finite
+    minimum = torch.tensor(0.1, dtype=confidence.dtype, device=confidence.device)
+    return torch.where(valid, torch.maximum(confidence, minimum), 0.0)
+
+
+def pinch_distance_loss(joints, target, valid, confidence, threshold_m: float):
+    import torch
+    observed_distance = torch.linalg.vector_norm(target[:, 4] - target[:, 8], dim=-1)
+    predicted_distance = torch.linalg.vector_norm(joints[:, 4] - joints[:, 8], dim=-1)
+    active = valid[:, 4] & valid[:, 8] & torch.isfinite(observed_distance)
+    active &= observed_distance < threshold_m
+    tip_confidence = torch.minimum(confidence[:, 4], confidence[:, 8])
+    contact_strength = torch.clamp(
+        (threshold_m - observed_distance) / max(threshold_m, 1e-6), 0.0, 1.0
+    )
+    weights = torch.where(active, tip_confidence * contact_strength, 0.0)
+    residual = torch.where(active, predicted_distance - observed_distance, 0.0)
+    robust = torch.sqrt(residual.square() + 0.003 ** 2) - 0.003
+    return (robust * weights).sum() / weights.sum().clamp_min(1e-6)
+
+
+def contact_tip_alignment_loss(
+        joints, target, valid, confidence,
+        left_prediction, right_prediction, left_px, right_px,
+        left_valid, right_valid, threshold_m: float):
+    import torch
+
+    tip_ids = torch.as_tensor((4, 8), dtype=torch.long, device=joints.device)
+    observed_distance = torch.linalg.vector_norm(target[:, 4] - target[:, 8], dim=-1)
+    active = valid[:, 4] & valid[:, 8] & torch.isfinite(observed_distance)
+    active &= observed_distance < threshold_m
+    strength = torch.clamp(
+        (threshold_m - observed_distance) / max(threshold_m, 1e-6), 0.0, 1.0
+    )
+    tip_valid = valid.index_select(1, tip_ids) & active[:, None]
+    tip_confidence = confidence.index_select(1, tip_ids) * strength[:, None]
+    weights3d = torch.where(tip_valid, tip_confidence, 0.0)
+    loss = robust_weighted_loss(
+        joints.index_select(1, tip_ids) - target.index_select(1, tip_ids),
+        weights3d, 0.004,
+    )
+
+    for prediction, pixels, pixel_valid in (
+        (left_prediction, left_px, left_valid),
+        (right_prediction, right_px, right_valid),
+    ):
+        selected_prediction = prediction.index_select(1, tip_ids)
+        selected_pixels = pixels.index_select(1, tip_ids)
+        selected_valid = pixel_valid.index_select(1, tip_ids) & tip_valid
+        weights2d = image_observation_weights(
+            tip_confidence, selected_pixels, selected_valid
+        )
+        loss = loss + 0.25 * robust_weighted_loss(
+            (selected_prediction - selected_pixels) / 100.0, weights2d, 0.015
+        )
+    return loss
 
 
 def run_model(model, betas, orient, pose, transl):
@@ -293,6 +374,38 @@ def limit_parameter_transitions_(pose, orient, transl, frame_ids, profile) -> No
                 ))
 
 
+def repair_low_support_initial(initial: dict, supported: np.ndarray) -> dict:
+    """Replace underconstrained warm-start frames by interpolation from supported frames."""
+    supported = np.asarray(supported, dtype=bool)
+    repaired = {key: np.asarray(value).copy() for key, value in initial.items()}
+    anchors = np.flatnonzero(supported)
+    if len(anchors) == 0:
+        return repaired
+
+    for frame in np.flatnonzero(~supported):
+        insertion = int(np.searchsorted(anchors, frame))
+        previous = int(anchors[max(0, insertion - 1)])
+        following = int(anchors[min(insertion, len(anchors) - 1)])
+        if previous == following:
+            alpha = 0.0
+        else:
+            alpha = (frame - previous) / (following - previous)
+        for key in ("hand_pose_pca", "translation"):
+            repaired[key][frame] = (
+                (1.0 - alpha) * repaired[key][previous]
+                + alpha * repaired[key][following]
+            )
+
+        previous_rotation, _ = cv2.Rodrigues(repaired["global_orient"][previous])
+        following_rotation, _ = cv2.Rodrigues(repaired["global_orient"][following])
+        relative_vector, _ = cv2.Rodrigues(following_rotation @ previous_rotation.T)
+        partial_rotation, _ = cv2.Rodrigues(relative_vector[:, 0] * alpha)
+        repaired_rotation = partial_rotation @ previous_rotation
+        repaired_vector, _ = cv2.Rodrigues(repaired_rotation)
+        repaired["global_orient"][frame] = repaired_vector[:, 0]
+    return repaired
+
+
 def image_space_translation_alignment(
         joints, left_px, rotation, projection, quality, maximum_m: float):
     """Return a small robust translation that aligns the MANO palm in the image."""
@@ -391,16 +504,31 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
 
     target = torch.as_tensor(observations["positions"], dtype=torch.float32, device=device)
     valid = torch.as_tensor(observations["valid"], dtype=torch.bool, device=device)
+    observed = torch.as_tensor(
+        observations.get("observed", observations["valid"]),
+        dtype=torch.bool,
+        device=device,
+    )
+    min_fit_points = max(1, int(getattr(args, "min_fit_observed_points", 1)))
+    frame_support = observed.sum(dim=1) >= min_fit_points
+    fit_valid = valid & observed & frame_support[:, None]
     confidence = torch.as_tensor(observations["confidence"], dtype=torch.float32, device=device)
     left_px = torch.as_tensor(observations["left_px"], dtype=torch.float32, device=device)
     right_px = torch.as_tensor(observations["right_px"], dtype=torch.float32, device=device)
+    left_px_valid = torch.as_tensor(observations.get(
+        "left_px_valid", np.isfinite(observations["left_px"]).all(axis=-1)
+    ), dtype=torch.bool, device=device)
+    right_px_valid = torch.as_tensor(observations.get(
+        "right_px_valid", np.isfinite(observations["right_px"]).all(axis=-1)
+    ), dtype=torch.bool, device=device)
     rotation = torch.as_tensor(observations["rotation"], dtype=torch.float32, device=device)
     p1 = torch.as_tensor(observations["p1"], dtype=torch.float32, device=device)
     p2 = torch.as_tensor(observations["p2"], dtype=torch.float32, device=device)
     frame_count = target.shape[0]
 
+    fit_valid_np = fit_valid.detach().cpu().numpy()
     transition_profile_np = observation_transition_profile(
-        observations["valid"], observations["confidence"], observations["left_px"],
+        fit_valid_np, observations["confidence"], observations["left_px"],
         observations["right_px"],
         max_orient_step_deg=getattr(args, "max_orient_step_deg", 75.0),
         max_translation_step_m=getattr(args, "max_translation_step_m", 0.08),
@@ -413,6 +541,9 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
 
     initial = observations.get("initial")
     if initial is not None:
+        initial = repair_low_support_initial(
+            initial, frame_support.detach().cpu().numpy()
+        )
         pose = torch.as_tensor(
             initial["hand_pose_pca"], dtype=torch.float32, device=device
         ).clone().requires_grad_(True)
@@ -429,16 +560,16 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         pose = torch.zeros((frame_count, args.pca_components), device=device, requires_grad=True)
     if initial is None and args.rigid_initialization:
         orient_initial, translation_initial = initialize_rigid_parameters(
-            model, target, valid, confidence, args.pca_components, device
+            model, target, fit_valid, confidence, args.pca_components, device
         )
         orient = orient_initial.detach().clone().requires_grad_(True)
         transl = translation_initial.detach().clone().requires_grad_(True)
     elif initial is None:
         orient = torch.zeros((frame_count, 3), device=device, requires_grad=True)
-        wrist = torch.where(valid[:, 0, None], target[:, 0], torch.nan).clone()
+        wrist = torch.where(fit_valid[:, 0, None], target[:, 0], torch.nan).clone()
         for frame in range(frame_count):
             if not torch.isfinite(wrist[frame]).all():
-                available = target[frame, valid[frame]]
+                available = target[frame, fit_valid[frame]]
                 wrist[frame] = available.median(dim=0).values if len(available) else torch.tensor(
                     [0.0, 0.0, 0.25], device=device
                 )
@@ -446,7 +577,7 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     if initial is None:
         betas = torch.zeros((1, 10), device=device, requires_grad=True)
 
-    quality = (valid.float() * confidence).sum(dim=1)
+    quality = (fit_valid.float() * confidence).sum(dim=1)
     shape_count = min(args.shape_frames, frame_count)
     shape_ids = torch.topk(quality, k=shape_count).indices.sort().values
 
@@ -459,18 +590,30 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         vertices, joints, _ = run_model(
             model, batch_betas, orient[ids], pose[ids], transl[ids]
         )
-        mask = valid[ids]
+        mask = fit_valid[ids]
         weights3d = confidence[ids] * mask
         loss3d = robust_weighted_loss(joints - target[ids], weights3d, 0.006)
 
         left_prediction = project_rectified(joints, rotation, p1)
         right_prediction = project_rectified(joints, rotation, p2)
-        left_valid = torch.isfinite(left_px[ids]).all(dim=-1)
-        right_valid = torch.isfinite(right_px[ids]).all(dim=-1)
-        weights2d_left = torch.where(left_valid, torch.maximum(confidence[ids], torch.tensor(0.1, device=device)), 0.0)
-        weights2d_right = torch.where(right_valid, torch.maximum(confidence[ids], torch.tensor(0.1, device=device)), 0.0)
+        weights2d_left = image_observation_weights(
+            confidence[ids], left_px[ids], left_px_valid[ids] & fit_valid[ids]
+        )
+        weights2d_right = image_observation_weights(
+            confidence[ids], right_px[ids], right_px_valid[ids] & fit_valid[ids]
+        )
         loss2d = robust_weighted_loss((left_prediction - left_px[ids]) / 100.0, weights2d_left, 0.02)
         loss2d += robust_weighted_loss((right_prediction - right_px[ids]) / 100.0, weights2d_right, 0.02)
+        pinch_loss = pinch_distance_loss(
+            joints, target[ids], mask, confidence[ids],
+            getattr(args, "pinch_threshold_m", 0.025),
+        )
+        contact_tip_loss = contact_tip_alignment_loss(
+            joints, target[ids], mask, confidence[ids],
+            left_prediction, right_prediction, left_px[ids], right_px[ids],
+            left_px_valid[ids] & fit_valid[ids], right_px_valid[ids] & fit_valid[ids],
+            getattr(args, "contact_tip_threshold_m", 0.035),
+        )
         pose_prior = pose[ids].square().mean()
         shape_prior = betas.square().mean()
         pose_temporal = torch.tensor(0.0, device=device)
@@ -515,9 +658,13 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             + getattr(args, "w_acceleration", 0.004) * acceleration
             + getattr(args, "boundary_weight", 0.10) * boundary_loss
         )
-        total = (args.w_3d * loss3d + args.w_2d * loss2d + args.w_pose * pose_prior
-                 + args.w_shape * shape_prior + temporal)
-        return total, (loss3d, loss2d, pose_prior, shape_prior, temporal), vertices, joints
+        total = (
+            args.w_3d * loss3d + args.w_2d * loss2d
+            + getattr(args, "w_pinch", 0.0) * pinch_loss
+            + getattr(args, "w_contact_tips", 0.0) * contact_tip_loss
+            + args.w_pose * pose_prior + args.w_shape * shape_prior + temporal
+        )
+        return total, (loss3d, loss2d, pinch_loss, contact_tip_loss, pose_prior, shape_prior, temporal), vertices, joints
 
     if args.shape_iterations > 0:
         optimizer = torch.optim.Adam([betas, pose, orient, transl], lr=args.learning_rate)
@@ -574,7 +721,7 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             )
         total, terms, _, _ = objective(all_ids, True)
         errors = torch.linalg.vector_norm(joints - target, dim=-1)
-        errors = torch.where(valid, errors, torch.nan)
+        errors = torch.where(fit_valid, errors, torch.nan)
         left_prediction = project_rectified(joints, rotation, p1)
         right_prediction = project_rectified(joints, rotation, p2)
         left_pixel_error = torch.linalg.vector_norm(left_prediction - left_px, dim=-1)
@@ -725,6 +872,11 @@ def render_track_video(path: Path, pair_indices: np.ndarray, track_id: int, hand
 
 def main() -> int:
     args = parse_args()
+    if (args.w_pinch < 0.0 or args.w_contact_tips < 0.0
+            or args.pinch_threshold_m <= 0.0 or args.contact_tip_threshold_m <= 0.0):
+        raise ValueError("pinch weight must be non-negative and threshold must be positive")
+    if args.min_fit_observed_points < 1 or args.min_fit_observed_points > 21:
+        raise ValueError("--min-fit-observed-points must be between 1 and 21")
     source = args.mano_source.resolve()
     model_dir = args.model_dir.resolve()
     revision = validate_source_and_assets(source, model_dir)
@@ -770,9 +922,20 @@ def main() -> int:
         observations = {
             "positions": data["positions_left_camera_m"][track_slot, track_pairs],
             "valid": data["valid"][track_slot, track_pairs],
+            "observed": data.get(
+                "observed", data["valid"]
+            )[track_slot, track_pairs],
             "confidence": data["confidence"][track_slot, track_pairs],
             "left_px": data["left_rectified_px"][track_slot, track_pairs],
             "right_px": data["right_rectified_px"][track_slot, track_pairs],
+            "left_px_valid": data.get(
+                "left_rectified_valid",
+                np.isfinite(data["left_rectified_px"]).all(axis=-1),
+            )[track_slot, track_pairs],
+            "right_px_valid": data.get(
+                "right_rectified_valid",
+                np.isfinite(data["right_rectified_px"]).all(axis=-1),
+            )[track_slot, track_pairs],
             "rotation": data["left_to_rectified_rotation"],
             "p1": data["projection_left_rectified"],
             "p2": data["projection_right_rectified"],

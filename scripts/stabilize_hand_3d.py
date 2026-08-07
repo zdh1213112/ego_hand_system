@@ -31,6 +31,8 @@ SKELETON_EDGES = (
     (0, 17), (17, 18), (18, 19), (19, 20),
 )
 
+PALM_FRAME_JOINTS = np.asarray((0, 5, 9, 13, 17), dtype=np.int32)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -47,6 +49,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-hand-radius-m", type=float, default=0.22,
         help="maximum joint distance from the per-frame hand median",
+    )
+    parser.add_argument(
+        "--pixel-outlier-window", type=int, default=4,
+        help="temporal radius used to reject isolated 2D landmark-shape jumps",
+    )
+    parser.add_argument(
+        "--pixel-outlier-distance", type=float, default=0.45,
+        help="maximum palm-normalized 2D landmark deviation from nearby frames",
+    )
+    parser.add_argument(
+        "--pixel-scale-ratio", type=float, default=1.8,
+        help="maximum isolated palm-width ratio relative to nearby frames",
     )
     parser.add_argument(
         "--bone-outlier-absolute-m", type=float, default=0.05,
@@ -213,6 +227,75 @@ def active_ranges(observed: np.ndarray) -> list[tuple[int, int]]:
         else:
             ranges.append((0, -1))
     return ranges
+
+
+def detect_temporal_pixel_outliers(
+    pixels: np.ndarray,
+    radius: int,
+    normalized_distance: float,
+    maximum_scale_ratio: float,
+) -> np.ndarray:
+    """Find isolated MediaPipe shape jumps after removing palm translation/scale/rotation."""
+    if pixels.ndim != 4 or pixels.shape[2:] != (21, 2):
+        raise ValueError(f"unexpected pixel landmark shape: {pixels.shape}")
+    rejected = np.zeros(pixels.shape[:-1], dtype=bool)
+    if radius <= 0:
+        return rejected
+
+    finite = np.isfinite(pixels).all(axis=-1)
+    local = np.full_like(pixels, np.nan, dtype=np.float64)
+    palm_scale = np.full(pixels.shape[:2], np.nan, dtype=np.float64)
+    for track in range(pixels.shape[0]):
+        for frame in range(pixels.shape[1]):
+            points = pixels[track, frame]
+            if not np.all(finite[track, frame, PALM_FRAME_JOINTS]):
+                continue
+            origin = np.median(points[PALM_FRAME_JOINTS], axis=0)
+            palm_axis = points[5] - points[17]
+            scale = float(np.linalg.norm(palm_axis))
+            if scale < 5.0:
+                continue
+            axis_x = palm_axis / scale
+            axis_y = np.asarray((-axis_x[1], axis_x[0]), dtype=np.float64)
+            offsets = points - origin
+            local[track, frame, :, 0] = offsets @ axis_x / scale
+            local[track, frame, :, 1] = offsets @ axis_y / scale
+            palm_scale[track, frame] = scale
+
+    minimum_neighbours = max(4, radius + 1)
+    for track in range(pixels.shape[0]):
+        for frame in range(radius, pixels.shape[1] - radius):
+            neighbour_frames = np.concatenate((
+                np.arange(frame - radius, frame),
+                np.arange(frame + 1, frame + radius + 1),
+            ))
+            neighbour_scales = palm_scale[track, neighbour_frames]
+            neighbour_scales = neighbour_scales[np.isfinite(neighbour_scales)]
+            current_scale = palm_scale[track, frame]
+            if np.isfinite(current_scale) and len(neighbour_scales) >= minimum_neighbours:
+                median_scale = float(np.median(neighbour_scales))
+                scale_ratio = max(current_scale / median_scale, median_scale / current_scale)
+                if scale_ratio > maximum_scale_ratio:
+                    rejected[track, frame] = finite[track, frame]
+                    continue
+
+            for joint in range(21):
+                current = local[track, frame, joint]
+                if not np.all(np.isfinite(current)):
+                    continue
+                neighbours = local[track, neighbour_frames, joint]
+                neighbours = neighbours[np.isfinite(neighbours).all(axis=1)]
+                if len(neighbours) < minimum_neighbours:
+                    continue
+                median = np.median(neighbours, axis=0)
+                coordinate_mad = 1.4826 * np.median(
+                    np.abs(neighbours - median), axis=0
+                )
+                adaptive_distance = 5.0 * float(np.linalg.norm(coordinate_mad))
+                threshold = max(normalized_distance, adaptive_distance)
+                if np.linalg.norm(current - median) > threshold:
+                    rejected[track, frame, joint] = True
+    return rejected
 
 
 def reject_observation_outliers(
@@ -659,10 +742,12 @@ def stabilize_once(
 
 def main() -> int:
     args = parse_args()
-    if (args.max_gap < 0 or args.outlier_window < 0 or args.window_radius < 0
+    if (args.max_gap < 0 or args.outlier_window < 0 or args.pixel_outlier_window < 0
+            or args.window_radius < 0
             or args.bone_iterations < 0):
         raise ValueError("gap, radius and iterations must be non-negative")
     if (args.outlier_distance_m <= 0.0 or args.max_hand_radius_m <= 0.0
+            or args.pixel_outlier_distance <= 0.0 or args.pixel_scale_ratio <= 1.0
             or args.bone_outlier_absolute_m <= 0.0 or args.bone_outlier_relative <= 0.0
             or args.max_observation_adjustment_m <= 0.0):
         raise ValueError("outlier distance thresholds must be positive")
@@ -678,6 +763,21 @@ def main() -> int:
         data["raw"], data["observed"], input_ranges, args.outlier_window,
         args.outlier_distance_m, args.max_hand_radius_m,
     )
+    left_pixel_outliers = detect_temporal_pixel_outliers(
+        data["left_pixels"], args.pixel_outlier_window,
+        args.pixel_outlier_distance, args.pixel_scale_ratio,
+    )
+    right_pixel_outliers = detect_temporal_pixel_outliers(
+        data["right_pixels"], args.pixel_outlier_window,
+        args.pixel_outlier_distance, args.pixel_scale_ratio,
+    )
+    pixel_geometry_rejected = (
+        data["observed"] & (left_pixel_outliers | right_pixel_outliers)
+    )
+    accepted_observed[pixel_geometry_rejected] = False
+    rejected |= pixel_geometry_rejected
+    left_pixel_valid = np.isfinite(data["left_pixels"]).all(axis=-1) & ~left_pixel_outliers
+    right_pixel_valid = np.isfinite(data["right_pixels"]).all(axis=-1) & ~right_pixel_outliers
     preliminary_points = data["raw"].copy()
     preliminary_points[~accepted_observed] = np.nan
     preliminary_confidence = data["confidence"].copy()
@@ -743,6 +843,10 @@ def main() -> int:
         raw_positions_left_camera_m=data["raw"].astype(np.float32),
         left_rectified_px=data["left_pixels"].astype(np.float32),
         right_rectified_px=data["right_pixels"].astype(np.float32),
+        left_rectified_valid=left_pixel_valid,
+        right_rectified_valid=right_pixel_valid,
+        left_rectified_outlier=left_pixel_outliers,
+        right_rectified_outlier=right_pixel_outliers,
         track_ids=data["track_ids"],
         handedness=data["handedness"],
         joint_names=np.asarray(JOINT_NAMES),
@@ -806,6 +910,9 @@ def main() -> int:
         "active_pair_ranges": [list(item) for item in ranges],
         "input_observed_3d_points": input_observed_count,
         "outlier_rejected_3d_points": rejected_count,
+        "pixel_geometry_rejected_3d_points": int(np.count_nonzero(pixel_geometry_rejected)),
+        "left_pixel_outliers": int(np.count_nonzero(left_pixel_outliers)),
+        "right_pixel_outliers": int(np.count_nonzero(right_pixel_outliers)),
         "optimization_residual_rejected_3d_points": residual_rejected_count,
         "observed_3d_points": observed_count,
         "interpolated_3d_points": interpolated_count,
@@ -852,6 +959,9 @@ def main() -> int:
             "outlier_window": args.outlier_window,
             "outlier_distance_m": args.outlier_distance_m,
             "max_hand_radius_m": args.max_hand_radius_m,
+            "pixel_outlier_window": args.pixel_outlier_window,
+            "pixel_outlier_distance": args.pixel_outlier_distance,
+            "pixel_scale_ratio": args.pixel_scale_ratio,
             "bone_outlier_absolute_m": args.bone_outlier_absolute_m,
             "bone_outlier_relative": args.bone_outlier_relative,
             "window_radius": args.window_radius,

@@ -33,6 +33,10 @@
             <button type="button" data-hand="Left">左手</button>
           </div>
           <div class="viewer-actions">
+            <div class="surface-switch" role="group" aria-label="选择观察手掌或手背">
+              <button type="button" data-surface="palm" class="active">掌心</button>
+              <button type="button" data-surface="back">手背</button>
+            </div>
             <button type="button" class="icon-button" id="resetView" title="恢复观察角度" aria-label="恢复观察角度">↗</button>
             <button type="button" class="text-button" id="resetPose">重置姿态</button>
           </div>
@@ -40,6 +44,7 @@
 
         <div class="canvas-wrap" id="canvasWrap">
           <canvas id="handCanvas" aria-label="可旋转的三维手部骨架"></canvas>
+          <div class="surface-badge"><strong id="surfaceTitle">右手 · 掌心面</strong><span id="surfaceHint">可见掌纹，拇指在画面左侧</span></div>
           <div class="canvas-tip"><span>拖动</span>旋转视角&nbsp;&nbsp;·&nbsp;&nbsp;<span>滚轮</span>缩放&nbsp;&nbsp;·&nbsp;&nbsp;<span>点击关节</span>选择</div>
           <div class="axis-legend" aria-hidden="true"><i class="axis-x"></i>X <i class="axis-y"></i>Y <i class="axis-z"></i>Z</div>
         </div>

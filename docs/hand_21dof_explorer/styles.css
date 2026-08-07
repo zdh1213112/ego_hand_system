@@ -39,17 +39,20 @@ button { color: inherit; }
 .eyebrow { margin: 0 0 13px; color: var(--green-dark); font-size: 12px; letter-spacing: .16em; text-transform: uppercase; font-weight: 800; }
 .intro h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: clamp(42px, 5vw, 72px); line-height: 1.04; font-weight: 500; letter-spacing: -.04em; }
 .intro h1 em { color: var(--green); font-style: normal; }
-.lead { font-size: 17px; line-height: 1.9; color: var(--muted); margin: 0 0 5px; }
+.lead { min-width: 0; font-size: 17px; line-height: 1.9; color: var(--muted); margin: 0 0 5px; }
 
 .workspace { display: grid; grid-template-columns: minmax(560px, 1.35fr) minmax(390px, .75fr); gap: 20px; }
 .viewer-card, .controls-card, .lesson-card { background: rgba(255,254,249,.94); border: 1px solid rgba(23,32,29,.11); box-shadow: var(--shadow); }
-.viewer-card { min-height: 720px; display: flex; flex-direction: column; }
+.viewer-card { min-width: 0; min-height: 720px; display: flex; flex-direction: column; }
 .viewer-toolbar { min-height: 72px; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }
 .segmented, .quick-presets { display: flex; padding: 4px; background: #eeeee8; border-radius: 9px; }
 .segmented button, .quick-presets button { border: 0; background: transparent; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--muted); transition: .2s ease; }
 .segmented button { padding: 9px 22px; }
 .segmented button.active, .quick-presets button.active { color: var(--ink); background: var(--paper); box-shadow: 0 2px 8px rgba(0,0,0,.08); font-weight: 700; }
 .viewer-actions { display: flex; align-items: center; gap: 8px; }
+.surface-switch { display: flex; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: #f4f4ef; }
+.surface-switch button { height: 30px; padding: 0 11px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
+.surface-switch button.active { color: white; background: var(--ink); font-weight: 700; }
 .icon-button, .text-button { border: 1px solid var(--line); background: transparent; cursor: pointer; border-radius: 8px; height: 38px; }
 .icon-button { width: 38px; font-size: 19px; }
 .text-button { padding: 0 14px; font-size: 12px; }
@@ -58,6 +61,8 @@ button { color: inherit; }
 .canvas-wrap { flex: 1; min-height: 550px; position: relative; overflow: hidden; background: radial-gradient(circle at 50% 46%, rgba(11,155,109,.055), transparent 42%), linear-gradient(rgba(23,32,29,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(23,32,29,.025) 1px, transparent 1px); background-size: auto, 36px 36px, 36px 36px; cursor: grab; touch-action: none; }
 .canvas-wrap.dragging { cursor: grabbing; }
 #handCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.surface-badge { position: absolute; top: 17px; left: 18px; display: flex; flex-direction: column; gap: 3px; padding: 10px 13px; border: 1px solid rgba(23,32,29,.1); border-radius: 9px; background: rgba(255,254,249,.88); backdrop-filter: blur(8px); pointer-events: none; }
+.surface-badge strong { font-size: 12px; }.surface-badge span { color: var(--muted); font-size: 9px; }
 .canvas-tip { position: absolute; left: 18px; bottom: 14px; padding: 9px 12px; border-radius: 8px; background: rgba(255,254,249,.86); backdrop-filter: blur(8px); color: var(--muted); font-size: 11px; pointer-events: none; }
 .canvas-tip span { color: var(--ink); font-weight: 700; }
 .axis-legend { position: absolute; right: 20px; bottom: 17px; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
@@ -66,8 +71,9 @@ button { color: inherit; }
 .selected-readout { height: 92px; display: grid; grid-template-columns: 54px 1fr auto; gap: 14px; align-items: center; padding: 15px 20px; border-top: 1px solid var(--line); }
 .readout-index { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--green); font-family: Georgia, serif; font-size: 19px; }
 .readout-copy p { margin: 0 0 5px; font-size: 16px; font-weight: 700; }
+.readout-copy { min-width: 0; }
 .readout-copy p b { color: #aab0ac; margin: 0 8px; }
-.readout-copy small { color: var(--muted); }
+.readout-copy small { display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selected-readout output { font-family: Georgia, serif; font-size: 36px; color: var(--green-dark); }
 
 .controls-card { padding: 25px; min-height: 720px; }
@@ -130,7 +136,7 @@ footer { min-height: 110px; margin-top: 28px; border-top: 1px solid rgba(23,32,2
   .workspace { grid-template-columns: 1fr; }.viewer-card, .controls-card { min-height: 0; }.canvas-wrap { height: 580px; flex: none; }.lesson-grid { grid-template-columns: 1fr 1fr; }.data-card { grid-column: 1 / -1; }.intro { grid-template-columns: 1fr; gap: 24px; }
 }
 @media (max-width: 680px) {
-  .app-shell { width: calc(100% - 24px); }.topbar { height: 72px; }.header-note { display: none; }.intro { padding: 38px 0 28px; overflow: hidden; }.intro h1 { font-size: clamp(35px, 10.7vw, 42px); line-height: 1.08; letter-spacing: -.055em; }.lead { max-width: 100%; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }.workspace { display: block; }.viewer-card { margin-bottom: 14px; }.canvas-wrap { height: 470px; min-height: 0; }.canvas-tip { display: none; }.selected-readout { grid-template-columns: 45px 1fr auto; padding: 12px; }.readout-index { width: 42px; height: 42px; }.selected-readout output { font-size: 25px; }.controls-card { padding: 18px 14px; }.lesson-grid { display: block; }.lesson-card { margin-top: 14px; min-height: 0; padding: 22px 18px; }.finger-tabs button { font-size: 10px; }.finger-tabs button span { display: none; }.viewer-toolbar { padding: 11px; }.segmented button { padding: 8px 15px; } footer { display: block; padding: 30px 0; line-height: 1.6; }
+  .app-shell { width: calc(100% - 24px); }.topbar { height: 72px; }.header-note { display: none; }.intro { padding: 38px 0 28px; overflow: hidden; }.intro h1 { font-size: clamp(35px, 10.7vw, 42px); line-height: 1.08; letter-spacing: -.055em; }.lead { width: 100%; max-width: 100%; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; word-break: break-all; }.workspace { display: block; width: 100%; overflow: hidden; }.viewer-card { width: 100%; max-width: 100%; margin-bottom: 14px; overflow: hidden; }.canvas-wrap { height: 470px; min-height: 0; }.canvas-tip { display: none; }.surface-badge { top: 10px; left: 10px; padding: 8px 10px; }.surface-badge span { display: none; }.selected-readout { grid-template-columns: 45px minmax(0,1fr) auto; padding: 12px; }.readout-index { width: 42px; height: 42px; }.selected-readout output { font-size: 25px; }.controls-card { padding: 18px 14px; }.lesson-grid { display: block; }.lesson-card { margin-top: 14px; min-height: 0; padding: 22px 18px; }.finger-tabs button { font-size: 10px; }.finger-tabs button span { display: none; }.viewer-toolbar { width: 100%; padding: 10px; flex-wrap: wrap; justify-content: flex-start; gap: 7px; }.viewer-actions { width: 100%; margin: 0; justify-content: flex-start; gap: 4px; }.segmented button { padding: 8px 12px; }.surface-switch button { padding: 0 10px; }.icon-button, .text-button { display: none; } footer { display: block; padding: 30px 0; line-height: 1.6; }
 }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }

@@ -18,6 +18,42 @@ SPEC.loader.exec_module(MODULE)
 
 
 class StabilizeHand3DTests(unittest.TestCase):
+    @staticmethod
+    def moving_pixel_skeleton() -> np.ndarray:
+        base = np.zeros((21, 2), dtype=np.float64)
+        base[0] = (0.0, 50.0)
+        base[1:5] = ((-20, 35), (-30, 20), (-38, 5), (-44, -10))
+        base[5:9] = ((-30, 15), (-32, -5), (-34, -25), (-36, -42))
+        base[9:13] = ((-10, 8), (-10, -15), (-10, -38), (-10, -58))
+        base[13:17] = ((12, 10), (14, -12), (16, -32), (18, -50))
+        base[17:21] = ((30, 18), (35, 0), (39, -17), (42, -32))
+        frames = np.zeros((1, 11, 21, 2), dtype=np.float64)
+        for frame in range(11):
+            angle = 0.025 * frame
+            rotation = np.asarray([
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ])
+            frames[0, frame] = (base @ rotation.T) * (1.0 + 0.01 * frame)
+            frames[0, frame] += (200.0 + 3.0 * frame, 300.0 - 2.0 * frame)
+        return frames
+
+    def test_temporal_pixel_shape_spike_is_rejected(self):
+        pixels = self.moving_pixel_skeleton()
+        pixels[0, 5, 8] += (75.0, -50.0)
+        rejected = MODULE.detect_temporal_pixel_outliers(
+            pixels, radius=4, normalized_distance=0.45, maximum_scale_ratio=1.8
+        )
+        self.assertTrue(rejected[0, 5, 8])
+        self.assertFalse(rejected[0, 5, 7])
+
+    def test_global_hand_motion_does_not_trigger_pixel_outlier(self):
+        rejected = MODULE.detect_temporal_pixel_outliers(
+            self.moving_pixel_skeleton(), radius=4,
+            normalized_distance=0.45, maximum_scale_ratio=1.8,
+        )
+        self.assertEqual(np.count_nonzero(rejected), 0)
+
     def test_stereo_confidence_uses_disparity_and_refinement_quality(self):
         row = {
             "landmark_index": "8",

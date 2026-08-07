@@ -231,6 +231,8 @@ python scripts/stabilize_hand_3d.py \
 
 该阶段先利用单帧手部空间范围、局部时序中值、骨架拓扑和优化残差剔除明显的双目深度离群点；再只填补不超过5帧的内部短缺口，保留长时间缺失。最后按观测几何质量进行零相位时序滤波，并使用每只手独立估计的稳定骨长约束结果。输出：
 
+前处理还会在掌心局部坐标中检查左右相机各自的 MediaPipe 2D 骨架，去除无法由整手平移、缩放或旋转解释的短时手指跳变。左右像素有效 mask 会写入 `mano_input.npz`；MANO 的2D损失不会再使用被屏蔽的指尖，但仍可使用另一侧相机的有效观测。
+
 - `stabilized_landmarks_3d.csv`：带 `observed/interpolated/rejected_outlier/missing` 来源状态的稳定3D点；
 - `mano_input.npz`：MANO拟合数据接口，包含原始观测、可接受观测、离群剔除、插值和有效性 mask；
 - `stabilized_3d.mp4`：原始灰点与稳定骨架的正视图/俯视图；
@@ -316,11 +318,68 @@ python scripts/fit_mano_sequence.py \
 当前左手在严重运动/遮挡段仍可能出现姿态跳变，因此 tuned 是推荐基线，不代表
 所有异常都已消除。
 
+针对当前录像进一步加入双目2D跳变屏蔽和近接触捏合距离约束后，候选结果位于
+`mano_overlay_pixel_guard_pinch_w05`。在观测拇指尖-食指尖距离小于25 mm的帧中，
+右手距离平均误差由8.58 mm降至1.69 mm，左手由4.63 mm降至1.22 mm；全序列
+关节步长P95基本不变。该约束只匹配稳定观测到的指尖距离，不会在普通帧强制捏合。
+
+在 pixel-guard tuned 结果上执行接触精修：
+
+```bash
+python scripts/fit_mano_sequence.py \
+  --input output/recording_20260806_105205/mano_preparation_pixel_guard/mano_input.npz \
+  --mano-source third_party/MANO --model-dir models/mano \
+  --output output/recording_20260806_105205/mano_fit_pixel_guard_pinch_w05 \
+  --initial-output output/recording_20260806_105205/mano_fit_pixel_guard_tuned \
+  --shape-iterations 0 --pose-iterations 60 \
+  --pose-window 24 --pose-overlap 8 --learning-rate 0.001 \
+  --w-3d 1.0 --w-2d 0.8 --w-pinch 0.5 --pinch-threshold-m 0.025 \
+  --w-pose 0.0025 --w-temporal 0.012 --w-rigid-temporal 0.005 \
+  --w-acceleration 0.006 --boundary-weight 0.04 \
+  --max-orient-step-deg 75 --max-translation-step-m 0.08 \
+  --max-pose-step 6 --no-image-rigid-alignment --device cuda --no-video
+```
+
 直接查看稳定候选：
 
 ```bash
 xdg-open output/recording_20260806_105205/mano_overlay_trajectory_tuned/mano_overlay_21dof.mp4
 ```
+
+查看带2D跳变屏蔽和捏合约束的新候选：
+
+```bash
+xdg-open output/recording_20260806_105205/mano_overlay_pixel_guard_pinch_w05/mano_overlay_21dof.mp4
+```
+
+对双目观测不足的帧，推荐使用支持度门控和热启动姿态插值版本：它要求至少12个真实三维点才参与当前帧拟合，低支持帧只沿用前后可靠帧的连续姿态，不把插值点当作相机观测。结果位于
+`output/recording_20260806_105205/mano_overlay_supported_repaired_pinch`：
+
+```bash
+python scripts/fit_mano_sequence.py \
+  --input output/recording_20260806_105205/mano_preparation_pixel_guard/mano_input.npz \
+  --mano-source third_party/MANO --model-dir models/mano \
+  --output output/recording_20260806_105205/mano_fit_supported_repaired_pinch \
+  --initial-output output/recording_20260806_105205/mano_fit_pixel_guard_tuned \
+  --shape-iterations 0 --pose-iterations 60 --pose-window 24 --pose-overlap 8 \
+  --learning-rate 0.001 --w-3d 1.0 --w-2d 0.8 --w-pinch 0.5 \
+  --pinch-threshold-m 0.025 --min-fit-observed-points 12 \
+  --w-pose 0.0025 --w-temporal 0.012 --w-rigid-temporal 0.005 \
+  --w-acceleration 0.006 --boundary-weight 0.04 \
+  --max-orient-step-deg 75 --max-translation-step-m 0.08 --max-pose-step 6 \
+  --no-image-rigid-alignment --device cuda --no-video
+```
+
+当前录像的首个异常源头已定位到 `mediapipe_stereo`：左手 T1 在 355、357、366 帧没有有效双目观测，358-365 帧也只有少量手指点；这会让后续三角化和 MANO 拟合欠约束。支持度门控能抑制后续放大，但要彻底恢复这些帧，下一步应优化 MediaPipe 双目关联/单侧丢检的恢复策略。
+
+已加入跨帧 LK 丢检恢复：当左右视角检测数量不一致时，用上一帧同一轨迹的2D关键点跟踪到当前图像，生成低置信度候选，并在双目关联中优先真实 MediaPipe 检测。当前录像的恢复结果位于
+`output/recording_20260806_105205/mediapipe_stereo_lk_recovery`，对应 MANO 叠加视频为
+`output/recording_20260806_105205/mano_overlay_lk_recovery/mano_overlay_21dof.mp4`。
+异常窗口的左手轨迹由原来的多次整帧断开变为连续保留，最终 MANO 关节步长 P99 从48.4 mm降至43.4 mm。
+
+针对开头和首次捏合时“指尖距离正确但绝对位置不贴合”的问题，拟合阶段新增近接触指尖锚定：当观测拇指尖-食指尖距离小于35 mm时，同时约束两根指尖的绝对3D位置和左右图2D投影。当前录像最终候选为
+`output/recording_20260806_105205/mano_overlay_lk_contact_tips/mano_overlay_21dof.mp4`，使用参数
+`--w-pinch 0.5 --pinch-threshold-m 0.025 --w-contact-tips 1.5 --contact-tip-threshold-m 0.035`。
 
 ### 21自由度网格叠加与双手3D预览
 

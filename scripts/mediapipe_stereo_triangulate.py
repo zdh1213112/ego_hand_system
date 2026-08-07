@@ -129,7 +129,8 @@ def stereo_candidate(left: dict, right: dict) -> dict:
     if left["label"] != right["label"] and min(left["score"], right["score"]) > 0.75:
         label_penalty = 8.0
     invalid_penalty = float(21 - plausible_count) * 2.0
-    cost = median_y + label_penalty + invalid_penalty
+    recovery_penalty = 40.0 if left.get("recovered") or right.get("recovered") else 0.0
+    cost = median_y + label_penalty + invalid_penalty + recovery_penalty
     accepted = plausible_count >= 12 and median_y <= 35.0 and 2.0 < median_disparity < 250.0
     return {
         "left": left,
@@ -164,6 +165,42 @@ def associate_hands(left_hands: list[dict], right_hands: list[dict]) -> list[dic
                     if score > (best[0], -best[1]):
                         best = (match_count, total_cost, selected)
     return best[2]
+
+
+def predict_landmarks_lk(previous_gray: np.ndarray, current_gray: np.ndarray,
+                         pixels: np.ndarray, window: int = 25) -> np.ndarray | None:
+    """Track one view's previous hand landmarks into the current image."""
+    if previous_gray is None or current_gray is None:
+        return None
+    points = np.asarray(pixels, dtype=np.float32).reshape(-1, 1, 2)
+    if len(points) != 21 or not np.isfinite(points).all():
+        return None
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.01)
+    tracked, status, error = cv2.calcOpticalFlowPyrLK(
+        previous_gray, current_gray, points, None,
+        winSize=(max(9, int(window) | 1), max(9, int(window) | 1)),
+        maxLevel=2, criteria=criteria, minEigThreshold=1e-4,
+    )
+    if tracked is None or status is None or error is None:
+        return None
+    tracked = tracked[:, 0].astype(np.float64)
+    status = status[:, 0].astype(bool)
+    error = error[:, 0]
+    height, width = current_gray.shape[:2]
+    usable = (
+        status & np.isfinite(tracked).all(axis=1) & np.isfinite(error)
+        & (error <= 80.0)
+        & (tracked[:, 0] >= 0.0) & (tracked[:, 0] < width)
+        & (tracked[:, 1] >= 0.0) & (tracked[:, 1] < height)
+    )
+    if np.count_nonzero(usable) < 12:
+        return None
+    # Keep the whole semantic hand so triangulation can use the valid subset.
+    # Failed points retain their previous location; the recovered candidate is
+    # low-confidence and geometric checks still decide whether each point is used.
+    result = tracked.copy()
+    result[~usable] = points[:, 0, :].astype(np.float64, copy=False)[~usable]
+    return result
 
 
 def prepare_stereo_matching_images(
@@ -489,6 +526,8 @@ class TrackManager:
                     "velocity": np.zeros(2, dtype=np.float64),
                     "missed": 0,
                     "label": match["left"]["label"],
+                    "left_pixels": np.asarray(match["left"]["pixels"], dtype=np.float64).copy(),
+                    "right_pixels": np.asarray(match["right"]["pixels"], dtype=np.float64).copy(),
                 }
                 self.next_id += 1
             track_id = assignment[match_index]
@@ -499,12 +538,49 @@ class TrackManager:
             track["velocity"] = 0.65 * track["velocity"] + 0.35 * observed_velocity
             track["position"] = new_position.copy()
             track["missed"] = 0
+            track["left_pixels"] = np.asarray(match["left"]["pixels"], dtype=np.float64).copy()
+            track["right_pixels"] = np.asarray(match["right"]["pixels"], dtype=np.float64).copy()
             if match["left"]["score"] > 0.90:
                 track["label"] = match["left"]["label"]
         self.tracks = {
             track_id: track for track_id, track in self.tracks.items()
             if track["missed"] <= self.max_missed
         }
+
+    def recover_missing_views(
+        self, left_hands: list[dict], right_hands: list[dict],
+        previous_left_gray: np.ndarray | None, previous_right_gray: np.ndarray | None,
+        current_left_gray: np.ndarray, current_right_gray: np.ndarray,
+    ) -> tuple[list[dict], list[dict]]:
+        """Add low-confidence LK candidates when one camera temporarily loses a hand."""
+        if not self.tracks:
+            return left_hands, right_hands
+        need_left = len(left_hands) < len(right_hands)
+        need_right = len(right_hands) < len(left_hands)
+        if left_hands and right_hands and not (need_left or need_right):
+            return left_hands, right_hands
+        recovered_left = list(left_hands)
+        recovered_right = list(right_hands)
+        for track_id, track in self.tracks.items():
+            if track["missed"] > 2:
+                continue
+            if need_left or not left_hands:
+                pixels = predict_landmarks_lk(previous_left_gray, current_left_gray, track.get("left_pixels"))
+                if pixels is not None:
+                    recovered_left.append({
+                        "index": -1, "label": track["label"],
+                        "score": 0.45, "pixels": pixels,
+                        "recovered": True, "recovery_track_id": track_id,
+                    })
+            if need_right or not right_hands:
+                pixels = predict_landmarks_lk(previous_right_gray, current_right_gray, track.get("right_pixels"))
+                if pixels is not None:
+                    recovered_right.append({
+                        "index": -1, "label": track["label"],
+                        "score": 0.45, "pixels": pixels,
+                        "recovered": True, "recovery_track_id": track_id,
+                    })
+        return recovered_left, recovered_right
 
 
 def draw_observation(image: np.ndarray, observation: dict, color: tuple[int, int, int], text: str) -> None:
@@ -608,6 +684,8 @@ def main() -> int:
     first_timestamp_us = min(left_timestamps[0], right_timestamps[0])
     last_left_ms = -1
     last_right_ms = -1
+    previous_left_gray = None
+    previous_right_gray = None
 
     with frames_path.open("w", encoding="utf-8", newline="") as frame_stream, \
          landmarks_path.open("w", encoding="utf-8", newline="") as landmark_stream, \
@@ -640,11 +718,21 @@ def main() -> int:
                 prepare_stereo_matching_images(left_rectified, right_rectified)
                 if args.stereo_refine else None
             )
+            current_left_gray, current_right_gray = prepare_stereo_matching_images(
+                left_rectified, right_rectified
+            )
+            left_hands, right_hands = tracker.recover_missing_views(
+                left_hands, right_hands,
+                previous_left_gray, previous_right_gray,
+                current_left_gray, current_right_gray,
+            )
             matches = [
                 triangulate(candidate, rectification, args, matching_images)
                 for candidate in associate_hands(left_hands, right_hands)
             ]
             tracker.assign(matches)
+            previous_left_gray = current_left_gray
+            previous_right_gray = current_right_gray
 
             frame_valid = int(sum(np.count_nonzero(match["valid"]) for match in matches))
             frame_refined = int(sum(np.count_nonzero(match["refinement_used"]) for match in matches))
@@ -793,6 +881,10 @@ def main() -> int:
         "pairs_with_stereo_matches": pairs_with_matches,
         "stereo_match_pair_rate": pairs_with_matches / processed_pairs if processed_pairs else 0.0,
         "matched_hand_instances": matched_hand_instances,
+        "lk_recovery": {
+            "enabled": True,
+            "description": "low-confidence cross-frame LK candidates are added only when one stereo view loses a hand",
+        },
         "track_ids": sorted(observed_track_ids),
         "track_count": len(observed_track_ids),
         "valid_3d_points": valid_points_total,
