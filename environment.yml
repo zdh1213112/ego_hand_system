@@ -5,6 +5,12 @@ dependencies:
   - python=3.10
   - pip
   - pip:
+      - mcap==1.2.2
+      - mcap-protobuf-support==0.5.3
+      - av==14.2.0
+      - protobuf>=4.25,<6
+      - zstandard>=0.22,<1
+      - lz4>=4.3,<5
       - mediapipe==0.10.35
       - opencv-contrib-python==5.0.0.93
       - numpy==2.2.6
