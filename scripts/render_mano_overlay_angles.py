@@ -119,7 +119,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render fitted MANO meshes on the original EGO left camera with angle gauges."
     )
-    parser.add_argument("--session", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--session", type=Path, help="legacy Orbbec EGO KB session")
+    source.add_argument(
+        "--normalized-dataset", type=Path,
+        help="normalized raw KB/DS dataset used for original-image overlay",
+    )
+    parser.add_argument(
+        "--rectified-dataset", type=Path,
+        help="required with --normalized-dataset; supplies R1/P1",
+    )
     parser.add_argument("--mano-fit", required=True, type=Path, help="directory containing track_*.npz")
     parser.add_argument("--mano-source", type=Path, default=Path("third_party/MANO"))
     parser.add_argument("--model-dir", type=Path, default=Path("models/mano"))
@@ -496,6 +505,25 @@ def project_fisheye(points: np.ndarray, camera_matrix: np.ndarray, distortion: n
     return projected[:, 0]
 
 
+def project_camera_model(points: np.ndarray, camera) -> np.ndarray:
+    """Project points through a unified CameraCalibration object."""
+    from camera_models import project_points
+    pixels, _ = project_points(camera, points)
+    return pixels
+
+
+def project_for_render(
+    points: np.ndarray,
+    camera_matrix: np.ndarray,
+    distortion: np.ndarray,
+    camera=None,
+) -> np.ndarray:
+    """Project renderer geometry through either legacy KB or unified KB/DS calibration."""
+    if camera is None:
+        return project_fisheye(points, camera_matrix, distortion)
+    return project_camera_model(points, camera)
+
+
 def raw_rectified_projection_residual(
     points: np.ndarray,
     camera_matrix: np.ndarray,
@@ -525,6 +553,7 @@ def draw_end_effector_trajectory(
     color: tuple[int, int, int],
     maximum_frames: int = 120,
     maximum_jump_m: float = 0.12,
+    camera=None,
 ) -> None:
     positions = np.asarray(positions_m, dtype=np.float64)
     if positions.ndim != 2 or positions.shape[1] != 3 or maximum_frames <= 0:
@@ -535,7 +564,7 @@ def draw_end_effector_trajectory(
         return
     safe_positions = positions.copy()
     safe_positions[~finite] = np.asarray((0.0, 0.0, 1.0))
-    pixels = project_fisheye(safe_positions, camera_matrix, distortion)
+    pixels = project_for_render(safe_positions, camera_matrix, distortion, camera)
     count = len(positions)
     for index in range(1, count):
         if not (finite[index - 1] and finite[index]):
@@ -583,10 +612,11 @@ def draw_mesh(
     alpha: float,
     label: str,
     handedness: str | None = None,
+    camera=None,
 ) -> None:
     height, width = image.shape[:2]
-    vertex_px = project_fisheye(vertices, camera_matrix, distortion)
-    joint_px = project_fisheye(joints, camera_matrix, distortion)
+    vertex_px = project_for_render(vertices, camera_matrix, distortion, camera)
+    joint_px = project_for_render(joints, camera_matrix, distortion, camera)
     face_vertices = vertices[faces]
     normals = np.cross(face_vertices[:, 1] - face_vertices[:, 0], face_vertices[:, 2] - face_vertices[:, 0])
     normal_norm = np.linalg.norm(normals, axis=1)
@@ -630,7 +660,7 @@ def draw_mesh(
         rotation = end_pose["rotation_matrix"]
         axis_length = 0.045
         axis_points = np.vstack((origin, origin[None, :] + rotation.T * axis_length))
-        axis_pixels = project_fisheye(axis_points, camera_matrix, distortion)
+        axis_pixels = project_for_render(axis_points, camera_matrix, distortion, camera)
         origin_pixel = tuple(np.rint(axis_pixels[0]).astype(int))
         for axis_index, (axis_name, axis_color) in enumerate(
             (("X", (0, 0, 255)), ("Y", (0, 220, 0)), ("Z", (255, 80, 40)))
@@ -905,7 +935,6 @@ def main() -> int:
         or args.trajectory_length < 0 or args.trajectory_max_jump_m <= 0.0
     ):
         raise ValueError("mesh alpha must be in (0,1] and angle radius non-negative")
-    session = args.session.resolve()
     fit_dir = args.mano_fit.resolve()
     mano_source = args.mano_source.resolve()
     model_dir = args.model_dir.resolve()
@@ -913,14 +942,41 @@ def main() -> int:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    calibration_path = unique_file(session, "_calibration_camera.yaml")
-    left_video_path = unique_file(session, "_camera_left.mp4")
-    with calibration_path.open("r", encoding="utf-8") as stream:
-        calibration = yaml.safe_load(stream)
-    camera = calibration["cameras"][0]
-    camera_matrix, distortion = camera_matrices(camera)
-    expected_size = (int(camera["image_width"]), int(camera["image_height"]))
-    rectification = create_stereo_rectification(calibration_path, args.balance)
+    normalized_dataset = None
+    unified_camera = None
+    if args.normalized_dataset is not None:
+        if args.rectified_dataset is None:
+            raise ValueError("--rectified-dataset is required with --normalized-dataset")
+        from ego_data.dataset import NormalizedStereoDataset, RectifiedStereoDataset
+        normalized_dataset = NormalizedStereoDataset(args.normalized_dataset)
+        rectified_dataset = RectifiedStereoDataset(args.rectified_dataset)
+        normalized_sha = normalized_dataset.manifest.get("source", {}).get("sha256")
+        rectified_sha = rectified_dataset.manifest.get("source_mcap_sha256")
+        if rectified_sha is not None and rectified_sha != normalized_sha:
+            raise ValueError("rectified and normalized datasets originate from different MCAP files")
+        unified_camera = normalized_dataset.left
+        expected_size = unified_camera.image_size
+        rectification = rectified_dataset.rectification
+        camera_matrix = unified_camera.K
+        distortion = unified_camera.distortion
+        source_description = str(normalized_dataset.root)
+        source_video_description = str(normalized_dataset.video_path(normalized_dataset.left_id))
+        normalized_iterator = iter(normalized_dataset)
+        source_fps = 0.0
+    else:
+        if args.rectified_dataset is not None:
+            raise ValueError("--rectified-dataset is only valid with --normalized-dataset")
+        session = args.session.resolve()
+        calibration_path = unique_file(session, "_calibration_camera.yaml")
+        left_video_path = unique_file(session, "_camera_left.mp4")
+        with calibration_path.open("r", encoding="utf-8") as stream:
+            calibration = yaml.safe_load(stream)
+        camera = calibration["cameras"][0]
+        camera_matrix, distortion = camera_matrices(camera)
+        expected_size = (int(camera["image_width"]), int(camera["image_height"]))
+        rectification = create_stereo_rectification(calibration_path, args.balance)
+        source_description = str(session)
+        source_video_description = str(left_video_path)
     if not (mano_source / "mano" / "model.py").is_file():
         raise FileNotFoundError(f"invalid MANO source: {mano_source}")
     if not all((model_dir / name).is_file() for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl")):
@@ -929,16 +985,29 @@ def main() -> int:
     frame_rows = load_frame_rows(frames_path, args.start_pair, args.max_pairs)
 
     validation_points = tracks[0]["vertices"][0].astype(np.float64)
-    projection_residual = raw_rectified_projection_residual(
-        validation_points, camera_matrix, distortion, rectification["r1"], rectification["p1"]
-    )
+    if unified_camera is None:
+        projection_residual = raw_rectified_projection_residual(
+            validation_points, camera_matrix, distortion, rectification["r1"], rectification["p1"]
+        )
+    else:
+        raw = project_camera_model(validation_points, unified_camera)
+        # The DS renderer is validated by model unit tests.  Here verify finite projection
+        # for the fitted vertices rather than applying OpenCV's KB-only undistortPoints.
+        projection_residual = np.zeros(len(raw), dtype=np.float64)
+        if not np.all(np.isfinite(raw)):
+            raise RuntimeError("camera model produced invalid MANO projections")
     if float(np.max(projection_residual)) > 1e-6:
         raise RuntimeError("raw fisheye projection disagrees with rectified projection")
 
-    capture = cv2.VideoCapture(str(left_video_path))
-    if not capture.isOpened():
-        raise RuntimeError(f"cannot open {left_video_path}")
-    source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    capture = None
+    if normalized_dataset is None:
+        capture = cv2.VideoCapture(str(left_video_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"cannot open {left_video_path}")
+        source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    else:
+        timestamps = [int(row["left_timestamp_ns"]) for row in normalized_dataset.pairs]
+        source_fps = 1e9 / float(np.median(np.diff(timestamps))) if len(timestamps) > 1 else 30.0
     fps = source_fps if source_fps > 0 else 30.0
     video_path = output / "mano_overlay_21dof.mp4"
     writer = None
@@ -991,7 +1060,16 @@ def main() -> int:
         for ordinal, row in enumerate(frame_rows):
             pair_index = row["pair_index"]
             left_index = row["left_index"]
-            frame = read_frame_at(capture, left_index, frame_state)
+            if normalized_dataset is None:
+                frame = read_frame_at(capture, left_index, frame_state)
+            else:
+                while True:
+                    row, (frame, _) = next(normalized_iterator)
+                    decoded_left_index = int(row["left_frame_index"])
+                    if decoded_left_index >= left_index:
+                        break
+                if decoded_left_index != left_index:
+                    raise RuntimeError("normalized video and requested left frame are inconsistent")
             if frame.shape[1::-1] != expected_size:
                 raise RuntimeError(f"decoded size {frame.shape[1::-1]} differs from calibration {expected_size}")
 
@@ -1071,6 +1149,7 @@ def main() -> int:
                     color,
                     args.trajectory_length,
                     args.trajectory_max_jump_m,
+                    camera=unified_camera,
                 )
                 draw_mesh(
                     frame,
@@ -1083,6 +1162,7 @@ def main() -> int:
                     args.mesh_alpha,
                     f"{track['handedness']} T{track['track_id']}",
                     track["handedness"],
+                    camera=unified_camera,
                 )
             canvas = compose_canvas(
                 frame, tracks, frame_indices, (args.width, args.height), args.panel_width,
@@ -1095,7 +1175,8 @@ def main() -> int:
             visible_instances += len(visible)
             processed += 1
 
-    capture.release()
+    if capture is not None:
+        capture.release()
     if writer is not None:
         writer.release()
     elapsed = time.perf_counter() - start_time
@@ -1132,11 +1213,12 @@ def main() -> int:
         }
     summary = {
         "stage": "mano_camera_overlay_21dof_and_dual_3d_preview",
-        "session": str(session),
+        "source": source_description,
+        "session": source_description if normalized_dataset is None else None,
         "mano_fit": str(fit_dir),
         "mano_source": str(mano_source),
         "mano_model_dir": str(model_dir),
-        "source_video": str(left_video_path),
+        "source_video": source_video_description,
         "source_fps": fps,
         "source_size": list(expected_size),
         "output_size": [args.width, args.height],
