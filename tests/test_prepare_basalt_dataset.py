@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import unittest
 
@@ -16,10 +17,10 @@ MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
-SESSION = Path(
-    "/home/zdh/ego_hand_system/recordings/"
-    "Orbbec_Ego_AZER764008C_20260805_171119"
-)
+SESSION = Path(os.environ.get(
+    "EGO_TEST_SESSION",
+    "/home/zdh/ego_hand_system/recordings/Orbbec_Ego_AZER764008C_20260805_171119",
+))
 
 
 def pose_to_transform(pose: dict) -> np.ndarray:
@@ -53,6 +54,10 @@ class PrepareBasaltDatasetTests(unittest.TestCase):
         np.testing.assert_allclose(reconstructed[:3, 3], (0.1, 0.2, 0.3), atol=1e-12)
 
     def test_ego_calibration_maps_to_kb4_and_preserves_baseline(self):
+        if not SESSION.is_dir():
+            self.skipTest(
+                "external Orbbec calibration fixture is unavailable; set EGO_TEST_SESSION to enable"
+            )
         with MODULE.unique_file(SESSION, "_calibration_camera.yaml").open() as stream:
             cameras = yaml.safe_load(stream)
         with MODULE.unique_file(SESSION, "_calibration_imu.yaml").open() as stream:
