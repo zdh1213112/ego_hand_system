@@ -1,439 +1,24 @@
 # EGO Hand System
 
-EGO 双目三维手部重建项目。目前提供：
+EGO 双目手部重建与 MANO 拟合系统。输入是 Orbbec Ego 的左右视频、硬件时间戳、双目标定和 IMU；输出是左右手的米制 3D 关节、MANO 网格、21 自由度角度和可选的世界坐标轨迹。
 
-- EGO 相机标定 YAML 解析；
-- KB/Kannala–Brandt 鱼眼双目校正；
-- 左右 MP4 的硬件 PTS 配对；
-- 会话完整性、基线和同步质量报告；
-- 原始/校正后的双目预览图。
-- 使用 DICT_5X5_50 标定板定量统计校正后的垂直极线误差。
-- 使用 MediaPipe Hand Landmarker 对校正后的左相机录像输出每只手的 21 点基线结果。
-- 左右双路 MediaPipe、跨相机手部关联、时序轨迹和21点双目三角化。
-- MANO 前处理：离群管理、短缺口补全、时序滤波、骨长约束和已校验 NPZ 输入契约。
-- MANO 网格原始鱼眼画面叠加、双手实时角度仪表板和角度 CSV 导出。
-- EGO `2bc5:1201` 真机双目实时流、设备标定读取、在线三角化和深度感知跟踪。
+主流程：会话检查 -> 双目 MediaPipe -> 3D 稳定化 -> 两阶段 MANO 拟合 -> 原始鱼眼画面叠加。
 
-> Git 跟踪的仓库只包含源码与测试。本地工作包可以同时放置录像、运行输出和模型，
-> 但 `.gitignore` 会阻止它们被误提交。请参阅 [`models/README.md`](models/README.md)。
+## 快速开始：运行 20260806_110653
 
-## 仓库结构
+本录制位于：
 
 ```text
-include/      C++ 头文件
-src/          C++ 核心实现
-tools/        会话检查与极线验证工具
-scripts/      MediaPipe、3D 稳定、MANO 拟合与可视化脚本
-tests/        C++/Python 回归测试
-models/       本地运行模型，模型本体被 Git 忽略
-docs/         管线与参考结果说明
-output/       默认运行输出目录，内容被 Git 忽略
-data/         本地录像数据，被 Git 忽略
-third_party/  外部 MANO 源码，被 Git 忽略
+recordings/Orbbec_Ego_AZER764008C_20260806_110653
 ```
 
-## 初始化外部依赖
-
-公开源码依赖使用固定提交的 Git submodule。推荐克隆方式（不会下载仅源码编译需要的 vcpkg）：
-
-```bash
-git clone https://github.com/zdh1213112/ego_hand_system.git
-cd ego_hand_system
-./scripts/setup_third_party.sh
-```
-
-也可以手工初始化顶层 submodule：
-
-```bash
-git submodule update --init third_party/MANO third_party/basalt
-./scripts/setup_third_party.sh
-```
-
-`third_party/MANO` 和 `third_party/basalt` 会自动获取。MANO许可模型、
-OrbbecSDK二进制和Basalt平台运行时不会上传到GitHub；初始化脚本会检查缺项并
-显示下载或复制位置。完整说明见 [`third_party/README.md`](third_party/README.md)。
-
-公开的 MediaPipe 手部模型会由初始化脚本自动下载并校验。MANO v1.2 官方模型
-下载地址（下载即表示同意 MANO 官网许可条款）：
-
-<https://download.is.tue.mpg.de/download.php?domain=mano&resume=1&sfile=mano_v1_2.zip>
-
-下载 `mano_v1_2.zip` 后可用下面的命令安装，参数可以是官方压缩包或解压目录：
-
-```bash
-python scripts/install_mano_models.py --source /path/to/mano_v1_2.zip
-```
-
-如果你有合法的私有资产包，可以直接在项目根目录解压，保持以下路径：
+已检查的输入状态：1600x1300 双路视频、约 24.8 秒、723 对可配对双目帧、122.267 mm 基线、同步误差 P95 为 75 us。已验证的输出统一写到：
 
 ```text
-models/hand_landmarker.task
-models/mano/MANO_LEFT.pkl
-models/mano/MANO_RIGHT.pkl
-third_party/orbbec_sdk/
-third_party/basalt_runtime/
+output/recording_20260806_110653_reacquired
 ```
 
-然后运行：
-
-```bash
-python scripts/check_third_party.py --require-mano --require-live --require-basalt
-```
-
-如果这是你有权使用的私有资产压缩包，也可以运行：
-
-```bash
-./scripts/install_local_assets.sh --archive /path/ego_hand_assets.tar.gz
-```
-
-## Python 环境
-
-```bash
-conda env create -f environment.yml
-conda activate ego-hand
-unset PYTHONPATH
-```
-
-RTX 50 系列实时 MANO 使用 CUDA 12.8 PyTorch。本机已验证组合为
-`torch 2.11.0+cu128`；环境还需要 `typeguard==4.4.4`。可在已创建环境中执行：
-
-```bash
-python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
-  torch==2.11.0+cu128
-python -m pip install typeguard==4.4.4
-```
-
-## 构建
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
-```
-
-依赖：OpenCV 4、yaml-cpp、CMake 和 C++17 编译器。
-
-## 检查录制会话
-
-```bash
-./build/ego_session_inspect \
-  --session "/path/to/Orbbec_Ego_<serial>_<time>" \
-  --output output/session_check
-```
-
-程序按 `*_camera_left_pts.csv` 和 `*_camera_right_pts.csv` 中的设备硬件时间戳配对，不能将两个 MP4 的第 N 帧直接视为同一时刻。
-
-输出：
-
-```text
-output/session_check/stereo_raw.jpg
-output/session_check/stereo_rectified.jpg
-```
-
-## EGO 真机实时双目 MANO 跟踪
-
-本地工作包需包含 `third_party/orbbec_sdk`。一键构建并启动：
-
-```bash
-cd /home/zdh/ego_hand_system
-scripts/run_ego_live.sh
-```
-
-启动日志应优先显示 `connection=USB3.x`。如果显示 `USB2.0`，双路
-1600×1300 MJPEG通常只能得到约8–12个完整帧对/秒，应更换直连USB3端口、
-线缆并避开USB2集线器；这属于输入带宽限制，不是CUDA是否启用的问题。
-
-保存实时标注视频：
-
-```bash
-scripts/run_ego_live.sh --record
-```
-
-启动脚本默认显示原始左鱼眼画面上的双手 MANO 网格、每手 21-DOF 面板和
-独立3D预览。仅查看双目21点诊断画面时使用：
-
-```bash
-scripts/run_ego_live.sh --no-mano
-```
-
-实时程序从 EGO Flash 读取当前设备的 KB 双目标定，按 SDK `FrameSet` 和设备
-时间戳获得左右帧，输出左相机光学坐标系下的米制3D。轨迹关联联合使用左图
-速度预测、三维手掌中心、Z深度和 handedness 软约束；关节点根据极线误差、
-重投影误差和视差做质量加权滤波。详见
-[`docs/EGO_REALTIME.md`](docs/EGO_REALTIME.md)。关于“界面为什么像单目”、
-MediaPipe world landmarks 与真实相机深度的区别、鱼眼去畸变/双目校正要求及
-完整坐标流程，参阅
-[`docs/STEREO_DEPTH_AND_DISTORTION_PIPELINE.md`](docs/STEREO_DEPTH_AND_DISTORTION_PIPELINE.md)。
-
-## 标定板极线误差验证
-
-```bash
-./build/ego_epipolar_validate \
-  --session "/path/to/Orbbec_Ego_<serial>_<time>" \
-  --stride 5 \
-  --output-csv output/epipolar_per_frame.csv
-```
-
-当前工具针对本项目录制的 `DICT_5X5_50` 标定板，通过左右同 ID 标记的四个角点统计校正后的垂直像素误差。正式验收建议同时保存标定板打印规格，并增加已知三维尺度测试。
-
-## MediaPipe 左相机 21 点基线
-
-使用独立 Conda 环境，不依赖系统 Python：
-
-```bash
-conda env create -f environment.yml
-conda activate ego-hand
-unset PYTHONPATH
-
-python scripts/mediapipe_left_baseline.py \
-  --session "/path/to/Orbbec_Ego_<serial>_<time>" \
-  --model models/hand_landmarker.task \
-  --output output/mediapipe_left
-```
-
-程序先使用 EGO YAML 中的 KB 标定参数完成双目校正，再在左校正图上运行最多两只手的 21 点检测。输出包括：
-
-- `left_frames.csv`：逐帧检测数量；
-- `left_landmarks.csv`：归一化坐标、校正图像素坐标、左右手类别与模型相对世界坐标；
-- `left_annotated.mp4`：检测结果可视化；
-- `summary.json`：版本、参数、检测率和速度。
-
-`world_x_m/world_y_m/world_z_m` 是 MediaPipe 的手部模型相对坐标，不是相机坐标，也不能替代后续双目三角化结果。
-
-## 双目21点三角化
-
-```bash
-conda activate ego-hand
-unset PYTHONPATH
-
-python scripts/mediapipe_stereo_triangulate.py \
-  --session "/path/to/Orbbec_Ego_<serial>_<time>" \
-  --model models/hand_landmarker.task \
-  --output output/mediapipe_stereo
-```
-
-程序按左右硬件 PTS 配对，不按两个视频的相同帧号配对。左右校正图分别运行 MediaPipe，随后根据极线误差、视差、handedness软约束和几何有效点数量关联同一只手。输出：
-
-- `stereo_frames.csv`：逐对同步、检测、匹配和3D有效点统计；
-- `stereo_landmarks_3d.csv`：左右2D点、视差、极线误差、重投影误差及三维坐标；
-- `stereo_annotated.mp4`：左右相机关联结果，相同颜色和 `track_id` 表示同一只手；
-- `summary.json`：全片双目匹配率、3D有效率、误差和深度分布。
-
-`x_left_camera_m/y_left_camera_m/z_left_camera_m` 是原始左相机光学坐标系下的米制3D结果，可作为后续 MANO 拟合输入。
-
-## MANO前处理
-
-```bash
-python scripts/stabilize_hand_3d.py \
-  --input output/mediapipe_stereo/stereo_landmarks_3d.csv \
-  --output output/mano_preparation
-```
-
-该阶段先利用单帧手部空间范围、局部时序中值、骨架拓扑和优化残差剔除明显的双目深度离群点；再只填补不超过5帧的内部短缺口，保留长时间缺失。最后按观测几何质量进行零相位时序滤波，并使用每只手独立估计的稳定骨长约束结果。输出：
-
-前处理还会在掌心局部坐标中检查左右相机各自的 MediaPipe 2D 骨架，去除无法由整手平移、缩放或旋转解释的短时手指跳变。左右像素有效 mask 会写入 `mano_input.npz`；MANO 的2D损失不会再使用被屏蔽的指尖，但仍可使用另一侧相机的有效观测。
-
-- `stabilized_landmarks_3d.csv`：带 `observed/interpolated/rejected_outlier/missing` 来源状态的稳定3D点；
-- `mano_input.npz`：MANO拟合数据接口，包含原始观测、可接受观测、离群剔除、插值和有效性 mask；
-- `stabilized_3d.mp4`：原始灰点与稳定骨架的正视图/俯视图；
-- `preview_montage.jpg`：全片六个时间点的预览拼图；
-- `summary.json`：补点数量、完整手实例、时序抖动和骨长误差对比。
-
-只校验 NPZ 数据契约（不需要 MANO 模型）：
-
-```bash
-python scripts/check_mano_assets.py \
-  --input output/mano_preparation/mano_input.npz \
-  --input-only
-```
-
-MANO模型文件需用户从官方渠道接受许可证后提供。放置 `MANO_LEFT.pkl` 和 `MANO_RIGHT.pkl` 后可检查：
-
-```bash
-python scripts/check_mano_assets.py \
-  --model-dir models/mano \
-  --mano-source third_party/MANO \
-  --input output/mano_preparation/mano_input.npz
-```
-
-### MANO 参数拟合
-
-本项目使用放置在 `third_party/MANO` 的外部 `otaheri/MANO` PyTorch 源码实现，不修改该外部目录。已固定 MediaPipe 21点到 MANO 21关节的语义映射，拟合目标包含置信度加权3D关节、左右校正图2D重投影、姿态/形状先验和时序平滑。
-
-先用少量帧冒烟测试：
-
-```bash
-python scripts/fit_mano_sequence.py \
-  --input output/mano_preparation/mano_input.npz \
-  --mano-source third_party/MANO \
-  --model-dir models/mano \
-  --output output/mano_fit_smoke \
-  --max-pairs 12
-```
-
-冒烟测试通过后运行全量。对于最终输出，推荐使用两阶段 `tuned` 预设，
-不要继续使用一次性全序列默认拟合。第一阶段估计形状并建立稳定初值：
-
-```bash
-python scripts/fit_mano_sequence.py \
-  --input output/recording_20260806_105205/mano_preparation/mano_input.npz \
-  --mano-source third_party/MANO \
-  --model-dir models/mano \
-  --output output/recording_20260806_105205/mano_fit_initial_tuned \
-  --shape-iterations 300 --pose-iterations 120 \
-  --pose-window 24 --pose-overlap 8 --learning-rate 0.008 \
-  --w-3d 1.0 --w-2d 0.8 --w-pose 0.0025 \
-  --w-temporal 0.012 --w-rigid-temporal 0.005 \
-  --w-acceleration 0.006 --boundary-weight 0.04 \
-  --max-orient-step-deg 75 --max-translation-step-m 0.08 \
-  --max-pose-step 6 --no-image-rigid-alignment --device cuda --no-video
-```
-
-第二阶段从初值做低学习率精修：
-
-```bash
-python scripts/fit_mano_sequence.py \
-  --input output/recording_20260806_105205/mano_preparation/mano_input.npz \
-  --mano-source third_party/MANO \
-  --model-dir models/mano \
-  --output output/recording_20260806_105205/mano_fit_final_tuned \
-  --initial-output output/recording_20260806_105205/mano_fit_initial_tuned \
-  --shape-iterations 0 --pose-iterations 80 \
-  --pose-window 24 --pose-overlap 8 --learning-rate 0.0015 \
-  --w-3d 1.0 --w-2d 0.8 --w-pose 0.0025 \
-  --w-temporal 0.012 --w-rigid-temporal 0.005 \
-  --w-acceleration 0.006 --boundary-weight 0.04 \
-  --max-orient-step-deg 75 --max-translation-step-m 0.08 \
-  --max-pose-step 6 --no-image-rigid-alignment --device cuda --no-video
-```
-
-输出中每条轨迹包含 MANO 778顶点、21关节、faces、shape/pose/orientation/translation 参数、关节 CSV 和网格对比视频。
-
-针对移动过程中的 MANO 整手翻转、平移和关节突变，项目现已加入观测质量自适应时序约束、窗口边界锚定、SO(3) 旋转限幅、姿态/刚体速度与加速度约束。验证结果和推荐参数见 [MANO 运动稳定性优化](docs/MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md)。正式对比视频位于 `output/mano_overlay_motion_guard/mano_overlay_21dof.mp4`。
-
-`20260806_105205` 录像的稳定候选是 `mano_fit_final_tuned`，对应可视化是
-`mano_overlay_trajectory_tuned`。同一份双目/MediaPipe输入下，tuned版掌心位置
-逐帧变化P95由右手26.95 mm、左手28.28 mm降至22.64 mm、18.87 mm；左右图
-重投影误差也明显下降。这证明主要跳变来自 MANO 拟合策略，而不是 Basalt VIO。
-当前左手在严重运动/遮挡段仍可能出现姿态跳变，因此 tuned 是推荐基线，不代表
-所有异常都已消除。
-
-针对当前录像进一步加入双目2D跳变屏蔽和近接触捏合距离约束后，候选结果位于
-`mano_overlay_pixel_guard_pinch_w05`。在观测拇指尖-食指尖距离小于25 mm的帧中，
-右手距离平均误差由8.58 mm降至1.69 mm，左手由4.63 mm降至1.22 mm；全序列
-关节步长P95基本不变。该约束只匹配稳定观测到的指尖距离，不会在普通帧强制捏合。
-
-在 pixel-guard tuned 结果上执行接触精修：
-
-```bash
-python scripts/fit_mano_sequence.py \
-  --input output/recording_20260806_105205/mano_preparation_pixel_guard/mano_input.npz \
-  --mano-source third_party/MANO --model-dir models/mano \
-  --output output/recording_20260806_105205/mano_fit_pixel_guard_pinch_w05 \
-  --initial-output output/recording_20260806_105205/mano_fit_pixel_guard_tuned \
-  --shape-iterations 0 --pose-iterations 60 \
-  --pose-window 24 --pose-overlap 8 --learning-rate 0.001 \
-  --w-3d 1.0 --w-2d 0.8 --w-pinch 0.5 --pinch-threshold-m 0.025 \
-  --w-pose 0.0025 --w-temporal 0.012 --w-rigid-temporal 0.005 \
-  --w-acceleration 0.006 --boundary-weight 0.04 \
-  --max-orient-step-deg 75 --max-translation-step-m 0.08 \
-  --max-pose-step 6 --no-image-rigid-alignment --device cuda --no-video
-```
-
-直接查看稳定候选：
-
-```bash
-xdg-open output/recording_20260806_105205/mano_overlay_trajectory_tuned/mano_overlay_21dof.mp4
-```
-
-查看带2D跳变屏蔽和捏合约束的新候选：
-
-```bash
-xdg-open output/recording_20260806_105205/mano_overlay_pixel_guard_pinch_w05/mano_overlay_21dof.mp4
-```
-
-对双目观测不足的帧，推荐使用支持度门控和热启动姿态插值版本：它要求至少12个真实三维点才参与当前帧拟合，低支持帧只沿用前后可靠帧的连续姿态，不把插值点当作相机观测。结果位于
-`output/recording_20260806_105205/mano_overlay_supported_repaired_pinch`：
-
-```bash
-python scripts/fit_mano_sequence.py \
-  --input output/recording_20260806_105205/mano_preparation_pixel_guard/mano_input.npz \
-  --mano-source third_party/MANO --model-dir models/mano \
-  --output output/recording_20260806_105205/mano_fit_supported_repaired_pinch \
-  --initial-output output/recording_20260806_105205/mano_fit_pixel_guard_tuned \
-  --shape-iterations 0 --pose-iterations 60 --pose-window 24 --pose-overlap 8 \
-  --learning-rate 0.001 --w-3d 1.0 --w-2d 0.8 --w-pinch 0.5 \
-  --pinch-threshold-m 0.025 --min-fit-observed-points 12 \
-  --w-pose 0.0025 --w-temporal 0.012 --w-rigid-temporal 0.005 \
-  --w-acceleration 0.006 --boundary-weight 0.04 \
-  --max-orient-step-deg 75 --max-translation-step-m 0.08 --max-pose-step 6 \
-  --no-image-rigid-alignment --device cuda --no-video
-```
-
-当前录像的首个异常源头已定位到 `mediapipe_stereo`：左手 T1 在 355、357、366 帧没有有效双目观测，358-365 帧也只有少量手指点；这会让后续三角化和 MANO 拟合欠约束。支持度门控能抑制后续放大，但要彻底恢复这些帧，下一步应优化 MediaPipe 双目关联/单侧丢检的恢复策略。
-
-已加入跨帧 LK 丢检恢复：当左右视角检测数量不一致时，用上一帧同一轨迹的2D关键点跟踪到当前图像，生成低置信度候选，并在双目关联中优先真实 MediaPipe 检测。当前录像的恢复结果位于
-`output/recording_20260806_105205/mediapipe_stereo_lk_recovery`，对应 MANO 叠加视频为
-`output/recording_20260806_105205/mano_overlay_lk_recovery/mano_overlay_21dof.mp4`。
-异常窗口的左手轨迹由原来的多次整帧断开变为连续保留，最终 MANO 关节步长 P99 从48.4 mm降至43.4 mm。
-
-针对开头和首次捏合时“指尖距离正确但绝对位置不贴合”的问题，拟合阶段新增近接触指尖锚定：当观测拇指尖-食指尖距离小于35 mm时，同时约束两根指尖的绝对3D位置和左右图2D投影。当前录像最终候选为
-`output/recording_20260806_105205/mano_overlay_lk_contact_tips/mano_overlay_21dof.mp4`，使用参数
-`--w-pinch 0.5 --pinch-threshold-m 0.025 --w-contact-tips 1.5 --contact-tip-threshold-m 0.035`。
-
-### 21自由度网格叠加与双手3D预览
-
-将精修后的 MANO 778 顶点按 EGO KB 鱼眼内参直接投影回原始左相机画面。右侧同时显示左右手21自由度弧度条和独立 MANO 3D 预览：
-
-```bash
-python scripts/render_mano_overlay_angles.py \
-  --session "/path/to/Orbbec_Ego_<serial>_<time>" \
-  --mano-fit output/mano_fit_refined \
-  --mano-source third_party/MANO \
-  --model-dir models/mano \
-  --stereo-frames output/mediapipe_stereo/stereo_frames.csv \
-  --output output/mano_overlay_21dof
-```
-
-直接查看正式结果：
-
-```bash
-xdg-open output/mano_overlay_21dof/mano_overlay_21dof.mp4
-```
-
-21自由度定义为：
-
-- 拇指：CMC屈伸、CMC张合、CMC对掌旋转、MCP屈伸、IP屈伸；
-- 其余四指：MCP屈伸、MCP张合、PIP屈伸、DIP屈伸。
-
-`mano_joint_angles_21dof.csv` 保存未滤波弧度、5帧局部中值弧度和对应角度；`mano_pose_axis_angle.csv` 保存全部15×3 MANO mean-relative 轴角分量；原有 `mano_joint_angles.csv` 继续保存20个几何角。两类角都尚未经过医学解剖轴标定。
-
-## 测试
-
-```bash
-python -m unittest discover -s tests -p 'test_*.py' -v
-ctest --test-dir build --output-on-failure
-```
-
-未放置许可 MANO 模型时，对应的官方模型前向测试会自动跳过。
-
-## 当前约定
-
-- 三维坐标单位统一为米；
-- YAML 中 EGO 相机平移按毫米读取并转换为米；
-- `cam_0` 为左/参考相机，`cam_1` 为右相机；
-- `KB` 畸变使用 OpenCV `cv::fisheye` API；
-- 第一阶段输出坐标系为左相机光学坐标系。
-
-## Basalt 双目惯性 VIO 与世界坐标手部轨迹
-
-项目现已支持把 EGO 双目、PTS、KB 鱼眼标定和约 1000 Hz IMU 转为 Basalt 输入，估计左相机的米制重力对齐世界轨迹，再将相机坐标下的手部末端 6D 位姿转换为世界坐标：
-
-```text
-T_world_hand = T_world_imu · T_imu_camera · T_camera_hand
-```
-
-进入环境后可一条命令运行当前录制：
+在项目根目录执行以下命令。首次使用前请确认 `models/hand_landmarker.task`、`models/mano/MANO_LEFT.pkl`、`models/mano/MANO_RIGHT.pkl` 和 `third_party/MANO` 已就绪。
 
 ```bash
 cd /home/zdh/ego_hand_system
@@ -441,24 +26,250 @@ conda activate ego-hand
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
-python scripts/run_basalt_offline.py \
-  --session recordings/Orbbec_Ego_AZER764008C_20260806_105205 \
-  --hand-pose-csv output/recording_20260806_105205/mano_overlay_trajectory_tuned/hand_end_effector_6d.csv \
-  --world-output output/recording_20260806_105205/basalt_world/world_hand_trajectory_tuned
+EGO_SESSION=recordings/Orbbec_Ego_AZER764008C_20260806_110653
+EGO_OUTPUT=output/recording_20260806_110653_reacquired
 ```
 
-未传 `--hand-pose-csv` 时，脚本会优先选择
-`mano_overlay_trajectory_tuned/hand_end_effector_6d.csv`，不存在时才回退到旧版
-`mano_overlay_trajectory`。已有世界轨迹若来自不同的 MANO CSV，脚本会要求使用
-新的 `--output-root`，避免静默复用不稳定旧结果。
-只更换 MANO 拟合时推荐使用新的 `--world-output`：它会复用已有 Basalt 数据集和
-相机轨迹，只重新执行手部6D到世界坐标的融合与可视化。
+### 1. 会话检查
 
-主要输出：
+```bash
+./build/ego_session_inspect \
+  --session "$EGO_SESSION" \
+  --output "$EGO_OUTPUT/session_check"
+```
 
-- `dataset/trajectory.csv`：Basalt IMU 世界轨迹；
-- `world_hand_trajectory/camera_trajectory_world.csv`：左相机世界 6D 位姿；
-- `world_hand_trajectory/hand_trajectory_world.csv`：左右手末端世界 6D 位姿；
-- `world_hand_trajectory/world_hand_trajectory_overlay.mp4`：世界固定轨迹在当前相机画面上的重投影。
+检查输出：`stereo_raw.jpg`、`stereo_rectified.jpg`。如果配对帧数、基线或同步误差明显异常，先停止后续流程并检查录制和标定文件。
 
-当前录制已完整跑通 1182 对双目帧和 40260 对 IMU 样本。详细的数据转换、时间偏移、坐标系定义、运行时安装、验收结果和局限见 [Basalt 双目惯性 VIO 与手部世界轨迹](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md)。
+### 2. 双目 MediaPipe 与三角化
+
+```bash
+python scripts/mediapipe_stereo_triangulate.py \
+  --session "$EGO_SESSION" \
+  --model models/hand_landmarker.task \
+  --output "$EGO_OUTPUT/mediapipe_stereo" \
+  --track-max-missed 75 \
+  --track-max-distance-px 280 \
+  --track-reacquire-distance-px 700
+```
+
+输出：
+
+- `stereo_annotated.mp4`：左右手关联和 21 点三角化诊断；
+- `stereo_frames.csv`：每帧检测、匹配和有效 3D 点数；
+- `stereo_landmarks_3d.csv`：后续处理的双目 3D 输入；
+- `summary.json`：匹配率、重投影误差和深度统计。
+
+该阶段在左右视角某一侧短暂漏检时，会优先使用真实 MediaPipe 结果，并以低置信度的跨帧 LK 候选补偿缺失视角；轨迹管理器会保留手身份最多 75 个配对帧，并在长遮挡后重获同一轨迹，避免同一只手被拆成多个 `track_id`。
+
+### 3. 3D 稳定化与输入校验
+
+```bash
+python scripts/stabilize_hand_3d.py \
+  --input "$EGO_OUTPUT/mediapipe_stereo/stereo_landmarks_3d.csv" \
+  --output "$EGO_OUTPUT/mano_preparation" \
+  --pixel-outlier-window 4 \
+  --pixel-outlier-distance 0.45 \
+  --pixel-scale-ratio 1.8
+
+python scripts/check_mano_assets.py \
+  --input "$EGO_OUTPUT/mano_preparation/mano_input.npz" \
+  --input-only
+
+python scripts/check_mano_assets.py \
+  --mano-source third_party/MANO \
+  --model-dir models/mano \
+  --input "$EGO_OUTPUT/mano_preparation/mano_input.npz"
+```
+
+`mano_input.npz` 会保留真实观测、插值、离群拒绝和左右 2D 有效掩码。MANO 拟合只会把真实且支持度足够的 3D 点作为观测证据。
+
+### 4. 第一阶段 MANO 拟合：形状与稳定初值
+
+GPU 可用时使用 `--device cuda`；若 CUDA 不可用，改为 `--device cpu`。
+
+```bash
+python scripts/fit_mano_sequence.py \
+  --input "$EGO_OUTPUT/mano_preparation/mano_input.npz" \
+  --mano-source third_party/MANO \
+  --model-dir models/mano \
+  --output "$EGO_OUTPUT/mano_fit_optimized_initial_rigid" \
+  --shape-iterations 300 \
+  --pose-iterations 140 \
+  --pose-window 32 \
+  --pose-overlap 12 \
+  --learning-rate 0.006 \
+  --w-3d 1.0 \
+  --w-2d 0.35 \
+  --w-pinch 0.35 \
+  --pinch-threshold-m 0.025 \
+  --w-contact-tips 0.75 \
+  --contact-tip-threshold-m 0.035 \
+  --min-fit-observed-points 12 \
+  --max-unobserved-gap 5 \
+  --w-pose 0.0025 \
+  --w-temporal 0.05 \
+  --w-rigid-temporal 0.02 \
+  --w-acceleration 0.015 \
+  --boundary-weight 0.15 \
+  --max-orient-step-deg 40 \
+  --max-translation-step-m 0.04 \
+  --max-pose-step 2.5 \
+  --rigid-initialization \
+  --no-image-rigid-alignment \
+  --device cuda \
+  --no-video
+```
+
+### 5. 第二阶段 MANO 拟合：低学习率精修
+
+```bash
+python scripts/fit_mano_sequence.py \
+  --input "$EGO_OUTPUT/mano_preparation/mano_input.npz" \
+  --mano-source third_party/MANO \
+  --model-dir models/mano \
+  --output "$EGO_OUTPUT/mano_fit_optimized_final" \
+  --initial-output "$EGO_OUTPUT/mano_fit_optimized_initial_rigid" \
+  --shape-iterations 0 \
+  --pose-iterations 100 \
+  --pose-window 48 \
+  --pose-overlap 16 \
+  --learning-rate 0.001 \
+  --w-3d 1.0 \
+  --w-2d 0.30 \
+  --w-pinch 0.35 \
+  --pinch-threshold-m 0.025 \
+  --w-contact-tips 0.75 \
+  --contact-tip-threshold-m 0.035 \
+  --min-fit-observed-points 12 \
+  --max-unobserved-gap 5 \
+  --w-pose 0.0025 \
+  --w-temporal 0.08 \
+  --w-rigid-temporal 0.03 \
+  --w-acceleration 0.025 \
+  --boundary-weight 0.20 \
+  --max-orient-step-deg 35 \
+  --max-translation-step-m 0.035 \
+  --max-pose-step 1.8 \
+  --no-image-rigid-alignment \
+  --device cuda \
+  --no-video
+```
+
+近接触指尖锚定只在拇指尖和食指尖的观测距离小于 35 mm 时启用；它同时约束两根指尖的 3D 位置和左右图 2D 投影，避免只有指间距离正确、但整组指尖仍偏离人手的情况。
+
+### 6. 渲染最终结果
+
+```bash
+python scripts/render_mano_overlay_angles.py \
+  --session "$EGO_SESSION" \
+  --mano-fit "$EGO_OUTPUT/mano_fit_optimized_final" \
+  --mano-source third_party/MANO \
+  --model-dir models/mano \
+  --stereo-frames "$EGO_OUTPUT/mediapipe_stereo/stereo_frames.csv" \
+  --output "$EGO_OUTPUT/mano_overlay_optimized"
+
+xdg-open "$EGO_OUTPUT/mano_overlay_optimized/mano_overlay_21dof.mp4"
+```
+
+最终常用文件：
+
+```text
+output/recording_20260806_110653_reacquired/
+  session_check/stereo_rectified.jpg
+  mediapipe_stereo/stereo_annotated.mp4
+  mediapipe_stereo/summary.json
+  mano_preparation/summary.json
+  mano_fit_optimized_initial_rigid/summary.json
+  mano_fit_optimized_final/summary.json
+  mano_overlay_optimized/mano_overlay_21dof.mp4
+  mano_overlay_optimized/mano_joint_angles_21dof.csv
+  mano_overlay_optimized/hand_end_effector_6d.csv
+```
+
+本次录制的验证结果：MediaPipe 匹配 692/723 对（95.7%），有效双目点 26,633；稳定化后保留真实长缺口，不跨缺口插值。优化后的 MANO 中位 3D 关节误差约为左 9.1 mm、右 11.9 mm；渲染只显示有可靠观测的连续段，左/右分别输出 659/618 个可见帧。
+
+### 7. 可选：Basalt 世界坐标轨迹
+
+只有需要世界坐标下的手末端 6D 轨迹时才运行。该步骤依赖 `third_party/basalt_runtime`。
+
+```bash
+python scripts/run_basalt_offline.py \
+  --session "$EGO_SESSION" \
+  --hand-pose-csv "$EGO_OUTPUT/mano_overlay_optimized/hand_end_effector_6d.csv" \
+  --output-root "$EGO_OUTPUT/basalt_world"
+```
+
+输出：`camera_trajectory_world.csv`、`hand_trajectory_world.csv` 和 `world_hand_trajectory_overlay.mp4`。
+
+## 前置条件
+
+### 安装依赖
+
+```bash
+git clone https://github.com/zdh1213112/ego_hand_system.git
+cd ego_hand_system
+./scripts/setup_third_party.sh
+
+conda env create -f environment.yml
+conda activate ego-hand
+```
+
+所需本地资产：
+
+```text
+models/hand_landmarker.task
+models/mano/MANO_LEFT.pkl
+models/mano/MANO_RIGHT.pkl
+third_party/MANO/
+third_party/basalt_runtime/          # 仅 Basalt 步骤需要
+```
+
+MANO 模型需要从官方渠道获取并接受其许可；安装方法见 [models/README.md](models/README.md)。私有资产包可用：
+
+```bash
+./scripts/install_local_assets.sh --archive /path/ego_hand_assets.tar.gz
+```
+
+### 构建检查工具
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+ctest --test-dir build --output-on-failure
+```
+
+## 运行与排错
+
+- 每次新实验使用新的输出目录，例如 `output/recording_20260806_110653_v2`；不要覆盖已分析的结果。
+- 首先查看 `mediapipe_stereo/stereo_annotated.mp4`。若手在这里就跳变，问题在检测、关联或三角化，而不是 MANO。
+- 若双目点稳定、网格仍不贴手，查看 `mano_fit_optimized_final/summary.json` 和最终叠加视频，再调整 MANO 参数。
+- 录制元数据表明本次使用 USB2.0。它不会使离线处理失败，但快速运动时更容易出现运动模糊和单侧漏检；后续采集建议使用 USB3.x 直连。
+- 标定板极线验收只在录像中包含 `DICT_5X5_50` 标定板时运行：
+
+```bash
+./build/ego_epipolar_validate \
+  --session "$EGO_SESSION" \
+  --stride 5 \
+  --output-csv "$EGO_OUTPUT/epipolar_per_frame.csv"
+```
+
+## 其他入口
+
+- 实时双目 MANO：`scripts/run_ego_live.sh`，详细说明见 [docs/EGO_REALTIME.md](docs/EGO_REALTIME.md)。
+- 双目深度、畸变和坐标系说明：[docs/STEREO_DEPTH_AND_DISTORTION_PIPELINE.md](docs/STEREO_DEPTH_AND_DISTORTION_PIPELINE.md)。
+- Basalt 数据转换与世界坐标：[docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md)。
+- MANO 运动稳定策略：[docs/MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md](docs/MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md)。
+
+## 测试与坐标约定
+
+```bash
+conda run --no-capture-output -n ego-hand \
+  python -m unittest discover -s tests -p 'test_*.py' -v
+ctest --test-dir build --output-on-failure
+```
+
+- 三维坐标单位是米；
+- `cam_0` 是左侧参考相机，`cam_1` 是右侧相机；
+- 第一阶段 3D 输出位于左相机光学坐标系；
+- KB 鱼眼畸变通过 OpenCV `cv::fisheye` 处理；
+- 世界坐标仅在可选 Basalt 阶段产生。

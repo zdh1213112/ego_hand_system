@@ -54,6 +54,61 @@ class StabilizeHand3DTests(unittest.TestCase):
         )
         self.assertEqual(np.count_nonzero(rejected), 0)
 
+    def test_palm_frame_smoothing_rejects_finger_spike_and_keeps_palm_attached(self):
+        pixels = self.moving_pixel_skeleton()
+        expected_tip = pixels[0, 5, 8].copy()
+        pixels[0, 5, 8] += (75.0, -50.0)
+        valid = np.ones(pixels.shape[:-1], dtype=bool)
+
+        filtered = MODULE.smooth_pixel_landmarks_in_palm_frame(
+            pixels, valid, radius=3, strength=1.0
+        )
+
+        raw_error = np.linalg.norm(pixels[0, 5, 8] - expected_tip)
+        filtered_error = np.linalg.norm(filtered[0, 5, 8] - expected_tip)
+        self.assertLess(filtered_error, raw_error * 0.2)
+        raw_centres = np.median(pixels[0][:, MODULE.PALM_FRAME_JOINTS], axis=1)
+        filtered_centres = np.median(
+            filtered[0][:, MODULE.PALM_FRAME_JOINTS], axis=1
+        )
+        np.testing.assert_allclose(filtered_centres, raw_centres, atol=1e-9)
+
+    def test_palm_frame_smoothing_reduces_local_shape_step(self):
+        pixels = self.moving_pixel_skeleton()
+        pixels[0, 5, 8] += (75.0, -50.0)
+        valid = np.ones(pixels.shape[:-1], dtype=bool)
+        filtered = MODULE.smooth_pixel_landmarks_in_palm_frame(
+            pixels, valid, radius=3, strength=0.8
+        )
+        raw = MODULE.palm_normalized_pixel_step_metric(pixels, valid)
+        smooth = MODULE.palm_normalized_pixel_step_metric(filtered, valid)
+        self.assertLess(smooth["p95"], raw["p95"])
+
+    def test_3d_palm_frame_smoothing_keeps_palm_and_rejects_finger_spike(self):
+        pixels = self.moving_pixel_skeleton()
+        points = np.zeros((1, 11, 21, 3), dtype=np.float64)
+        points[..., :2] = pixels / 1000.0
+        points[..., 2] = np.arange(21, dtype=np.float64)[None, None, :] * 0.0002
+        expected_tip = points[0, 5, 8].copy()
+        points[0, 5, 8] += (0.075, -0.050, 0.040)
+        valid = np.ones(points.shape[:-1], dtype=bool)
+
+        filtered = MODULE.smooth_3d_landmarks_in_palm_frame(
+            points, valid, radius=3, strength=1.0
+        )
+
+        raw_error = np.linalg.norm(points[0, 5, 8] - expected_tip)
+        filtered_error = np.linalg.norm(filtered[0, 5, 8] - expected_tip)
+        self.assertLess(filtered_error, raw_error * 0.25)
+        raw_centres = np.median(points[0][:, MODULE.PALM_FRAME_JOINTS], axis=1)
+        filtered_centres = np.median(
+            filtered[0][:, MODULE.PALM_FRAME_JOINTS], axis=1
+        )
+        np.testing.assert_allclose(filtered_centres, raw_centres, atol=1e-12)
+        raw_metric = MODULE.palm_normalized_3d_step_metric(points, valid)
+        filtered_metric = MODULE.palm_normalized_3d_step_metric(filtered, valid)
+        self.assertLess(filtered_metric["p95"], raw_metric["p95"])
+
     def test_stereo_confidence_uses_disparity_and_refinement_quality(self):
         row = {
             "landmark_index": "8",

@@ -51,6 +51,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-depth-m", type=float, default=0.15)
     parser.add_argument("--max-depth-m", type=float, default=3.0)
     parser.add_argument("--max-reprojection-px", type=float, default=8.0)
+    parser.add_argument(
+        "--track-max-missed", type=int, default=75,
+        help="keep a hand identity through this many unmatched paired frames",
+    )
+    parser.add_argument(
+        "--track-max-distance-px", type=float, default=280.0,
+        help="normal maximum palm-center distance for track association",
+    )
+    parser.add_argument(
+        "--track-reacquire-distance-px", type=float, default=700.0,
+        help="maximum palm-center distance when reacquiring a long-missing hand",
+    )
     refinement = parser.add_mutually_exclusive_group()
     refinement.add_argument(
         "--stereo-refine", action="store_true", dest="stereo_refine",
@@ -479,11 +491,36 @@ def triangulate(
 
 
 class TrackManager:
-    def __init__(self, max_missed: int = 30, max_distance_px: float = 280.0):
+    """Maintain the two hand identities through short out-of-view intervals."""
+
+    def __init__(
+        self,
+        max_missed: int = 75,
+        max_distance_px: float = 280.0,
+        reacquire_distance_px: float = 700.0,
+        max_tracks: int = 2,
+        reacquire_after_missed: int = 12,
+    ):
         self.next_id = 0
         self.max_missed = max_missed
         self.max_distance_px = max_distance_px
+        self.reacquire_distance_px = max(reacquire_distance_px, max_distance_px)
+        self.max_tracks = max_tracks
+        self.reacquire_after_missed = reacquire_after_missed
         self.tracks: dict[int, dict] = {}
+
+    def association_cost(self, match: dict, track: dict) -> float | None:
+        prediction = track["position"] + track["velocity"] * min(track["missed"], 3)
+        distance = float(np.linalg.norm(match["center_left_px"] - prediction))
+        reacquiring = track["missed"] > self.reacquire_after_missed
+        gate = self.reacquire_distance_px if reacquiring else self.max_distance_px
+        if distance > gate:
+            return None
+        label_penalty = 0.0
+        match_label = match["left"]["label"]
+        if match_label != track["label"] and match["left"]["score"] > 0.80:
+            label_penalty = 80.0
+        return distance + label_penalty + min(track["missed"], self.max_missed) * 1.5
 
     def assign(self, matches: list[dict]) -> None:
         for track in self.tracks.values():
@@ -494,6 +531,7 @@ class TrackManager:
         ]
         track_ids = list(self.tracks)
         assignment: dict[int, int] = {}
+        used_track_ids: set[int] = set()
         if usable and track_ids:
             count = min(len(usable), len(track_ids))
             best_cost = float("inf")
@@ -502,46 +540,71 @@ class TrackManager:
                 for track_subset in itertools.combinations(track_ids, count):
                     for track_order in itertools.permutations(track_subset):
                         pairs = list(zip(match_subset, track_order))
-                        distances = []
                         cost = 0.0
+                        accepted = True
                         for match_index, track_id in pairs:
                             track = self.tracks[track_id]
-                            prediction = track["position"] + track["velocity"] * min(track["missed"], 3)
-                            distance = float(np.linalg.norm(matches[match_index]["center_left_px"] - prediction))
-                            distances.append(distance)
-                            label_penalty = 0.0
-                            match_label = matches[match_index]["left"]["label"]
-                            if match_label != track["label"] and matches[match_index]["left"]["score"] > 0.80:
-                                label_penalty = 80.0
-                            cost += distance + label_penalty + track["missed"] * 2.0
-                        if all(distance < self.max_distance_px for distance in distances) and cost < best_cost:
+                            pair_cost = self.association_cost(matches[match_index], track)
+                            if pair_cost is None:
+                                accepted = False
+                                break
+                            cost += pair_cost
+                        if accepted and cost < best_cost:
                             best_cost = cost
                             best_pairs = pairs
             assignment.update(best_pairs)
+            used_track_ids.update(track_id for _, track_id in best_pairs)
         for match_index, match in enumerate(matches):
             if match_index not in assignment:
-                assignment[match_index] = self.next_id
-                self.tracks[self.next_id] = {
-                    "position": match["center_left_px"].copy(),
-                    "velocity": np.zeros(2, dtype=np.float64),
-                    "missed": 0,
-                    "label": match["left"]["label"],
-                    "left_pixels": np.asarray(match["left"]["pixels"], dtype=np.float64).copy(),
-                    "right_pixels": np.asarray(match["right"]["pixels"], dtype=np.float64).copy(),
-                }
-                self.next_id += 1
+                available = [track_id for track_id in self.tracks if track_id not in used_track_ids]
+                if len(self.tracks) < self.max_tracks:
+                    track_id = self.next_id
+                    self.next_id += 1
+                    self.tracks[track_id] = {
+                        "position": match["center_left_px"].copy(),
+                        "velocity": np.zeros(2, dtype=np.float64),
+                        "missed": 0,
+                        "label": match["left"]["label"],
+                        "label_votes": {"Left": 0.0, "Right": 0.0},
+                        "left_pixels": np.asarray(match["left"]["pixels"], dtype=np.float64).copy(),
+                        "right_pixels": np.asarray(match["right"]["pixels"], dtype=np.float64).copy(),
+                    }
+                elif available:
+                    # The detector is configured for at most two hands. Reuse the
+                    # best dormant slot instead of creating fragmented identities.
+                    match_label = match["left"]["label"]
+                    track_id = min(
+                        available,
+                        key=lambda candidate: (
+                            self.tracks[candidate]["label"] != match_label,
+                            -self.tracks[candidate]["missed"],
+                            float(np.linalg.norm(
+                                match["center_left_px"] - self.tracks[candidate]["position"]
+                            )),
+                        ),
+                    )
+                else:
+                    continue
+                assignment[match_index] = track_id
+                used_track_ids.add(track_id)
             track_id = assignment[match_index]
             match["track_id"] = track_id
             track = self.tracks[track_id]
+            reacquired = track["missed"] > self.reacquire_after_missed
             new_position = match["center_left_px"]
             observed_velocity = new_position - track["position"]
-            track["velocity"] = 0.65 * track["velocity"] + 0.35 * observed_velocity
+            if reacquired:
+                track["velocity"] = np.zeros(2, dtype=np.float64)
+            else:
+                track["velocity"] = 0.65 * track["velocity"] + 0.35 * observed_velocity
             track["position"] = new_position.copy()
             track["missed"] = 0
             track["left_pixels"] = np.asarray(match["left"]["pixels"], dtype=np.float64).copy()
             track["right_pixels"] = np.asarray(match["right"]["pixels"], dtype=np.float64).copy()
-            if match["left"]["score"] > 0.90:
-                track["label"] = match["left"]["label"]
+            votes = track.setdefault("label_votes", {"Left": 0.0, "Right": 0.0})
+            votes[match["left"]["label"]] += float(match["left"]["score"])
+            track["label"] = max(votes, key=votes.get)
+            match["stable_handedness"] = track["label"]
         self.tracks = {
             track_id: track for track_id, track in self.tracks.items()
             if track["missed"] <= self.max_missed
@@ -666,7 +729,12 @@ def main() -> int:
         "x_rectified_m", "y_rectified_m", "z_rectified_m", "x_left_camera_m", "y_left_camera_m", "z_left_camera_m",
     ]
 
-    tracker = TrackManager()
+    tracker = TrackManager(
+        max_missed=args.track_max_missed,
+        max_distance_px=args.track_max_distance_px,
+        reacquire_distance_px=args.track_reacquire_distance_px,
+        max_tracks=args.num_hands,
+    )
     processed_pairs = 0
     pairs_with_matches = 0
     matched_hand_instances = 0

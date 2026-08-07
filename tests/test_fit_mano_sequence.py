@@ -133,6 +133,18 @@ class FitManoSequenceTests(unittest.TestCase):
         np.testing.assert_allclose(middle_rotation, expected_rotation, atol=1e-7)
         np.testing.assert_allclose(initial["translation"][1], [9.0, 9.0, 9.0])
 
+    def test_long_unsupported_gap_splits_motion_segments(self):
+        supported = np.asarray([False, True, True, False, False, True, False, False, False, True])
+        self.assertEqual(MODULE.support_segments(supported, max_gap=2), [(1, 5), (9, 9)])
+        self.assertEqual(MODULE.support_segments(supported, max_gap=0), [(1, 2), (5, 5), (9, 9)])
+
+    def test_render_presence_bridges_only_short_internal_gaps(self):
+        present = np.asarray([False, True, False, False, True, False, False, False, True, False])
+        expected = np.asarray([False, True, True, True, True, False, False, False, True, False])
+        np.testing.assert_array_equal(
+            MODULE.bridge_short_false_gaps(present, max_gap=2), expected
+        )
+
     def test_rectified_projection(self):
         import torch
         points = torch.tensor([[[0.1, 0.0, 1.0]]])

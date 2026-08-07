@@ -415,6 +415,11 @@ def load_tracks(
             if missing:
                 raise RuntimeError(f"{path} missing arrays: {sorted(missing)}")
             track = {name: archive[name].copy() for name in required}
+            track["render_valid"] = (
+                archive["render_valid"].astype(bool).copy()
+                if "render_valid" in archive.files
+                else np.ones(len(track["pair_indices"]), dtype=bool)
+            )
         pairs = track["pair_indices"].astype(np.int64)
         if len(np.unique(pairs)) != len(pairs):
             raise RuntimeError(f"duplicate pair index in {path}")
@@ -425,6 +430,8 @@ def load_tracks(
         track["angles_raw"] = raw
         track["angles"] = median_filter(raw, angle_radius)
         track["lookup"] = {int(pair): index for index, pair in enumerate(pairs)}
+        if track["render_valid"].shape != (len(pairs),):
+            raise RuntimeError(f"invalid render_valid shape in {path}")
         track["track_id"] = int(track["track_id"])
         track["handedness"] = str(track["handedness"])
         track["rest_joints"] = load_rest_joints(mano, model_dir, track)
@@ -440,6 +447,8 @@ def load_tracks(
         track["end_effector_position_m"] = np.stack([
             pose["position_m"] for pose in end_poses
         ])
+        track["trajectory_position_m"] = track["end_effector_position_m"].copy()
+        track["trajectory_position_m"][~track["render_valid"]] = np.nan
         track["end_effector_rotation_matrix"] = np.stack([
             pose["rotation_matrix"] for pose in end_poses
         ])
@@ -999,7 +1008,7 @@ def main() -> int:
             frame_indices: dict[int, int] = {}
             for track in tracks:
                 track_frame = track["lookup"].get(pair_index)
-                if track_frame is None:
+                if track_frame is None or not track["render_valid"][track_frame]:
                     continue
                 frame_indices[track["track_id"]] = track_frame
                 visible.append((float(np.median(track["vertices"][track_frame, :, 2])), track, track_frame))
@@ -1065,7 +1074,7 @@ def main() -> int:
                 color = TRACK_COLORS.get(track["handedness"], (120, 220, 120))
                 draw_end_effector_trajectory(
                     frame,
-                    track["end_effector_position_m"][:track_frame + 1],
+                    track["trajectory_position_m"][:track_frame + 1],
                     camera_matrix,
                     distortion,
                     color,

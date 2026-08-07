@@ -71,6 +71,10 @@ def parse_args() -> argparse.Namespace:
         "--min-fit-observed-points", type=int, default=12,
         help="minimum real 3D landmarks required for a frame to influence MANO fitting",
     )
+    parser.add_argument(
+        "--max-unobserved-gap", type=int, default=5,
+        help="maximum unsupported gap kept inside one fitted/rendered motion segment",
+    )
     parser.add_argument("--w-pose", type=float, default=0.003)
     parser.add_argument("--w-shape", type=float, default=0.015)
     parser.add_argument("--w-temporal", type=float, default=0.08)
@@ -90,7 +94,10 @@ def parse_args() -> argparse.Namespace:
                         default=False, help="experimental palm-only image-space translation correction")
     parser.add_argument("--image-alignment-max-m", type=float, default=0.025)
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="auto")
-    parser.add_argument("--rigid-initialization", action="store_true", help="initialize each frame with Kabsch")
+    parser.add_argument(
+        "--rigid-initialization", action=argparse.BooleanOptionalAction, default=True,
+        help="initialize each supported frame with Kabsch before nonlinear fitting",
+    )
     parser.add_argument("--no-video", action="store_true")
     return parser.parse_args()
 
@@ -406,6 +413,39 @@ def repair_low_support_initial(initial: dict, supported: np.ndarray) -> dict:
     return repaired
 
 
+def support_segments(supported: np.ndarray, max_gap: int) -> list[tuple[int, int]]:
+    """Return inclusive motion segments, splitting at long unsupported gaps."""
+    supported = np.asarray(supported, dtype=bool).reshape(-1)
+    if max_gap < 0:
+        raise ValueError("max_gap must be non-negative")
+    indices = np.flatnonzero(supported)
+    if not len(indices):
+        return []
+    segments: list[tuple[int, int]] = []
+    start = int(indices[0])
+    previous = int(indices[0])
+    for current_value in indices[1:]:
+        current = int(current_value)
+        if current - previous - 1 > max_gap:
+            segments.append((start, previous))
+            start = current
+        previous = current
+    segments.append((start, previous))
+    return segments
+
+
+def bridge_short_false_gaps(mask: np.ndarray, max_gap: int) -> np.ndarray:
+    """Fill only bounded short gaps; never extrapolate across track ends."""
+    result = np.asarray(mask, dtype=bool).reshape(-1).copy()
+    if max_gap < 0:
+        raise ValueError("max_gap must be non-negative")
+    true_indices = np.flatnonzero(result)
+    for left, right in zip(true_indices[:-1], true_indices[1:]):
+        if 0 < right - left - 1 <= max_gap:
+            result[left + 1:right] = True
+    return result
+
+
 def image_space_translation_alignment(
         joints, left_px, rotation, projection, quality, maximum_m: float):
     """Return a small robust translation that aligns the MANO palm in the image."""
@@ -510,6 +550,7 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         device=device,
     )
     min_fit_points = max(1, int(getattr(args, "min_fit_observed_points", 1)))
+    max_unobserved_gap = max(0, int(getattr(args, "max_unobserved_gap", 5)))
     frame_support = observed.sum(dim=1) >= min_fit_points
     fit_valid = valid & observed & frame_support[:, None]
     confidence = torch.as_tensor(observations["confidence"], dtype=torch.float32, device=device)
@@ -667,43 +708,86 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         return total, (loss3d, loss2d, pinch_loss, contact_tip_loss, pose_prior, shape_prior, temporal), vertices, joints
 
     if args.shape_iterations > 0:
-        optimizer = torch.optim.Adam([betas, pose, orient, transl], lr=args.learning_rate)
+        shape_parameters = [betas, pose, orient, transl]
+        optimizer = torch.optim.Adam(shape_parameters, lr=args.learning_rate)
         for _ in range(args.shape_iterations):
             optimizer.zero_grad(set_to_none=True)
             loss, _, _, _ = objective(shape_ids, False)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_([betas, pose, orient, transl], 5.0)
+            torch.nn.utils.clip_grad_norm_(shape_parameters, 5.0)
             optimizer.step()
 
     betas.requires_grad_(False)
-    optimizer = torch.optim.Adam([pose, orient, transl], lr=args.learning_rate * 0.55)
     all_ids = torch.arange(frame_count, device=device)
     window_size = min(args.pose_window, frame_count) if args.pose_window > 0 else frame_count
     effective_overlap = min(args.pose_overlap, max(window_size - 1, 0))
     window_step = window_size - effective_overlap
     if window_step <= 0:
         raise ValueError("--pose-overlap must be smaller than --pose-window")
-    window_starts = list(range(0, frame_count, window_step))
-    if window_starts and window_starts[-1] + window_size < frame_count:
-        window_starts.append(frame_count - window_size)
-    for window_start in window_starts:
-        window_ids = all_ids[window_start:min(frame_count, window_start + window_size)]
-        boundary = None
-        if window_start > 0 and effective_overlap > 0:
-            anchor_ids = window_ids[:min(effective_overlap, len(window_ids))]
-            boundary = {
-                "ids": anchor_ids,
-                "pose": pose[anchor_ids].detach().clone(),
-                "orient": orient[anchor_ids].detach().clone(),
-                "transl": transl[anchor_ids].detach().clone(),
-            }
-        for _ in range(args.pose_iterations):
-            optimizer.zero_grad(set_to_none=True)
-            loss, _, _, _ = objective(window_ids, True, boundary)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_([pose, orient, transl], 5.0)
-            optimizer.step()
-        limit_parameter_transitions_(pose, orient, transl, window_ids, transition_profile)
+    segments = support_segments(
+        frame_support.detach().cpu().numpy(), max_unobserved_gap
+    )
+    for segment_start, segment_end in segments:
+        segment_count = segment_end - segment_start + 1
+        segment_window_size = min(window_size, segment_count)
+        segment_overlap = min(effective_overlap, max(segment_window_size - 1, 0))
+        segment_step = segment_window_size - segment_overlap
+        window_starts = list(range(segment_start, segment_end + 1, segment_step))
+        if window_starts and window_starts[-1] + segment_window_size - 1 < segment_end:
+            window_starts.append(segment_end - segment_window_size + 1)
+        for window_start in window_starts:
+            window_end = min(segment_end + 1, window_start + segment_window_size)
+            window_ids = all_ids[window_start:window_end]
+            boundary = None
+            if window_start > segment_start and segment_overlap > 0:
+                anchor_ids = window_ids[:min(segment_overlap, len(window_ids))]
+                boundary = {
+                    "ids": anchor_ids,
+                    "pose": pose[anchor_ids].detach().clone(),
+                    "orient": orient[anchor_ids].detach().clone(),
+                    "transl": transl[anchor_ids].detach().clone(),
+                }
+            # Adam state must be local to this window. Reusing one optimizer for the
+            # full tensors lets stale momentum move frames that no longer participate
+            # in the current loss, producing large unexplained solution jumps.
+            optimizer = torch.optim.Adam(
+                [pose, orient, transl], lr=args.learning_rate * 0.55
+            )
+            for _ in range(args.pose_iterations):
+                optimizer.zero_grad(set_to_none=True)
+                loss, _, _, _ = objective(window_ids, True, boundary)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_([pose, orient, transl], 5.0)
+                optimizer.step()
+            limit_parameter_transitions_(pose, orient, transl, window_ids, transition_profile)
+
+    # Overlapping windows can modify their shared frames after an earlier local
+    # clamp. Enforce the trust region once more on each complete motion segment so
+    # the exported sequence cannot violate the final static/dynamic step limits.
+    for segment_start, segment_end in segments:
+        segment_ids = all_ids[segment_start:segment_end + 1]
+        limit_parameter_transitions_(pose, orient, transl, segment_ids, transition_profile)
+
+    # Frames without enough real observations are gap states, not optimization
+    # targets. Windowed Adam may still move them through temporal gradients after
+    # the warm-start repair. Reconstruct those states from their fitted neighbours
+    # once more before export so detector dropouts cannot reappear as mesh jumps.
+    repaired_final = repair_low_support_initial({
+        "betas": betas.detach().cpu().numpy(),
+        "hand_pose_pca": pose.detach().cpu().numpy(),
+        "global_orient": orient.detach().cpu().numpy(),
+        "translation": transl.detach().cpu().numpy(),
+    }, frame_support.detach().cpu().numpy())
+    with torch.no_grad():
+        pose.copy_(torch.as_tensor(
+            repaired_final["hand_pose_pca"], dtype=pose.dtype, device=device
+        ))
+        orient.copy_(torch.as_tensor(
+            repaired_final["global_orient"], dtype=orient.dtype, device=device
+        ))
+        transl.copy_(torch.as_tensor(
+            repaired_final["translation"], dtype=transl.dtype, device=device
+        ))
 
     with torch.no_grad():
         vertices, joints, model_output = run_model(
@@ -746,7 +830,14 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             "image_motion_px": transition_profile_np["image_motion_px"],
             "temporal_strength": transition_profile_np["temporal_strength"],
             "image_alignment_m": image_alignment.cpu().numpy(),
+            "render_valid": bridge_short_false_gaps(
+                observations["valid"].sum(axis=1) >= min_fit_points,
+                max_unobserved_gap,
+            ),
+            "fit_segment_id": np.full(frame_count, -1, dtype=np.int32),
         }
+        for segment_id, (segment_start, segment_end) in enumerate(segments):
+            result["fit_segment_id"][segment_start:segment_end + 1] = segment_id
         if expanded_hand_pose is not None:
             result["hand_pose_axis_angle"] = expanded_hand_pose.reshape(frame_count, 15, 3).cpu().numpy()
         if full_pose is not None:
@@ -877,6 +968,8 @@ def main() -> int:
         raise ValueError("pinch weight must be non-negative and threshold must be positive")
     if args.min_fit_observed_points < 1 or args.min_fit_observed_points > 21:
         raise ValueError("--min-fit-observed-points must be between 1 and 21")
+    if args.max_unobserved_gap < 0:
+        raise ValueError("--max-unobserved-gap must be non-negative")
     source = args.mano_source.resolve()
     model_dir = args.model_dir.resolve()
     revision = validate_source_and_assets(source, model_dir)
@@ -898,6 +991,14 @@ def main() -> int:
     initial_output = args.initial_output.resolve() if args.initial_output else None
     summaries = []
     start = time.perf_counter()
+    left_pixel_key = (
+        "left_rectified_px_filtered"
+        if "left_rectified_px_filtered" in data else "left_rectified_px"
+    )
+    right_pixel_key = (
+        "right_rectified_px_filtered"
+        if "right_rectified_px_filtered" in data else "right_rectified_px"
+    )
 
     for track_slot, track_id_value in enumerate(data["track_ids"]):
         track_id = int(track_id_value)
@@ -926,8 +1027,8 @@ def main() -> int:
                 "observed", data["valid"]
             )[track_slot, track_pairs],
             "confidence": data["confidence"][track_slot, track_pairs],
-            "left_px": data["left_rectified_px"][track_slot, track_pairs],
-            "right_px": data["right_rectified_px"][track_slot, track_pairs],
+            "left_px": data[left_pixel_key][track_slot, track_pairs],
+            "right_px": data[right_pixel_key][track_slot, track_pairs],
             "left_px_valid": data.get(
                 "left_rectified_valid",
                 np.isfinite(data["left_rectified_px"]).all(axis=-1),
@@ -991,6 +1092,10 @@ def main() -> int:
         summaries.append({
             "track_id": track_id, "handedness": handedness,
             "frames": int(len(track_pairs)),
+            "render_visible_frames": int(np.count_nonzero(result["render_valid"])),
+            "render_hidden_frames": int(np.count_nonzero(~result["render_valid"])),
+            "fit_segments": int(np.max(result["fit_segment_id"]) + 1)
+            if np.any(result["fit_segment_id"] >= 0) else 0,
             "pair_range": [int(data["pair_indices"][track_pairs[0]]), int(data["pair_indices"][track_pairs[-1]])],
             "loss": result["loss"],
             "joint_error_median_mm": float(np.median(finite_errors)),
