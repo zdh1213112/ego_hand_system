@@ -71,55 +71,11 @@ def create_stereo_rectification(calibration_path: Path, balance: float):
         raise ValueError("--balance must be in [0, 1]")
     with calibration_path.open("r", encoding="utf-8") as stream:
         calibration = yaml.safe_load(stream)
-    cameras = calibration["cameras"]
-    if len(cameras) != 2 or any(camera["distortion_model"] != "KB" for camera in cameras):
-        raise RuntimeError("expected two KB/Kannala-Brandt cameras")
-
-    left, right = cameras
-    image_size = (int(left["image_width"]), int(left["image_height"]))
-    if image_size != (int(right["image_width"]), int(right["image_height"])):
-        raise RuntimeError("left/right calibration resolutions differ")
-    k_left, d_left = camera_matrices(left)
-    k_right, d_right = camera_matrices(right)
-    r_left = np.asarray(left["extrinsics"]["rotation"], dtype=np.float64)
-    r_right = np.asarray(right["extrinsics"]["rotation"], dtype=np.float64)
-    t_left = np.asarray(left["extrinsics"]["translation"], dtype=np.float64) * 1e-3
-    t_right = np.asarray(right["extrinsics"]["translation"], dtype=np.float64) * 1e-3
-    r_left_to_right = r_right @ r_left.T
-    t_left_to_right = t_right - r_left_to_right @ t_left
-
-    r1, r2, p1, p2, q = cv2.fisheye.stereoRectify(
-        k_left,
-        d_left,
-        k_right,
-        d_right,
-        image_size,
-        r_left_to_right,
-        t_left_to_right,
-        flags=cv2.CALIB_ZERO_DISPARITY,
-        newImageSize=image_size,
-        balance=balance,
-        fov_scale=1.0,
-    )
-    map_left_x, map_left_y = cv2.fisheye.initUndistortRectifyMap(
-        k_left, d_left, r1, p1, image_size, cv2.CV_32FC1
-    )
-    map_right_x, map_right_y = cv2.fisheye.initUndistortRectifyMap(
-        k_right, d_right, r2, p2, image_size, cv2.CV_32FC1
-    )
-    return {
-        "image_size": image_size,
-        "map_left_x": map_left_x,
-        "map_left_y": map_left_y,
-        "map_right_x": map_right_x,
-        "map_right_y": map_right_y,
-        "r1": r1,
-        "r2": r2,
-        "p1": p1,
-        "p2": p2,
-        "q": q,
-        "calibration_serial": calibration["calibration_info"]["serial_number"],
-    }
+    from camera_models import RectificationOptions, create_stereo_rectification as create_unified
+    from ego_data.calibration import stereo_from_ego_yaml
+    stereo = stereo_from_ego_yaml(calibration_path)
+    result = create_unified(stereo, RectificationOptions(balance=balance), "kb")
+    return result.legacy_dict(calibration["calibration_info"]["serial_number"])
 
 
 def create_left_rectification(calibration_path: Path, balance: float):
