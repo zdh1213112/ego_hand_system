@@ -13,6 +13,7 @@ EGO 双目三维手部重建项目。目前提供：
 - MANO 前处理：离群管理、短缺口补全、时序滤波、骨长约束和已校验 NPZ 输入契约。
 - MANO 网格原始鱼眼画面叠加、双手实时角度仪表板和角度 CSV 导出。
 - EGO `2bc5:1201` 真机双目实时流、设备标定读取、在线三角化和深度感知跟踪。
+- GEN DAS EGO MCAP/H264 离线标准化、Double Sphere 双目校正和统一针孔数据集。
 
 > Git 跟踪的仓库只包含源码与测试。本地工作包可以同时放置录像、运行输出和模型，
 > 但 `.gitignore` 会阻止它们被误提交。请参阅 [`models/README.md`](models/README.md)。
@@ -101,6 +102,67 @@ RTX 50 系列实时 MANO 使用 CUDA 12.8 PyTorch。本机已验证组合为
 python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
   torch==2.11.0+cu128
 python -m pip install typeguard==4.4.4
+```
+
+GEN 离线链路还使用 `mcap`、`mcap-protobuf-support`、`av==14.2.0`、
+`protobuf`、`zstandard` 和 `lz4`，均已固定在 `environment.yml`。验证环境及
+真实 MCAP H264 解码：
+
+```bash
+python scripts/check_gen_environment.py \
+  --mcap record_data/20260804/DAS-Ego_example.mcap
+```
+
+## GEN DAS EGO 离线处理
+
+首期默认使用头环中间双目 `camera2/camera3`。处理分为可独立检查的三步。
+
+第一步将 MCAP 解码为统一原始数据集。每路 H264 使用持久解码器，并按 MCAP
+`log_time` 配对，不把两路相同帧号视为同步：
+
+```bash
+python scripts/normalize_recording.py \
+  --input record_data/20260804/DAS-Ego_example.mcap \
+  --output output/normalized/das_example \
+  --left-camera camera2 \
+  --right-camera camera3
+```
+
+第二步根据标定自动选择 KB 或 Double Sphere 模型，输出标准针孔双目图和
+`R1/R2/P1/P2/Q`：
+
+```bash
+python scripts/rectify_stereo_dataset.py \
+  --input output/normalized/das_example \
+  --output output/rectified/das_example \
+  --camera-model auto \
+  --focal-scale 1.0 \
+  --video-codec h264 \
+  --crf 18
+```
+
+第三步直接复用 MediaPipe、跨相机匹配和双目三角化：
+
+```bash
+python scripts/mediapipe_stereo_triangulate.py \
+  --rectified-dataset output/rectified/das_example \
+  --model models/hand_landmarker.task \
+  --output output/mediapipe_stereo_das
+```
+
+标准化数据集将原始 H264 无转码封装到每路 `video.mkv`，并保留纳秒/微秒
+时间戳和 GEN `T_b_c` 标定；校正数据集默认使用 H264/MKV 保存一一对应的
+左右视频，不生成逐帧图片目录。需要像素无损中间结果时可改用
+`--video-codec ffv1`，代价是文件明显增大。后续稳定化及 MANO 拟合命令不变。
+如需把 MANO 网格画回原始 DS 鱼眼图，使用：
+
+```bash
+python scripts/render_mano_overlay_angles.py \
+  --normalized-dataset output/normalized/das_example \
+  --rectified-dataset output/rectified/das_example \
+  --mano-fit output/mano_fit \
+  --stereo-frames output/mediapipe_stereo_das/stereo_frames.csv \
+  --output output/mano_overlay_das
 ```
 
 ## 构建
