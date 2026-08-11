@@ -19,15 +19,30 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mcap", type=Path, help="optionally decode one real camera frame")
     parser.add_argument("--camera", default="camera2")
+    parser.add_argument("--other-camera", default="camera3")
+    parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     return parser.parse_args()
 
 
 def main() -> int:
+    args = parse_args()
     modules = {}
+    missing = []
     for name in REQUIRED:
-        module = importlib.import_module(name)
+        try:
+            module = importlib.import_module(name)
+        except Exception as error:
+            missing.append((name, str(error)))
+            print(f"MISSING {name}: {error}")
+            continue
         modules[name] = module
         print(f"OK {name}: {getattr(module, '__version__', 'available')}")
+    if missing:
+        names = ", ".join(name for name, _ in missing)
+        raise RuntimeError(
+            f"missing GEN dependencies: {names}; update the environment with "
+            "'conda env update -n ego-hand -f environment.yml'"
+        )
     av = modules["av"]
     cv2 = modules["cv2"]
     torch = modules["torch"]
@@ -35,17 +50,21 @@ def main() -> int:
     if not hasattr(cv2.fisheye, "stereoRectify") or not hasattr(cv2.fisheye, "initUndistortRectifyMap"):
         raise RuntimeError("OpenCV fisheye stereo APIs are missing")
     print("OK OpenCV fisheye APIs")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available")
-    value = float(torch.ones(16, device="cuda").sum().cpu())
-    print(f"OK CUDA: {torch.cuda.get_device_name(0)} (smoke={value})")
-    args = parse_args()
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("EGO_DEVICE=cuda was requested, but CUDA is not available")
+    if args.device != "cpu" and torch.cuda.is_available():
+        value = float(torch.ones(16, device="cuda").sum().cpu())
+        print(f"OK CUDA: {torch.cuda.get_device_name(0)} (smoke={value})")
+    else:
+        print("OK PyTorch CPU fallback")
     if args.mcap:
+        if args.camera == args.other_camera:
+            raise ValueError("camera and other-camera must differ")
         from ego_data.genrobot_mcap import decode_stereo_mcap
         decoded = []
         def receive(frame):
             decoded.append(frame)
-        decode_stereo_mcap(args.mcap, (args.camera, "camera3" if args.camera != "camera3" else "camera2"), receive, 1)
+        decode_stereo_mcap(args.mcap, (args.camera, args.other_camera), receive, 1)
         match = next((frame for frame in decoded if frame.camera_id == args.camera), None)
         if match is None:
             raise RuntimeError(f"did not decode a {args.camera} frame")
