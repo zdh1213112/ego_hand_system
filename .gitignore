@@ -19,6 +19,7 @@ __pycache__/
 # Local data and recordings
 /data/
 /recordings/
+/record_data/
 /third_party/*
 !/third_party/README.md
 !/third_party/manifest.json

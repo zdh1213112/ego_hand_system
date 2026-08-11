@@ -103,14 +103,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_source_and_assets(source: Path, model_dir: Path) -> str:
-    if not (source / "mano" / "model.py").is_file():
-        raise FileNotFoundError(f"invalid MANO source: {source}")
     missing = [model_dir / name for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl")
                if not (model_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(
             "missing licensed MANO model data: " + ", ".join(str(path) for path in missing)
         )
+    if not (source / "mano" / "model.py").is_file():
+        raise FileNotFoundError(f"invalid MANO source: {source}")
     revision = "unknown"
     try:
         revision = subprocess.run(

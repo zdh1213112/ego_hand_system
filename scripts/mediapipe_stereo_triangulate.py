@@ -38,7 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run MediaPipe on paired EGO stereo frames and triangulate 21 hand landmarks."
     )
-    parser.add_argument("--session", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--session", type=Path, help="legacy Orbbec EGO KB session")
+    source.add_argument(
+        "--rectified-dataset", type=Path,
+        help="model-independent rectified stereo dataset",
+    )
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--balance", type=float, default=0.0)
@@ -672,36 +677,65 @@ def main() -> int:
     args = parse_args()
     if args.stride < 1 or args.num_hands < 1 or args.max_delta_us < 0:
         raise ValueError("stride/num-hands must be positive and max-delta-us non-negative")
-    session = args.session.resolve()
     model = args.model.resolve()
     output = args.output.resolve()
-    if not session.is_dir() or not model.is_file():
-        raise FileNotFoundError("session or model does not exist")
+    if not model.is_file():
+        raise FileNotFoundError(f"MediaPipe model does not exist: {model}")
     output.mkdir(parents=True, exist_ok=True)
-
-    calibration_path = unique_file(session, "_calibration_camera.yaml")
-    left_video = unique_file(session, "_camera_left.mp4")
-    right_video = unique_file(session, "_camera_right.mp4")
-    left_pts_path = unique_file(session, "_camera_left_pts.csv")
-    right_pts_path = unique_file(session, "_camera_right_pts.csv")
-    left_timestamps = read_timestamps(left_pts_path)
-    right_timestamps = read_timestamps(right_pts_path)
-    timestamp_pairs = pair_timestamps(left_timestamps, right_timestamps, args.max_delta_us)
-    rectification = create_stereo_rectification(calibration_path, args.balance)
-    image_size = rectification["image_size"]
-
-    left_capture = cv2.VideoCapture(str(left_video))
-    right_capture = cv2.VideoCapture(str(right_video))
-    if not left_capture.isOpened() or not right_capture.isOpened():
-        raise RuntimeError("cannot open one or both stereo videos")
+    left_capture = right_capture = None
     left_state = [0]
     right_state = [0]
+    rectified_dataset = None
+    rectified_iterator = None
+    if args.rectified_dataset is not None:
+        from ego_data.dataset import RectifiedStereoDataset
+        rectified_dataset = RectifiedStereoDataset(args.rectified_dataset)
+        rectification = rectified_dataset.rectification
+        image_size = rectification["image_size"]
+        source_pairs = [{
+            "pair_index": int(row["pair_index"]),
+            "left_index": int(row["left_frame_index"]),
+            "right_index": int(row["right_frame_index"]),
+            "left_timestamp_us": int(row["left_timestamp_ns"]) // 1000,
+            "right_timestamp_us": int(row["right_timestamp_ns"]) // 1000,
+            "row": row,
+        } for row in rectified_dataset.pairs]
+        source_description = str(rectified_dataset.root)
+        source_kind = "rectified_dataset"
+        left_times = [item["left_timestamp_us"] for item in source_pairs]
+        source_fps = 1e6 / float(np.median(np.diff(left_times))) if len(left_times) > 1 else 30.0
+        rectified_iterator = iter(rectified_dataset)
+    else:
+        session = args.session.resolve()
+        if not session.is_dir():
+            raise FileNotFoundError(f"session does not exist: {session}")
+        calibration_path = unique_file(session, "_calibration_camera.yaml")
+        left_video = unique_file(session, "_camera_left.mp4")
+        right_video = unique_file(session, "_camera_right.mp4")
+        left_timestamps = read_timestamps(unique_file(session, "_camera_left_pts.csv"))
+        right_timestamps = read_timestamps(unique_file(session, "_camera_right_pts.csv"))
+        timestamp_pairs = pair_timestamps(left_timestamps, right_timestamps, args.max_delta_us)
+        source_pairs = [{
+            "pair_index": pair_index,
+            "left_index": left_index,
+            "right_index": right_index,
+            "left_timestamp_us": left_timestamps[left_index],
+            "right_timestamp_us": right_timestamps[right_index],
+        } for pair_index, (left_index, right_index) in enumerate(timestamp_pairs)]
+        rectification = create_stereo_rectification(calibration_path, args.balance)
+        image_size = rectification["image_size"]
+        left_capture = cv2.VideoCapture(str(left_video))
+        right_capture = cv2.VideoCapture(str(right_video))
+        if not left_capture.isOpened() or not right_capture.isOpened():
+            raise RuntimeError("cannot open one or both stereo videos")
+        source_description = str(session)
+        source_kind = "legacy_session"
+        source_fps = float(left_capture.get(cv2.CAP_PROP_FPS))
 
     video_path = output / "stereo_annotated.mp4"
     writer = None
     preview_size = (image_size[0], image_size[1] // 2)
     if not args.no_video:
-        source_fps = float(left_capture.get(cv2.CAP_PROP_FPS))
         fps = (source_fps if source_fps > 0 else 30.0) / args.stride
         writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, preview_size)
         if not writer.isOpened():
@@ -749,7 +783,9 @@ def main() -> int:
     refinement_attempted_total = 0
     refinement_used_total = 0
     start_time = time.perf_counter()
-    first_timestamp_us = min(left_timestamps[0], right_timestamps[0])
+    first_timestamp_us = min(
+        source_pairs[0]["left_timestamp_us"], source_pairs[0]["right_timestamp_us"]
+    )
     last_left_ms = -1
     last_right_ms = -1
     previous_left_gray = None
@@ -764,20 +800,35 @@ def main() -> int:
         frame_writer.writeheader()
         landmark_writer.writeheader()
 
-        for pair_index, (left_index, right_index) in enumerate(timestamp_pairs):
-            left_frame = read_frame_at(left_capture, left_index, left_state)
-            right_frame = read_frame_at(right_capture, right_index, right_state)
-            if pair_index % args.stride != 0:
+        for pair_ordinal, pair in enumerate(source_pairs):
+            pair_index = pair["pair_index"]
+            left_index = pair["left_index"]
+            right_index = pair["right_index"]
+            left_timestamp_us = pair["left_timestamp_us"]
+            right_timestamp_us = pair["right_timestamp_us"]
+            if rectified_dataset is not None:
+                decoded_pair = next(rectified_iterator)
+                if decoded_pair["pair_index"] != pair_index:
+                    raise RuntimeError("rectified video and pair index are inconsistent")
+                left_rectified = decoded_pair["left_image"]
+                right_rectified = decoded_pair["right_image"]
+            else:
+                left_frame = read_frame_at(left_capture, left_index, left_state)
+                right_frame = read_frame_at(right_capture, right_index, right_state)
+                if left_frame.shape[1::-1] != image_size or right_frame.shape[1::-1] != image_size:
+                    raise RuntimeError("decoded resolution differs from calibration")
+                left_rectified = cv2.remap(
+                    left_frame, rectification["map_left_x"], rectification["map_left_y"], cv2.INTER_LINEAR
+                )
+                right_rectified = cv2.remap(
+                    right_frame, rectification["map_right_x"], rectification["map_right_y"], cv2.INTER_LINEAR
+                )
+            if pair_ordinal % args.stride != 0:
                 continue
             if args.max_pairs > 0 and processed_pairs >= args.max_pairs:
                 break
-            if left_frame.shape[1::-1] != image_size or right_frame.shape[1::-1] != image_size:
-                raise RuntimeError("decoded resolution differs from calibration")
-
-            left_rectified = cv2.remap(left_frame, rectification["map_left_x"], rectification["map_left_y"], cv2.INTER_LINEAR)
-            right_rectified = cv2.remap(right_frame, rectification["map_right_x"], rectification["map_right_y"], cv2.INTER_LINEAR)
-            left_ms = max(int((left_timestamps[left_index] - first_timestamp_us) // 1000), last_left_ms + 1)
-            right_ms = max(int((right_timestamps[right_index] - first_timestamp_us) // 1000), last_right_ms + 1)
+            left_ms = max(int((left_timestamp_us - first_timestamp_us) // 1000), last_left_ms + 1)
+            right_ms = max(int((right_timestamp_us - first_timestamp_us) // 1000), last_right_ms + 1)
             last_left_ms = left_ms
             last_right_ms = right_ms
             left_hands = detect(left_landmarker, left_rectified, left_ms, image_size)
@@ -813,9 +864,9 @@ def main() -> int:
                 "pair_index": pair_index,
                 "left_index": left_index,
                 "right_index": right_index,
-                "left_timestamp_us": left_timestamps[left_index],
-                "right_timestamp_us": right_timestamps[right_index],
-                "timestamp_delta_us": right_timestamps[right_index] - left_timestamps[left_index],
+                "left_timestamp_us": left_timestamp_us,
+                "right_timestamp_us": right_timestamp_us,
+                "timestamp_delta_us": right_timestamp_us - left_timestamp_us,
                 "left_hands": len(left_hands),
                 "right_hands": len(right_hands),
                 "matched_hands": len(matches),
@@ -920,13 +971,15 @@ def main() -> int:
                     if observation["index"] not in matched_right:
                         draw_observation(annotated_right, observation, (120, 120, 120), "unmatched")
                 pair_image = cv2.hconcat([annotated_left, annotated_right])
-                cv2.putText(pair_image, f"pair={pair_index} dt={right_timestamps[right_index]-left_timestamps[left_index]}us matches={len(matches)}",
+                cv2.putText(pair_image, f"pair={pair_index} dt={right_timestamp_us-left_timestamp_us}us matches={len(matches)}",
                             (25, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
                 pair_image = cv2.resize(pair_image, preview_size, interpolation=cv2.INTER_AREA)
                 writer.write(pair_image)
 
-    left_capture.release()
-    right_capture.release()
+    if left_capture is not None:
+        left_capture.release()
+    if right_capture is not None:
+        right_capture.release()
     if writer is not None:
         writer.release()
     elapsed = time.perf_counter() - start_time
@@ -936,7 +989,9 @@ def main() -> int:
 
     summary = {
         "stage": "stereo_mediapipe_triangulation_baseline",
-        "session": str(session),
+        "source": source_description,
+        "source_kind": source_kind,
+        "session": source_description if source_kind == "legacy_session" else None,
         "model": str(model),
         "mediapipe_version": mp.__version__,
         "opencv_version": cv2.__version__,
@@ -944,7 +999,7 @@ def main() -> int:
         "rectified_size": list(image_size),
         "p1": np.asarray(rectification["p1"]).tolist(),
         "p2": np.asarray(rectification["p2"]).tolist(),
-        "timestamp_pairs_available": len(timestamp_pairs),
+        "timestamp_pairs_available": len(source_pairs),
         "processed_pairs": processed_pairs,
         "pairs_with_stereo_matches": pairs_with_matches,
         "stereo_match_pair_rate": pairs_with_matches / processed_pairs if processed_pairs else 0.0,
@@ -1008,8 +1063,15 @@ def main() -> int:
         f"{refinement_used_total}/{refinement_attempted_total} "
         f"({summary['refinement_acceptance_rate']:.1%})"
     )
-    print(f"Epipolar median/P95: {summary['epipolar_abs_px_median']:.3f}/{summary['epipolar_abs_px_p95']:.3f} px")
-    print(f"Reprojection median/P95: {summary['reprojection_px_median']:.3f}/{summary['reprojection_px_p95']:.3f} px")
+    metric = lambda value: f"{value:.3f}" if value is not None else "n/a"
+    print(
+        "Epipolar median/P95: "
+        f"{metric(summary['epipolar_abs_px_median'])}/{metric(summary['epipolar_abs_px_p95'])} px"
+    )
+    print(
+        "Reprojection median/P95: "
+        f"{metric(summary['reprojection_px_median'])}/{metric(summary['reprojection_px_p95'])} px"
+    )
     print(f"Processing speed: {summary['processing_fps']:.2f} stereo fps")
     print(f"3D landmarks CSV: {landmarks_path}")
     if writer is not None:

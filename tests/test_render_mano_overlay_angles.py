@@ -122,6 +122,35 @@ class RenderManoOverlayAnglesTests(unittest.TestCase):
         )
         self.assertGreater(int(np.count_nonzero(image)), 0)
 
+    def test_trajectory_uses_double_sphere_projection(self):
+        from ego_data.calibration import CameraCalibration
+
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        camera_matrix = np.asarray([
+            [400.0, 0.0, 320.0], [0.0, 400.0, 240.0], [0.0, 0.0, 1.0]
+        ])
+        camera = CameraCalibration(
+            camera_id="camera2",
+            frame_id="camera2",
+            model="DS",
+            image_size=(640, 480),
+            K=camera_matrix,
+            distortion=np.asarray([400.0, 400.0, 320.0, 240.0, 0.25, 0.55]),
+            T_base_camera=np.eye(4),
+        )
+        positions = np.asarray([
+            [-0.03, 0.0, 0.40], [0.0, 0.0, 0.40], [0.03, 0.0, 0.40]
+        ])
+        MODULE.draw_end_effector_trajectory(
+            image,
+            positions,
+            camera_matrix,
+            camera.distortion,
+            (0, 180, 255),
+            camera=camera,
+        )
+        self.assertGreater(int(np.count_nonzero(image)), 0)
+
     def test_raw_and_rectified_fisheye_projection_agree(self):
         camera_matrix = np.asarray([
             [500.0, 0.0, 800.0], [0.0, 500.0, 650.0], [0.0, 0.0, 1.0]
