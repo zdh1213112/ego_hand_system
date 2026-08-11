@@ -14,6 +14,13 @@ GEN MCAP ─> 标准化 ─> 双目校正 ──────┘
    ─> 两阶段 MANO 拟合 ─> 原始画面网格叠加 ─> 21-DOF / 末端 6D CSV
 ```
 
+## 效果展示
+
+![Orbbec EGO 双手 MANO 网格、21-DOF 面板与 3D 预览](docs/images/offline_dual_hand_mano_21dof_overlay.png)
+
+Orbbec EGO 离线处理结果：左侧在原始鱼眼画面上叠加双手 MANO 网格、骨架和
+末端 6D 坐标轴；右侧同步显示左右手 21-DOF 数值及独立 MANO 3D 预览。
+
 ## 离线快速开始
 
 ### 1. 准备环境
