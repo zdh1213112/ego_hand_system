@@ -241,5 +241,45 @@ class DepthAwareTrackTests(unittest.TestCase):
         self.assertEqual(MODULE.PACKET_HEADER.size, 64)
 
 
+class OfflineStereoTrackTests(unittest.TestCase):
+    @staticmethod
+    def offline_match(px, xyz, label="Left"):
+        value = match(px, xyz, label)
+        pixels = np.tile(np.asarray(px, dtype=np.float64), (21, 1))
+        value["left"]["pixels"] = pixels.copy()
+        value["right"]["pixels"] = pixels.copy()
+        return value
+
+    def test_reacquires_identity_after_long_out_of_view_gap(self):
+        tracker = STEREO.TrackManager(
+            max_missed=75,
+            max_distance_px=280.0,
+            reacquire_distance_px=700.0,
+            max_tracks=2,
+        )
+        first = [
+            self.offline_match((120, 180), (-0.05, 0.0, 0.30), "Left"),
+            self.offline_match((800, 180), (0.05, 0.0, 0.30), "Right"),
+        ]
+        tracker.assign(first)
+        self.assertEqual([item["track_id"] for item in first], [0, 1])
+
+        for frame in range(45):
+            visible_left = [self.offline_match(
+                (120 + frame, 180), (-0.05, 0.0, 0.30), "Left"
+            )]
+            tracker.assign(visible_left)
+
+        reappeared = [
+            self.offline_match((166, 180), (-0.05, 0.0, 0.30), "Left"),
+            self.offline_match((1320, 420), (0.15, 0.0, 0.24), "Right"),
+        ]
+        tracker.assign(reappeared)
+
+        self.assertEqual([item["track_id"] for item in reappeared], [0, 1])
+        self.assertEqual(set(tracker.tracks), {0, 1})
+        self.assertEqual(tracker.tracks[1]["label"], "Right")
+        np.testing.assert_allclose(tracker.tracks[1]["velocity"], 0.0)
+
 if __name__ == "__main__":
     unittest.main()

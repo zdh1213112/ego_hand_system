@@ -63,6 +63,88 @@ class FitManoSequenceTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertGreater(float(loss), 0.0)
 
+    def test_image_observation_mask_removes_bad_pixel_weight(self):
+        import torch
+        confidence = torch.tensor([[0.8, 0.7, 0.6]])
+        pixels = torch.tensor([[[10.0, 20.0], [30.0, 40.0], [float("nan"), 50.0]]])
+        valid = torch.tensor([[True, False, True]])
+        weights = MODULE.image_observation_weights(confidence, pixels, valid)
+        np.testing.assert_allclose(weights.numpy(), [[0.8, 0.0, 0.0]])
+
+    def test_pinch_loss_activates_only_for_near_contact(self):
+        import torch
+        target = torch.zeros((2, 21, 3), dtype=torch.float32)
+        predicted = target.clone()
+        target[0, 8, 0] = 0.005
+        predicted[0, 8, 0] = 0.020
+        target[1, 8, 0] = 0.050
+        predicted[1, 8, 0] = 0.090
+        valid = torch.ones((2, 21), dtype=torch.bool)
+        confidence = torch.ones((2, 21), dtype=torch.float32)
+        loss = MODULE.pinch_distance_loss(
+            predicted, target, valid, confidence, threshold_m=0.025
+        )
+        expected = (0.015 ** 2 + 0.003 ** 2) ** 0.5 - 0.003
+        self.assertAlmostEqual(float(loss), expected, places=6)
+
+        valid[0, 8] = False
+        disabled = MODULE.pinch_distance_loss(
+            predicted, target, valid, confidence, threshold_m=0.025
+        )
+        self.assertEqual(float(disabled), 0.0)
+
+    def test_contact_tip_alignment_anchors_absolute_tip_positions(self):
+        import torch
+        target = torch.zeros((1, 21, 3), dtype=torch.float32)
+        joints = target.clone()
+        target[0, 8, 0] = 0.010
+        joints[0, 4, 1] = 0.012
+        joints[0, 8, 0] = 0.022
+        pixels = torch.zeros((1, 21, 2), dtype=torch.float32)
+        predicted = pixels.clone()
+        predicted[0, 4] = torch.tensor([5.0, 0.0])
+        valid = torch.ones((1, 21), dtype=torch.bool)
+        confidence = torch.ones((1, 21), dtype=torch.float32)
+        loss = MODULE.contact_tip_alignment_loss(
+            joints, target, valid, confidence,
+            predicted, predicted, pixels, pixels, valid, valid,
+            threshold_m=0.035,
+        )
+        self.assertGreater(float(loss), 0.0)
+        disabled = MODULE.contact_tip_alignment_loss(
+            joints, target, valid, confidence,
+            predicted, predicted, pixels, pixels, valid, valid,
+            threshold_m=0.005,
+        )
+        self.assertEqual(float(disabled), 0.0)
+
+    def test_low_support_warm_start_is_interpolated(self):
+        initial = {
+            "betas": np.zeros(10),
+            "hand_pose_pca": np.asarray([[0.0], [9.0], [2.0]]),
+            "translation": np.asarray([[0.0, 0.0, 0.0], [9.0, 9.0, 9.0], [2.0, 4.0, 6.0]]),
+            "global_orient": np.asarray([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, np.pi / 2.0]]),
+        }
+        repaired = MODULE.repair_low_support_initial(initial, np.asarray([True, False, True]))
+        np.testing.assert_allclose(repaired["hand_pose_pca"][1], [1.0])
+        np.testing.assert_allclose(repaired["translation"][1], [1.0, 2.0, 3.0])
+        middle_rotation, _ = cv2.Rodrigues(repaired["global_orient"][1])
+        expected_rotation, _ = cv2.Rodrigues(np.asarray([0.0, 0.0, np.pi / 4.0]))
+        np.testing.assert_allclose(middle_rotation, expected_rotation, atol=1e-7)
+        np.testing.assert_allclose(initial["translation"][1], [9.0, 9.0, 9.0])
+
+    def test_long_unsupported_gap_splits_motion_segments(self):
+        supported = np.asarray([False, True, True, False, False, True, False, False, False, True])
+        self.assertEqual(MODULE.support_segments(supported, max_gap=2), [(1, 5), (9, 9)])
+        self.assertEqual(MODULE.support_segments(supported, max_gap=0), [(1, 2), (5, 5), (9, 9)])
+
+    def test_render_presence_bridges_only_short_internal_gaps(self):
+        present = np.asarray([False, True, False, False, True, False, False, False, True, False])
+        expected = np.asarray([False, True, True, True, True, False, False, False, True, False])
+        np.testing.assert_array_equal(
+            MODULE.bridge_short_false_gaps(present, max_gap=2), expected
+        )
+
     def test_rectified_projection(self):
         import torch
         points = torch.tensor([[[0.1, 0.0, 1.0]]])

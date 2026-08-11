@@ -46,7 +46,7 @@
     "DIP_flex": "控制最靠近指尖的关节，使手指末节继续包裹物体。",
   };
 
-  const state = { selected: 0, finger: "thumb", handedness: "Right", yaw: -.52, pitch: .26, zoom: 1, dragging: false };
+  const state = { selected: 0, finger: "thumb", handedness: "Right", surface: "palm", yaw: -.22, pitch: .10, zoom: 1, dragging: false };
   const $ = id => document.getElementById(id);
   const canvas = $("handCanvas");
   const ctx = canvas.getContext("2d");
@@ -69,7 +69,9 @@
   const rz = a => [[Math.cos(a),-Math.sin(a),0],[Math.sin(a),Math.cos(a),0],[0,0,1]];
 
   function poseSkeleton() {
-    const mirror = state.handedness === "Right" ? 1 : -1;
+    // EGO uses the wearer's egocentric handedness: looking down at your own
+    // palm, the right thumb is on screen-right and the left thumb on screen-left.
+    const mirror = state.handedness === "Right" ? -1 : 1;
     const palm = [
       v(-.62*mirror,-.55,0), v(.62*mirror,-.55,0), v(.78*mirror,.45,0),
       v(.48*mirror,1.22,0), v(-.50*mirror,1.25,0), v(-.78*mirror,.38,0),
@@ -78,7 +80,9 @@
       index:v(-.39*mirror,1.08,0), middle:v(-.12*mirror,1.22,0),
       ring:v(.18*mirror,1.17,0), pinky:v(.46*mirror,1.02,0), thumb:v(-.66*mirror,.15,-.02),
     };
-    const baseAngles = { index:-.035*mirror, middle:0, ring:.055*mirror, pinky:.13*mirror };
+    // A relaxed, open hand at zero DOF. The fixed spread below is anatomy/layout,
+    // not an extra joint angle. It keeps all five digits recognisable at startup.
+    const baseAngles = { index:-.105*mirror, middle:-.025*mirror, ring:.065*mirror, pinky:.165*mirror };
     const lengths = { index:[.82,.58,.43], middle:[.91,.63,.45], ring:[.84,.59,.43], pinky:[.68,.46,.36] };
     const fingers = {};
     for (const f of ["index","middle","ring","pinky"]) {
@@ -91,7 +95,9 @@
       points.push(add(points.at(-1), mv(R,v(0,lengths[f][2],0))));
       fingers[f]={points, rotations:[null,null,null], finalR:R};
     }
-    let Rt=mul(rz(-.78*mirror + val("thumb","CMC","abduction")*mirror), mul(ry(val("thumb","CMC","opposition")*mirror),rx(val("thumb","CMC","flex"))));
+    // Thumb points to the lateral side of its hand. `mirror` follows the EGO
+    // first-person convention above, rather than a face-to-face observer view.
+    let Rt=mul(rz(.98*mirror + val("thumb","CMC","abduction")*mirror), mul(ry(val("thumb","CMC","opposition")*mirror),rx(val("thumb","CMC","flex"))));
     const tp=[roots.thumb];
     tp.push(add(tp.at(-1),mv(Rt,v(0,.62,0))));
     Rt=mul(Rt,rx(val("thumb","MCP","flex"))); tp.push(add(tp.at(-1),mv(Rt,v(0,.45,0))));
@@ -118,6 +124,13 @@
     ctx.beginPath(); ctx.arc(P.x,P.y,radius,0,Math.PI*2); ctx.fillStyle=fill; ctx.fill(); if(sw){ctx.strokeStyle=stroke;ctx.lineWidth=sw;ctx.stroke();}
     return P;
   }
+  function curve3(points,color,width,alpha=1) {
+    const projected=points.map(project); if(projected.length<2)return;
+    ctx.save();ctx.globalAlpha=alpha;ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap="round";ctx.beginPath();ctx.moveTo(projected[0].x,projected[0].y);
+    if(projected.length===2)ctx.lineTo(projected[1].x,projected[1].y);
+    else ctx.quadraticCurveTo(projected[1].x,projected[1].y,projected[2].x,projected[2].y);
+    ctx.stroke();ctx.restore();
+  }
   function arrow3(origin,dir,color,label) {
     const end=add(origin,scale(norm(dir),.42)); line3(origin,end,color,3);
     const E=project(end); ctx.fillStyle=color; ctx.font="700 11px Inter, sans-serif"; ctx.fillText(label,E.x+5,E.y-5);
@@ -139,8 +152,18 @@
     const shadow=skel.palm.map(p=>project([p[0],p[1],-.18]));
     ctx.beginPath(); shadow.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.closePath(); ctx.fillStyle="rgba(18,45,36,.055)"; ctx.fill();
     const palm2=skel.palm.map(project);
-    const grad=ctx.createLinearGradient(0,cssHeight*.25,0,cssHeight*.75);grad.addColorStop(0,"rgba(237,246,240,.94)");grad.addColorStop(1,"rgba(211,233,219,.78)");
+    const isPalm=state.surface==="palm";
+    const grad=ctx.createLinearGradient(0,cssHeight*.25,0,cssHeight*.75);grad.addColorStop(0,isPalm?"rgba(237,246,240,.96)":"rgba(231,237,234,.97)");grad.addColorStop(1,isPalm?"rgba(211,233,219,.82)":"rgba(205,216,211,.86)");
     ctx.beginPath();palm2.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();ctx.fillStyle=grad;ctx.fill();ctx.strokeStyle="rgba(8,118,84,.28)";ctx.lineWidth=2;ctx.stroke();
+    if(isPalm){
+      // Three unmistakable palm creases. They are orientation cues, not landmarks.
+      curve3([v(-.48*skel.mirror,.18,.02),v(0,.48,.02),v(.48*skel.mirror,.30,.02)],"rgba(37,112,83,.25)",3);
+      curve3([v(-.42*skel.mirror,.72,.02),v(-.05*skel.mirror,.92,.02),v(.42*skel.mirror,.78,.02)],"rgba(37,112,83,.20)",2.5);
+      curve3([v(-.46*skel.mirror,.02,.02),v(-.28*skel.mirror,-.28,.02),v(.08*skel.mirror,-.38,.02)],"rgba(37,112,83,.18)",2.5);
+    } else {
+      // Back-of-hand metacarpal hints make the reversed view visually explicit.
+      ["index","middle","ring","pinky"].forEach(f=>curve3([v(0,-.32,-.015),skel.roots[f]],"rgba(73,94,86,.13)",2));
+    }
 
     const neutralPoints=neutral.fingers[selected.d.finger].points;
     neutralPoints.slice(selected.index).slice(0,-1).forEach((point,index)=>{
@@ -150,7 +173,10 @@
 
     const bones=[];
     Object.entries(skel.fingers).forEach(([finger,data])=>data.points.slice(0,-1).forEach((p,i)=>bones.push({finger,a:p,b:data.points[i+1],z:(viewPoint(p)[2]+viewPoint(data.points[i+1])[2])/2})));
-    bones.sort((a,b)=>a.z-b.z).forEach(b=>line3(b.a,b.b,fingerMeta[b.finger].color,b.finger===selected.d.finger?11:8,b.finger===selected.d.finger?1:.55));
+    bones.sort((a,b)=>a.z-b.z).forEach(b=>{
+      line3(b.a,b.b,isPalm?"#dceee4":"#d7dfdb",b.finger==="thumb"?25:22,.98);
+      line3(b.a,b.b,fingerMeta[b.finger].color,b.finger===selected.d.finger?10:7,b.finger===selected.d.finger?1:.48);
+    });
 
     hitTargets=[];
     Object.entries(skel.fingers).forEach(([finger,data])=>data.points.forEach((point,index)=>{
@@ -158,6 +184,13 @@
       const P=circle3(point,isSelected?10:6,isSelected?"#17201d":fingerMeta[finger].color,"#fffef9",isSelected?4:3);
       if(index<data.points.length-1) hitTargets.push({finger,index,x:P.x,y:P.y});
     }));
+    if(!isPalm){
+      Object.entries(skel.fingers).forEach(([finger,data])=>{
+        const tip=project(data.points.at(-1)), before=project(data.points.at(-2));
+        const angle=Math.atan2(tip.y-before.y,tip.x-before.x)+Math.PI/2;
+        ctx.save();ctx.translate(tip.x,tip.y);ctx.rotate(angle);ctx.fillStyle="rgba(255,254,249,.92)";ctx.strokeStyle="rgba(57,70,65,.28)";ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(0,7,finger==="thumb"?6:5,finger==="thumb"?9:8,0,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
+      });
+    }
 
     const p=selected.point;
     const baseAxis=selected.d.kind==="abduction"?v(0,0,1):selected.d.kind==="opposition"?v(0,1,0):v(1,0,0);
@@ -207,8 +240,18 @@
   $("angleSlider").addEventListener("input",e=>setAngle(e.target.value));
   $("minusAngle").addEventListener("click",()=>setAngle(dofs[state.selected].value-5));$("plusAngle").addEventListener("click",()=>setAngle(dofs[state.selected].value+5));$("zeroAngle").addEventListener("click",()=>setAngle(0));
   document.querySelectorAll(".quick-presets button").forEach(b=>b.addEventListener("click",()=>applyPreset(b.dataset.preset)));
-  document.querySelectorAll("[data-hand]").forEach(b=>b.addEventListener("click",()=>{state.handedness=b.dataset.hand;document.querySelectorAll("[data-hand]").forEach(x=>x.classList.toggle("active",x===b));draw();}));
-  $("resetPose").addEventListener("click",()=>applyPreset("open"));$("resetView").addEventListener("click",()=>{state.yaw=-.52;state.pitch=.26;state.zoom=1;draw();});
+  function setSurface(surface){
+    state.surface=surface;state.yaw=surface==="palm"?-.22:Math.PI+.22;state.pitch=.10;state.zoom=1;
+    document.querySelectorAll("[data-hand]").forEach(b=>b.classList.toggle("active",b.dataset.hand===state.handedness));
+    document.querySelectorAll("[data-surface]").forEach(b=>b.classList.toggle("active",b.dataset.surface===surface));
+    const hand=state.handedness==="Right"?"右手":"左手";
+    $("surfaceTitle").textContent=`${hand} · ${surface==="palm"?"掌心面":"手背面"}`;
+    const thumbSide=state.handedness==="Right"?"画面右侧":"画面左侧";
+    $("surfaceHint").textContent=surface==="palm"?`可见掌纹，拇指在${thumbSide}`:"可见指甲，左右方向与掌心视图相反";draw();
+  }
+  document.querySelectorAll("[data-hand]").forEach(b=>b.addEventListener("click",()=>{state.handedness=b.dataset.hand;document.querySelectorAll("[data-hand]").forEach(x=>x.classList.toggle("active",x===b));setSurface(state.surface);}));
+  document.querySelectorAll("[data-surface]").forEach(b=>b.addEventListener("click",()=>setSurface(b.dataset.surface)));
+  $("resetPose").addEventListener("click",()=>applyPreset("open"));$("resetView").addEventListener("click",()=>setSurface(state.surface));
 
   wrap.addEventListener("pointerdown",e=>{state.dragging=true;lastPointer={x:e.clientX,y:e.clientY};pointerStart={x:e.clientX,y:e.clientY};wrap.classList.add("dragging");wrap.setPointerCapture(e.pointerId);});
   wrap.addEventListener("pointermove",e=>{if(!state.dragging)return;state.yaw+=(e.clientX-lastPointer.x)*.008;state.pitch=clamp(state.pitch+(e.clientY-lastPointer.y)*.007,-1.1,1.1);lastPointer={x:e.clientX,y:e.clientY};draw();});
@@ -216,5 +259,11 @@
   wrap.addEventListener("wheel",e=>{e.preventDefault();state.zoom=clamp(state.zoom*(e.deltaY>0?.93:1.07),.68,1.55);draw();},{passive:false});
   window.addEventListener("resize",resize);
 
-  renderUI();resize();
+  // Query parameters are handy for documentation links and visual regression checks:
+  // index.html?hand=Left&surface=back
+  const params=new URLSearchParams(window.location.search);
+  if(["Right","Left"].includes(params.get("hand")))state.handedness=params.get("hand");
+  if(["palm","back"].includes(params.get("surface")))state.surface=params.get("surface");
+  document.querySelectorAll("[data-hand]").forEach(b=>b.classList.toggle("active",b.dataset.hand===state.handedness));
+  renderUI();resize();setSurface(state.surface);
 })();

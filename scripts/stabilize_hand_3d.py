@@ -31,6 +31,8 @@ SKELETON_EDGES = (
     (0, 17), (17, 18), (18, 19), (19, 20),
 )
 
+PALM_FRAME_JOINTS = np.asarray((0, 5, 9, 13, 17), dtype=np.int32)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -47,6 +49,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-hand-radius-m", type=float, default=0.22,
         help="maximum joint distance from the per-frame hand median",
+    )
+    parser.add_argument(
+        "--pixel-outlier-window", type=int, default=4,
+        help="temporal radius used to reject isolated 2D landmark-shape jumps",
+    )
+    parser.add_argument(
+        "--pixel-outlier-distance", type=float, default=0.45,
+        help="maximum palm-normalized 2D landmark deviation from nearby frames",
+    )
+    parser.add_argument(
+        "--pixel-scale-ratio", type=float, default=1.8,
+        help="maximum isolated palm-width ratio relative to nearby frames",
+    )
+    parser.add_argument(
+        "--pixel-smoothing-radius", type=int, default=3,
+        help="zero-phase radius for finger-shape smoothing in the moving palm frame",
+    )
+    parser.add_argument(
+        "--pixel-smoothing-strength", type=float, default=0.75,
+        help="blend toward the locally smoothed finger shape; palm pose stays per-frame",
+    )
+    parser.add_argument(
+        "--local-shape-smoothing-radius", type=int, default=3,
+        help="zero-phase radius for 3D finger articulation in the moving palm frame",
+    )
+    parser.add_argument(
+        "--local-shape-smoothing-strength", type=float, default=0.70,
+        help="3D finger-shape smoothing blend; palm anchors stay unchanged",
     )
     parser.add_argument(
         "--bone-outlier-absolute-m", type=float, default=0.05,
@@ -213,6 +243,403 @@ def active_ranges(observed: np.ndarray) -> list[tuple[int, int]]:
         else:
             ranges.append((0, -1))
     return ranges
+
+
+def detect_temporal_pixel_outliers(
+    pixels: np.ndarray,
+    radius: int,
+    normalized_distance: float,
+    maximum_scale_ratio: float,
+) -> np.ndarray:
+    """Find isolated MediaPipe shape jumps after removing palm translation/scale/rotation."""
+    if pixels.ndim != 4 or pixels.shape[2:] != (21, 2):
+        raise ValueError(f"unexpected pixel landmark shape: {pixels.shape}")
+    rejected = np.zeros(pixels.shape[:-1], dtype=bool)
+    if radius <= 0:
+        return rejected
+
+    finite = np.isfinite(pixels).all(axis=-1)
+    local = np.full_like(pixels, np.nan, dtype=np.float64)
+    palm_scale = np.full(pixels.shape[:2], np.nan, dtype=np.float64)
+    for track in range(pixels.shape[0]):
+        for frame in range(pixels.shape[1]):
+            points = pixels[track, frame]
+            if not np.all(finite[track, frame, PALM_FRAME_JOINTS]):
+                continue
+            origin = np.median(points[PALM_FRAME_JOINTS], axis=0)
+            palm_axis = points[5] - points[17]
+            scale = float(np.linalg.norm(palm_axis))
+            if scale < 5.0:
+                continue
+            axis_x = palm_axis / scale
+            axis_y = np.asarray((-axis_x[1], axis_x[0]), dtype=np.float64)
+            offsets = points - origin
+            local[track, frame, :, 0] = offsets @ axis_x / scale
+            local[track, frame, :, 1] = offsets @ axis_y / scale
+            palm_scale[track, frame] = scale
+
+    minimum_neighbours = max(4, radius + 1)
+    for track in range(pixels.shape[0]):
+        for frame in range(radius, pixels.shape[1] - radius):
+            neighbour_frames = np.concatenate((
+                np.arange(frame - radius, frame),
+                np.arange(frame + 1, frame + radius + 1),
+            ))
+            neighbour_scales = palm_scale[track, neighbour_frames]
+            neighbour_scales = neighbour_scales[np.isfinite(neighbour_scales)]
+            current_scale = palm_scale[track, frame]
+            if np.isfinite(current_scale) and len(neighbour_scales) >= minimum_neighbours:
+                median_scale = float(np.median(neighbour_scales))
+                scale_ratio = max(current_scale / median_scale, median_scale / current_scale)
+                if scale_ratio > maximum_scale_ratio:
+                    rejected[track, frame] = finite[track, frame]
+                    continue
+
+            for joint in range(21):
+                current = local[track, frame, joint]
+                if not np.all(np.isfinite(current)):
+                    continue
+                neighbours = local[track, neighbour_frames, joint]
+                neighbours = neighbours[np.isfinite(neighbours).all(axis=1)]
+                if len(neighbours) < minimum_neighbours:
+                    continue
+                median = np.median(neighbours, axis=0)
+                coordinate_mad = 1.4826 * np.median(
+                    np.abs(neighbours - median), axis=0
+                )
+                adaptive_distance = 5.0 * float(np.linalg.norm(coordinate_mad))
+                threshold = max(normalized_distance, adaptive_distance)
+                if np.linalg.norm(current - median) > threshold:
+                    rejected[track, frame, joint] = True
+    return rejected
+
+
+def palm_normalized_pixel_coordinates(
+    pixels: np.ndarray,
+    valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Express image landmarks in each frame's own palm coordinate system."""
+    if pixels.ndim != 4 or pixels.shape[2:] != (21, 2):
+        raise ValueError(f"unexpected pixel landmark shape: {pixels.shape}")
+    if valid.shape != pixels.shape[:-1]:
+        raise ValueError("pixel validity shape disagrees with landmark shape")
+    local = np.full_like(pixels, np.nan, dtype=np.float64)
+    origins = np.full(pixels.shape[:2] + (2,), np.nan, dtype=np.float64)
+    axes_x = np.full_like(origins, np.nan)
+    axes_y = np.full_like(origins, np.nan)
+    scales = np.full(pixels.shape[:2], np.nan, dtype=np.float64)
+    frame_valid = np.zeros(pixels.shape[:2], dtype=bool)
+    for track in range(pixels.shape[0]):
+        for frame in range(pixels.shape[1]):
+            if not np.all(valid[track, frame, PALM_FRAME_JOINTS]):
+                continue
+            points = pixels[track, frame]
+            origin = np.median(points[PALM_FRAME_JOINTS], axis=0)
+            palm_axis = points[5] - points[17]
+            scale = float(np.linalg.norm(palm_axis))
+            if not np.isfinite(scale) or scale < 5.0:
+                continue
+            axis_x = palm_axis / scale
+            axis_y = np.asarray((-axis_x[1], axis_x[0]), dtype=np.float64)
+            offsets = points - origin
+            local[track, frame, :, 0] = offsets @ axis_x / scale
+            local[track, frame, :, 1] = offsets @ axis_y / scale
+            local[track, frame, ~valid[track, frame]] = np.nan
+            origins[track, frame] = origin
+            axes_x[track, frame] = axis_x
+            axes_y[track, frame] = axis_y
+            scales[track, frame] = scale
+            frame_valid[track, frame] = True
+    return local, origins, axes_x, axes_y, scales, frame_valid
+
+
+def smooth_pixel_landmarks_in_palm_frame(
+    pixels: np.ndarray,
+    valid: np.ndarray,
+    radius: int,
+    strength: float,
+) -> np.ndarray:
+    """Smooth finger articulation while preserving current palm pose and placement.
+
+    The temporal filter operates on palm-normalized coordinates and is symmetric,
+    so camera-space hand motion is retained without introducing a causal lag. The
+    current palm centre is preserved, while noisy palm scale/orientation and local
+    landmark shape are smoothed together.
+    """
+    pixels = np.asarray(pixels, dtype=np.float64)
+    valid = np.asarray(valid, dtype=bool)
+    if radius <= 0 or strength <= 0.0:
+        return pixels.copy()
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("pixel smoothing strength must be in [0, 1]")
+    local, origins, axes_x, axes_y, scales, frame_valid = (
+        palm_normalized_pixel_coordinates(pixels, valid)
+    )
+    filtered = pixels.copy()
+    for track in range(pixels.shape[0]):
+        for frame in range(pixels.shape[1]):
+            if not frame_valid[track, frame]:
+                continue
+            lo = max(0, frame - radius)
+            hi = min(pixels.shape[1], frame + radius + 1)
+            candidate_frames = np.arange(lo, hi)
+            palm_candidates = candidate_frames[frame_valid[track, candidate_frames]]
+            palm_weights = radius + 1 - np.abs(palm_candidates - frame)
+            mean_axis = np.average(
+                axes_x[track, palm_candidates], axis=0, weights=palm_weights
+            )
+            mean_axis_length = float(np.linalg.norm(mean_axis))
+            if mean_axis_length > 1e-8:
+                mean_axis /= mean_axis_length
+            else:
+                mean_axis = axes_x[track, frame]
+            blended_axis = (
+                (1.0 - strength) * axes_x[track, frame] + strength * mean_axis
+            )
+            blended_axis /= max(float(np.linalg.norm(blended_axis)), 1e-8)
+            blended_axis_y = np.asarray((-blended_axis[1], blended_axis[0]))
+            median_log_scale = float(np.median(np.log(scales[track, palm_candidates])))
+            blended_scale = float(np.exp(
+                (1.0 - strength) * np.log(scales[track, frame])
+                + strength * median_log_scale
+            ))
+            blended_local = local[track, frame].copy()
+            for joint in range(21):
+                if not valid[track, frame, joint]:
+                    continue
+                candidates = candidate_frames[
+                    frame_valid[track, candidate_frames]
+                    & valid[track, candidate_frames, joint]
+                ]
+                if len(candidates) < 2:
+                    continue
+                values = local[track, candidates, joint]
+                median = np.median(values, axis=0)
+                distances = np.linalg.norm(values - median, axis=1)
+                distance_median = float(np.median(distances))
+                distance_mad = 1.4826 * float(
+                    np.median(np.abs(distances - distance_median))
+                )
+                robust_limit = max(0.10, distance_median + 3.5 * distance_mad)
+                inliers = distances <= robust_limit
+                if np.count_nonzero(inliers) >= 2:
+                    candidates = candidates[inliers]
+                    values = values[inliers]
+                temporal_weights = radius + 1 - np.abs(candidates - frame)
+                smoothed_local = np.average(values, axis=0, weights=temporal_weights)
+                current_local = local[track, frame, joint]
+                blended_local[joint] = (
+                    (1.0 - strength) * current_local + strength * smoothed_local
+                )
+            palm_centre_local = np.median(
+                blended_local[PALM_FRAME_JOINTS], axis=0
+            )
+            blended_local -= palm_centre_local
+            for joint in np.flatnonzero(valid[track, frame]):
+                filtered[track, frame, joint] = origins[track, frame] + blended_scale * (
+                    blended_local[joint, 0] * blended_axis
+                    + blended_local[joint, 1] * blended_axis_y
+                )
+            reconstructed_centre = np.median(
+                filtered[track, frame, PALM_FRAME_JOINTS], axis=0
+            )
+            filtered[track, frame, valid[track, frame]] += (
+                origins[track, frame] - reconstructed_centre
+            )
+    filtered[~valid] = np.nan
+    return filtered
+
+
+def palm_normalized_pixel_step_metric(pixels: np.ndarray, valid: np.ndarray) -> dict:
+    """Summarize frame-to-frame finger-shape motion independent of palm motion."""
+    local, _, _, _, _, frame_valid = palm_normalized_pixel_coordinates(pixels, valid)
+    finger_joints = np.setdiff1d(np.arange(21), PALM_FRAME_JOINTS)
+    samples = []
+    for track in range(pixels.shape[0]):
+        for frame in range(1, pixels.shape[1]):
+            joint_valid = (
+                frame_valid[track, frame - 1]
+                & frame_valid[track, frame]
+                & valid[track, frame - 1, finger_joints]
+                & valid[track, frame, finger_joints]
+            )
+            if np.any(joint_valid):
+                delta = local[track, frame, finger_joints[joint_valid]] - local[
+                    track, frame - 1, finger_joints[joint_valid]
+                ]
+                samples.extend(np.linalg.norm(delta, axis=1).tolist())
+    values = np.asarray(samples, dtype=np.float64)
+    return {
+        "sample_count": int(len(values)),
+        "median": float(np.median(values)) if len(values) else None,
+        "p95": float(np.percentile(values, 95)) if len(values) else None,
+    }
+
+
+def palm_normalized_3d_coordinates(
+    points: np.ndarray,
+    valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Express 3D joints in a per-frame rigid palm coordinate system."""
+    if points.ndim != 4 or points.shape[2:] != (21, 3):
+        raise ValueError(f"unexpected 3D landmark shape: {points.shape}")
+    if valid.shape != points.shape[:-1]:
+        raise ValueError("3D validity shape disagrees with landmark shape")
+    local = np.full_like(points, np.nan, dtype=np.float64)
+    origins = np.full(points.shape[:2] + (3,), np.nan, dtype=np.float64)
+    axes = np.full(points.shape[:2] + (3, 3), np.nan, dtype=np.float64)
+    scales = np.full(points.shape[:2], np.nan, dtype=np.float64)
+    frame_valid = np.zeros(points.shape[:2], dtype=bool)
+    for track in range(points.shape[0]):
+        for frame in range(points.shape[1]):
+            if not np.all(valid[track, frame, PALM_FRAME_JOINTS]):
+                continue
+            current = points[track, frame]
+            origin = np.median(current[PALM_FRAME_JOINTS], axis=0)
+            axis_x_vector = current[5] - current[17]
+            scale = float(np.linalg.norm(axis_x_vector))
+            if not np.isfinite(scale) or scale < 1e-5:
+                continue
+            axis_x = axis_x_vector / scale
+            axis_y_vector = current[9] - current[0]
+            axis_y_vector -= np.dot(axis_y_vector, axis_x) * axis_x
+            axis_y_length = float(np.linalg.norm(axis_y_vector))
+            if not np.isfinite(axis_y_length) or axis_y_length < 1e-5:
+                continue
+            axis_y = axis_y_vector / axis_y_length
+            axis_z = np.cross(axis_x, axis_y)
+            axis_z_length = float(np.linalg.norm(axis_z))
+            if not np.isfinite(axis_z_length) or axis_z_length < 1e-5:
+                continue
+            axis_z /= axis_z_length
+            palm_axes = np.stack((axis_x, axis_y, axis_z), axis=0)
+            local[track, frame] = (current - origin) @ palm_axes.T / scale
+            local[track, frame, ~valid[track, frame]] = np.nan
+            origins[track, frame] = origin
+            axes[track, frame] = palm_axes
+            scales[track, frame] = scale
+            frame_valid[track, frame] = True
+    return local, origins, axes, scales, frame_valid
+
+
+def smooth_3d_landmarks_in_palm_frame(
+    points: np.ndarray,
+    valid: np.ndarray,
+    radius: int,
+    strength: float,
+) -> np.ndarray:
+    """Smooth 3D finger configuration without smoothing global hand motion."""
+    points = np.asarray(points, dtype=np.float64)
+    valid = np.asarray(valid, dtype=bool)
+    if radius <= 0 or strength <= 0.0:
+        return points.copy()
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("local shape smoothing strength must be in [0, 1]")
+    local, origins, axes, scales, frame_valid = palm_normalized_3d_coordinates(
+        points, valid
+    )
+    filtered = points.copy()
+    for track in range(points.shape[0]):
+        for frame in range(points.shape[1]):
+            if not frame_valid[track, frame]:
+                continue
+            lo = max(0, frame - radius)
+            hi = min(points.shape[1], frame + radius + 1)
+            candidate_frames = np.arange(lo, hi)
+            palm_candidates = candidate_frames[frame_valid[track, candidate_frames]]
+            palm_weights = radius + 1 - np.abs(palm_candidates - frame)
+            mean_rotation = np.average(
+                axes[track, palm_candidates], axis=0, weights=palm_weights
+            )
+            u, _, vt = np.linalg.svd(mean_rotation)
+            mean_rotation = u @ vt
+            if np.linalg.det(mean_rotation) < 0:
+                u[:, -1] *= -1
+                mean_rotation = u @ vt
+            blended_rotation = (
+                (1.0 - strength) * axes[track, frame] + strength * mean_rotation
+            )
+            u, _, vt = np.linalg.svd(blended_rotation)
+            blended_rotation = u @ vt
+            if np.linalg.det(blended_rotation) < 0:
+                u[:, -1] *= -1
+                blended_rotation = u @ vt
+            median_log_scale = float(np.median(np.log(scales[track, palm_candidates])))
+            blended_scale = float(np.exp(
+                (1.0 - strength) * np.log(scales[track, frame])
+                + strength * median_log_scale
+            ))
+            blended_local = local[track, frame].copy()
+            for joint in range(21):
+                if not valid[track, frame, joint]:
+                    continue
+                candidates = candidate_frames[
+                    frame_valid[track, candidate_frames]
+                    & valid[track, candidate_frames, joint]
+                ]
+                if len(candidates) < 2:
+                    continue
+                values = local[track, candidates, joint]
+                median = np.median(values, axis=0)
+                distances = np.linalg.norm(values - median, axis=1)
+                distance_median = float(np.median(distances))
+                distance_mad = 1.4826 * float(
+                    np.median(np.abs(distances - distance_median))
+                )
+                robust_limit = max(0.10, distance_median + 3.5 * distance_mad)
+                inliers = distances <= robust_limit
+                if np.count_nonzero(inliers) >= 2:
+                    candidates = candidates[inliers]
+                    values = values[inliers]
+                temporal_weights = radius + 1 - np.abs(candidates - frame)
+                smoothed_local = np.average(values, axis=0, weights=temporal_weights)
+                blended_local[joint] = (
+                    (1.0 - strength) * local[track, frame, joint]
+                    + strength * smoothed_local
+                )
+            palm_centre_local = np.median(
+                blended_local[PALM_FRAME_JOINTS], axis=0
+            )
+            blended_local -= palm_centre_local
+            for joint in np.flatnonzero(valid[track, frame]):
+                filtered[track, frame, joint] = (
+                    origins[track, frame]
+                    + blended_scale * (blended_local[joint] @ blended_rotation)
+                )
+            reconstructed_centre = np.median(
+                filtered[track, frame, PALM_FRAME_JOINTS], axis=0
+            )
+            filtered[track, frame, valid[track, frame]] += (
+                origins[track, frame] - reconstructed_centre
+            )
+    filtered[~valid] = np.nan
+    return filtered
+
+
+def palm_normalized_3d_step_metric(points: np.ndarray, valid: np.ndarray) -> dict:
+    """Summarize local 3D finger-shape changes independent of rigid hand motion."""
+    local, _, _, _, frame_valid = palm_normalized_3d_coordinates(points, valid)
+    finger_joints = np.setdiff1d(np.arange(21), PALM_FRAME_JOINTS)
+    samples = []
+    for track in range(points.shape[0]):
+        for frame in range(1, points.shape[1]):
+            joint_valid = (
+                frame_valid[track, frame - 1]
+                & frame_valid[track, frame]
+                & valid[track, frame - 1, finger_joints]
+                & valid[track, frame, finger_joints]
+            )
+            if np.any(joint_valid):
+                delta = local[track, frame, finger_joints[joint_valid]] - local[
+                    track, frame - 1, finger_joints[joint_valid]
+                ]
+                samples.extend(np.linalg.norm(delta, axis=1).tolist())
+    values = np.asarray(samples, dtype=np.float64)
+    return {
+        "sample_count": int(len(values)),
+        "median": float(np.median(values)) if len(values) else None,
+        "p95": float(np.percentile(values, 95)) if len(values) else None,
+    }
 
 
 def reject_observation_outliers(
@@ -659,15 +1086,22 @@ def stabilize_once(
 
 def main() -> int:
     args = parse_args()
-    if (args.max_gap < 0 or args.outlier_window < 0 or args.window_radius < 0
+    if (args.max_gap < 0 or args.outlier_window < 0 or args.pixel_outlier_window < 0
+            or args.pixel_smoothing_radius < 0 or args.local_shape_smoothing_radius < 0
+            or args.window_radius < 0
             or args.bone_iterations < 0):
         raise ValueError("gap, radius and iterations must be non-negative")
     if (args.outlier_distance_m <= 0.0 or args.max_hand_radius_m <= 0.0
+            or args.pixel_outlier_distance <= 0.0 or args.pixel_scale_ratio <= 1.0
             or args.bone_outlier_absolute_m <= 0.0 or args.bone_outlier_relative <= 0.0
             or args.max_observation_adjustment_m <= 0.0):
         raise ValueError("outlier distance thresholds must be positive")
     if not 0.0 <= args.bone_strength <= 1.0:
         raise ValueError("--bone-strength must be in [0, 1]")
+    if not 0.0 <= args.pixel_smoothing_strength <= 1.0:
+        raise ValueError("--pixel-smoothing-strength must be in [0, 1]")
+    if not 0.0 <= args.local_shape_smoothing_strength <= 1.0:
+        raise ValueError("--local-shape-smoothing-strength must be in [0, 1]")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
@@ -677,6 +1111,29 @@ def main() -> int:
     accepted_observed, rejected = reject_observation_outliers(
         data["raw"], data["observed"], input_ranges, args.outlier_window,
         args.outlier_distance_m, args.max_hand_radius_m,
+    )
+    left_pixel_outliers = detect_temporal_pixel_outliers(
+        data["left_pixels"], args.pixel_outlier_window,
+        args.pixel_outlier_distance, args.pixel_scale_ratio,
+    )
+    right_pixel_outliers = detect_temporal_pixel_outliers(
+        data["right_pixels"], args.pixel_outlier_window,
+        args.pixel_outlier_distance, args.pixel_scale_ratio,
+    )
+    pixel_geometry_rejected = (
+        data["observed"] & (left_pixel_outliers | right_pixel_outliers)
+    )
+    accepted_observed[pixel_geometry_rejected] = False
+    rejected |= pixel_geometry_rejected
+    left_pixel_valid = np.isfinite(data["left_pixels"]).all(axis=-1) & ~left_pixel_outliers
+    right_pixel_valid = np.isfinite(data["right_pixels"]).all(axis=-1) & ~right_pixel_outliers
+    left_pixels_filtered = smooth_pixel_landmarks_in_palm_frame(
+        data["left_pixels"], left_pixel_valid,
+        args.pixel_smoothing_radius, args.pixel_smoothing_strength,
+    )
+    right_pixels_filtered = smooth_pixel_landmarks_in_palm_frame(
+        data["right_pixels"], right_pixel_valid,
+        args.pixel_smoothing_radius, args.pixel_smoothing_strength,
     )
     preliminary_points = data["raw"].copy()
     preliminary_points[~accepted_observed] = np.nan
@@ -716,7 +1173,11 @@ def main() -> int:
     confidence = prepared["confidence"]
     interpolated = prepared["interpolated"]
     bone_lengths = prepared["bone_lengths"]
-    stabilized = prepared["stabilized"]
+    stabilized_before_local_shape = prepared["stabilized"]
+    stabilized = smooth_3d_landmarks_in_palm_frame(
+        stabilized_before_local_shape, valid,
+        args.local_shape_smoothing_radius, args.local_shape_smoothing_strength,
+    )
 
     csv_path = output / "stabilized_landmarks_3d.csv"
     npz_path = output / "mano_input.npz"
@@ -741,8 +1202,15 @@ def main() -> int:
         interpolated=interpolated,
         confidence=confidence.astype(np.float32),
         raw_positions_left_camera_m=data["raw"].astype(np.float32),
+        positions_before_local_shape_filter_m=stabilized_before_local_shape.astype(np.float32),
         left_rectified_px=data["left_pixels"].astype(np.float32),
         right_rectified_px=data["right_pixels"].astype(np.float32),
+        left_rectified_px_filtered=left_pixels_filtered.astype(np.float32),
+        right_rectified_px_filtered=right_pixels_filtered.astype(np.float32),
+        left_rectified_valid=left_pixel_valid,
+        right_rectified_valid=right_pixel_valid,
+        left_rectified_outlier=left_pixel_outliers,
+        right_rectified_outlier=right_pixel_outliers,
         track_ids=data["track_ids"],
         handedness=data["handedness"],
         joint_names=np.asarray(JOINT_NAMES),
@@ -806,6 +1274,21 @@ def main() -> int:
         "active_pair_ranges": [list(item) for item in ranges],
         "input_observed_3d_points": input_observed_count,
         "outlier_rejected_3d_points": rejected_count,
+        "pixel_geometry_rejected_3d_points": int(np.count_nonzero(pixel_geometry_rejected)),
+        "left_pixel_outliers": int(np.count_nonzero(left_pixel_outliers)),
+        "right_pixel_outliers": int(np.count_nonzero(right_pixel_outliers)),
+        "left_pixel_shape_step_raw": palm_normalized_pixel_step_metric(
+            data["left_pixels"], left_pixel_valid
+        ),
+        "left_pixel_shape_step_filtered": palm_normalized_pixel_step_metric(
+            left_pixels_filtered, left_pixel_valid
+        ),
+        "right_pixel_shape_step_raw": palm_normalized_pixel_step_metric(
+            data["right_pixels"], right_pixel_valid
+        ),
+        "right_pixel_shape_step_filtered": palm_normalized_pixel_step_metric(
+            right_pixels_filtered, right_pixel_valid
+        ),
         "optimization_residual_rejected_3d_points": residual_rejected_count,
         "observed_3d_points": observed_count,
         "interpolated_3d_points": interpolated_count,
@@ -834,6 +1317,12 @@ def main() -> int:
             cleaned_points, accepted_observed
         ),
         "stabilized_temporal_acceleration_median_mm_per_frame2": acceleration_metric(stabilized, valid),
+        "local_3d_shape_step_before_filter": palm_normalized_3d_step_metric(
+            stabilized_before_local_shape, valid
+        ),
+        "local_3d_shape_step_after_filter": palm_normalized_3d_step_metric(
+            stabilized, valid
+        ),
         "raw_bone_length_error": raw_bone_error,
         "accepted_bone_length_error": accepted_bone_error,
         "stabilized_bone_length_error": stabilized_bone_error,
@@ -852,6 +1341,13 @@ def main() -> int:
             "outlier_window": args.outlier_window,
             "outlier_distance_m": args.outlier_distance_m,
             "max_hand_radius_m": args.max_hand_radius_m,
+            "pixel_outlier_window": args.pixel_outlier_window,
+            "pixel_outlier_distance": args.pixel_outlier_distance,
+            "pixel_scale_ratio": args.pixel_scale_ratio,
+            "pixel_smoothing_radius": args.pixel_smoothing_radius,
+            "pixel_smoothing_strength": args.pixel_smoothing_strength,
+            "local_shape_smoothing_radius": args.local_shape_smoothing_radius,
+            "local_shape_smoothing_strength": args.local_shape_smoothing_strength,
             "bone_outlier_absolute_m": args.bone_outlier_absolute_m,
             "bone_outlier_relative": args.bone_outlier_relative,
             "window_radius": args.window_radius,
