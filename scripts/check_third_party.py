@@ -13,6 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-mano", action="store_true")
     parser.add_argument("--require-live", action="store_true")
     parser.add_argument("--require-basalt", action="store_true")
+    parser.add_argument("--require-wilor", action="store_true")
     return parser.parse_args()
 
 
@@ -51,6 +52,8 @@ def main() -> int:
         required.add("orbbec_sdk_linux_x86_64")
     if args.require_basalt:
         required.add("basalt_runtime_linux_x86_64")
+    if args.require_wilor:
+        required.add("wilor_models")
 
     print()
     for name, entry in manifest["local_assets"].items():

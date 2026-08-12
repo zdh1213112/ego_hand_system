@@ -25,6 +25,7 @@ __pycache__/
 !/third_party/manifest.json
 !/third_party/MANO
 !/third_party/basalt
+!/third_party/WiLoR
 *.mp4
 *.avi
 *.mov
@@ -34,6 +35,8 @@ __pycache__/
 #/models/*.task
 #/models/mano/*
 !/models/mano/README.md
+/models/wilor/*
+!/models/wilor/README.md
 #*.pkl
 *.npz
 

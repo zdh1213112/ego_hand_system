@@ -49,6 +49,16 @@ class ThirdPartyManifestTests(unittest.TestCase):
         for name in ("mano_models", "orbbec_sdk_linux_x86_64"):
             self.assertTrue(manifest["local_assets"][name]["install"])
 
+    def test_wilor_submodule_and_assets_are_declared(self):
+        manifest = json.loads((ROOT / "third_party" / "manifest.json").read_text())
+        self.assertIn("WiLoR", manifest["public_submodules"])
+        self.assertIn("third_party/WiLoR", (ROOT / ".gitmodules").read_text())
+        self.assertIn("wilor_models", manifest["local_assets"])
+        self.assertIn(
+            "models/wilor/wilor_final.ckpt",
+            manifest["local_assets"]["wilor_models"]["required_files"],
+        )
+
     def test_private_asset_installer_checks_required_model_paths(self):
         installer = (ROOT / "scripts" / "install_local_assets.sh").read_text()
         self.assertIn("models/hand_landmarker.task", installer)

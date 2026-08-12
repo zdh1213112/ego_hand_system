@@ -13,6 +13,12 @@
       "revision": "6d8637b9d68ea18a1a63c1baa72818779e156932",
       "release": "0.1.7",
       "license_file": "third_party/basalt/LICENSE"
+    },
+    "WiLoR": {
+      "path": "third_party/WiLoR",
+      "url": "https://github.com/Jzboom/WiLoR.git",
+      "revision": "fcb911312a38fa8badd30d9656a167485d61b8f9",
+      "license_file": "third_party/WiLoR/license.txt"
     }
   },
   "local_assets": {
@@ -51,6 +57,14 @@
       "artifact": "basalt-0.1.7-x86_64-unknown-linux-gnu.tar.gz",
       "sha256": "8ab56b2ab27315a9c64cb8ae9c99d0d4d894e2cc87bc9841d8defe30b86e6d24",
       "install": "Download the official Basalt 0.1.7 Linux x86_64 release or build third_party/basalt, then place basalt_vio and libbasalt.so under third_party/basalt_runtime/."
+    },
+    "wilor_models": {
+      "required_files": [
+        "models/wilor/wilor_final.ckpt",
+        "models/wilor/detector.pt",
+        "models/wilor/model_config.yaml"
+      ],
+      "install": "Copy the authorized WiLoR model bundle into models/wilor/. These files are not distributed by the public repository."
     }
   }
 }

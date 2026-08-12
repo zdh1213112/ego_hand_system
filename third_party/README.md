@@ -75,6 +75,18 @@ record and a README. The platform-specific runtime is ignored by Git. Keep Basal
 BSD-3-Clause license with the source and recreate the runtime from the official
 v0.1.7 release or from a local source build on a fresh checkout.
 
+WiLoR hand reconstruction source is a pinned Git submodule at:
+
+```text
+third_party/WiLoR/
+```
+
+The public checkout contains source code only. Its checkpoint, detector and
+MANO mean-parameter asset are private/local assets under `models/wilor/` and
+are checked with `python scripts/check_third_party.py --require-wilor`.
+WiLoR is an optional parallel inference route; the default MediaPipe+MANO route
+does not require its model bundle.
+
 Run an audit at any time:
 
 ```bash
@@ -82,6 +94,7 @@ python scripts/check_third_party.py
 python scripts/check_third_party.py --require-mano
 python scripts/check_third_party.py --require-live
 python scripts/check_third_party.py --require-basalt
+python scripts/check_third_party.py --require-wilor
 ```
 
 ## Optional private/local asset bundle
@@ -95,6 +108,10 @@ models/mano/MANO_LEFT.pkl
 models/mano/MANO_RIGHT.pkl
 third_party/orbbec_sdk/...
 third_party/basalt_runtime/...
+models/wilor/wilor_final.ckpt
+models/wilor/detector.pt
+models/wilor/model_config.yaml
+models/wilor/mano_mean_params.npz
 ```
 
 Extract that archive at the repository root, then run:

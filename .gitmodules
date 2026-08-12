@@ -4,3 +4,6 @@
 [submodule "third_party/basalt"]
 	path = third_party/basalt
 	url = https://github.com/VladyslavUsenko/basalt.git
+[submodule "third_party/WiLoR"]
+	path = third_party/WiLoR
+	url = https://github.com/Jzboom/WiLoR.git

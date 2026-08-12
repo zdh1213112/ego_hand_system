@@ -11,7 +11,7 @@ fi
 
 echo "Initializing public source dependencies..."
 git -C "${PROJECT_DIR}" submodule sync --recursive
-git -C "${PROJECT_DIR}" submodule update --init third_party/MANO third_party/basalt
+git -C "${PROJECT_DIR}" submodule update --init third_party/MANO third_party/basalt third_party/WiLoR
 
 echo
 echo "Installing public MediaPipe model..."
