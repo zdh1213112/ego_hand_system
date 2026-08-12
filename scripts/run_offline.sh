@@ -22,7 +22,7 @@ GEN input:
   EGO_RIGHT_CAMERA=camera3      # optional
 
 Usage:
-  ./scripts/run_offline.sh [check|prepare|stereo|stabilize|fit|render|all]
+  ./scripts/run_offline.sh [check|prepare|stereo|stabilize|fit|render|wilor|all]
 
 The positional stage overrides EGO_STAGE. The default stage is "all".
 
@@ -35,6 +35,14 @@ Useful optional variables:
   EGO_PYTHON=/path/to/python    override Python/Conda selection
   EGO_NORMALIZED_DATASET=...    reuse/relocate the normalized dataset
   EGO_RECTIFIED_DATASET=...     reuse/relocate the rectified dataset
+  EGO_HAND_ROUTE=mediapipe|wilor|parallel  processing route; default: mediapipe
+  EGO_WILOR_CAMERAS=left|right|both         WiLoR cameras; default: both
+  EGO_WILOR_DEVICE_LEFT=...                left WiLoR device; default: EGO_DEVICE
+  EGO_WILOR_DEVICE_RIGHT=...               right WiLoR device; default: EGO_DEVICE
+  EGO_WILOR_FRAME_STRIDE=1                 WiLoR frame stride
+  EGO_WILOR_BATCH_SIZE=16                  WiLoR inference batch size
+  EGO_WILOR_FAST=0|1                       enable WiLoR fast CUDA mode
+  EGO_WILOR_SAVE_VERTICES=0|1              include 778 vertices in WiLoR JSONL
 
 Examples:
   export EGO_SOURCE=orbbec
@@ -132,6 +140,7 @@ print_config() {
     log "stage: ${EGO_STAGE}"
     log "python: ${PYTHON_DESCRIPTION}"
     log "MANO device: ${EGO_DEVICE}"
+    log "hand route: ${EGO_HAND_ROUTE}"
     log "pair limit: ${EGO_MAX_PAIRS} (0 = all)"
     log "diagnostic videos: $([[ "${EGO_NO_VIDEO}" == "1" ]] && printf disabled || printf enabled)"
 }
@@ -158,6 +167,13 @@ validate_common_assets() {
     require_file "${EGO_MANO_SOURCE}/mano/model.py"
     require_file "${EGO_MANO_MODELS}/MANO_LEFT.pkl"
     require_file "${EGO_MANO_MODELS}/MANO_RIGHT.pkl"
+}
+
+validate_wilor_assets() {
+    require_file "${EGO_WILOR_CHECKPOINT}"
+    require_file "${EGO_WILOR_DETECTOR}"
+    require_file "${EGO_WILOR_CONFIG}"
+    require_file "${EGO_WILOR_MANO_DIR}/MANO_RIGHT.pkl"
 }
 
 prepare_orbbec() {
@@ -415,6 +431,73 @@ run_render() {
         "${video_args[@]}"
 }
 
+run_wilor() {
+    local output="${EGO_OUTPUT}/wilor_stereo"
+    local marker="${output}/summary.json"
+    if stage_output_ready "WiLoR stereo" "${output}" "${marker}"; then
+        return
+    fi
+    require_file "${RECTIFIED_DATASET}/manifest.json"
+    validate_wilor_assets
+    mkdir -p "${output}"
+    local cameras=()
+    case "${EGO_WILOR_CAMERAS}" in
+        left) cameras=(left) ;;
+        right) cameras=(right) ;;
+        both) cameras=(left right) ;;
+        *) die "EGO_WILOR_CAMERAS must be left, right, or both" ;;
+    esac
+    local pids=() camera device camera_output optional_args
+    for camera in "${cameras[@]}"; do
+        if [[ "${camera}" == "left" ]]; then device="${EGO_WILOR_DEVICE_LEFT}"; else device="${EGO_WILOR_DEVICE_RIGHT}"; fi
+        camera_output="${output}/${camera}"
+        optional_args=()
+        if ((EGO_MAX_PAIRS > 0)); then optional_args+=(--max-pairs "${EGO_MAX_PAIRS}"); fi
+        if [[ "${EGO_NO_VIDEO}" == "1" ]]; then optional_args+=(--no-video); fi
+        if [[ "${EGO_WILOR_FAST}" == "1" ]]; then optional_args+=(--fast); fi
+        if [[ "${EGO_WILOR_SAVE_VERTICES}" == "1" ]]; then optional_args+=(--save-vertices); fi
+        run_python "${PROJECT_DIR}/scripts/wilor_inference.py" \
+            --rectified-dataset "${RECTIFIED_DATASET}" \
+            --output "${camera_output}" \
+            --camera "${camera}" \
+            --checkpoint "${EGO_WILOR_CHECKPOINT}" \
+            --model-config "${EGO_WILOR_CONFIG}" \
+            --detector "${EGO_WILOR_DETECTOR}" \
+            --mano-model-dir "${EGO_MANO_MODELS}" \
+            --device "${device}" \
+            --batch-size "${EGO_WILOR_BATCH_SIZE}" \
+            --frame-stride "${EGO_WILOR_FRAME_STRIDE}" \
+            "${optional_args[@]}" \
+            >"${output}/${camera}.log" 2>&1 &
+        pids+=("$!")
+    done
+    local status=0 pid
+    for pid in "${pids[@]}"; do wait "${pid}" || status=1; done
+    if ((status != 0)); then
+        die "WiLoR inference failed; inspect ${output}/*.log"
+    fi
+    if [[ "${EGO_NO_VIDEO}" != "1" ]]; then
+        for camera in "${cameras[@]}"; do
+            run_python "${PROJECT_DIR}/scripts/render_wilor_predictions.py" \
+                --rectified-dataset "${RECTIFIED_DATASET}" \
+                --predictions "${output}/${camera}/predictions.jsonl" \
+                --camera "${camera}" \
+                --output "${output}/${camera}/wilor_annotated.mp4"
+        done
+    fi
+    "${PYTHON_RUN[@]}" - "${output}" "${EGO_WILOR_CAMERAS}" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+cameras = sys.argv[2].split()
+if sys.argv[2] == 'both': cameras = ['left', 'right']
+summary = {"schema_version": 1, "stage": "wilor_stereo", "cameras": cameras,
+           "left": str(root / 'left' / 'summary.json') if 'left' in cameras else None,
+           "right": str(root / 'right' / 'summary.json') if 'right' in cameras else None}
+(root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+PY
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
     exit 0
@@ -439,6 +522,18 @@ EGO_MAX_PAIRS="${EGO_MAX_PAIRS:-0}"
 EGO_MAX_FRAMES="${EGO_MAX_FRAMES:-0}"
 EGO_NO_VIDEO="${EGO_NO_VIDEO:-0}"
 EGO_CONDA_ENV="${EGO_CONDA_ENV:-ego-hand}"
+EGO_HAND_ROUTE="${EGO_HAND_ROUTE:-mediapipe}"
+EGO_WILOR_CAMERAS="${EGO_WILOR_CAMERAS:-both}"
+EGO_WILOR_DEVICE_LEFT="${EGO_WILOR_DEVICE_LEFT:-${EGO_DEVICE}}"
+EGO_WILOR_DEVICE_RIGHT="${EGO_WILOR_DEVICE_RIGHT:-${EGO_DEVICE}}"
+EGO_WILOR_FRAME_STRIDE="${EGO_WILOR_FRAME_STRIDE:-1}"
+EGO_WILOR_BATCH_SIZE="${EGO_WILOR_BATCH_SIZE:-16}"
+EGO_WILOR_FAST="${EGO_WILOR_FAST:-0}"
+EGO_WILOR_SAVE_VERTICES="${EGO_WILOR_SAVE_VERTICES:-0}"
+EGO_WILOR_CHECKPOINT="${EGO_WILOR_CHECKPOINT:-${PROJECT_DIR}/models/wilor/wilor_final.ckpt}"
+EGO_WILOR_DETECTOR="${EGO_WILOR_DETECTOR:-${PROJECT_DIR}/models/wilor/detector.pt}"
+EGO_WILOR_CONFIG="${EGO_WILOR_CONFIG:-${PROJECT_DIR}/models/wilor/model_config.yaml}"
+EGO_WILOR_MANO_DIR="${EGO_WILOR_MANO_DIR:-${EGO_MANO_MODELS}}"
 
 [[ "${EGO_SOURCE}" == "orbbec" || "${EGO_SOURCE}" == "gen" ]] || \
     die "set EGO_SOURCE to 'orbbec' or 'gen'"
@@ -449,12 +544,20 @@ EGO_CONDA_ENV="${EGO_CONDA_ENV:-ego-hand}"
     die "EGO_DEVICE must be auto, cuda, or cpu"
 [[ "${EGO_NO_VIDEO}" == "0" || "${EGO_NO_VIDEO}" == "1" ]] || \
     die "EGO_NO_VIDEO must be 0 or 1"
+[[ "${EGO_HAND_ROUTE}" == "mediapipe" || "${EGO_HAND_ROUTE}" == "wilor" || "${EGO_HAND_ROUTE}" == "parallel" ]] || \
+    die "EGO_HAND_ROUTE must be mediapipe, wilor, or parallel"
+[[ "${EGO_WILOR_FAST}" == "0" || "${EGO_WILOR_FAST}" == "1" ]] || die "EGO_WILOR_FAST must be 0 or 1"
+[[ "${EGO_WILOR_SAVE_VERTICES}" == "0" || "${EGO_WILOR_SAVE_VERTICES}" == "1" ]] || die "EGO_WILOR_SAVE_VERTICES must be 0 or 1"
 validate_non_negative_integer EGO_MAX_PAIRS "${EGO_MAX_PAIRS}"
 validate_non_negative_integer EGO_MAX_FRAMES "${EGO_MAX_FRAMES}"
+validate_non_negative_integer EGO_WILOR_FRAME_STRIDE "${EGO_WILOR_FRAME_STRIDE}"
+[[ "${EGO_WILOR_FRAME_STRIDE}" != "0" ]] || die "EGO_WILOR_FRAME_STRIDE must be at least 1"
+validate_non_negative_integer EGO_WILOR_BATCH_SIZE "${EGO_WILOR_BATCH_SIZE}"
+[[ "${EGO_WILOR_BATCH_SIZE}" != "0" ]] || die "EGO_WILOR_BATCH_SIZE must be at least 1"
 
 case "${EGO_STAGE}" in
-    check|prepare|stereo|stabilize|fit|render|all) ;;
-    *) die "unknown stage '${EGO_STAGE}'; use check, prepare, stereo, stabilize, fit, render, or all" ;;
+    check|prepare|stereo|stabilize|fit|render|wilor|all) ;;
+    *) die "unknown stage '${EGO_STAGE}'; use check, prepare, stereo, stabilize, fit, render, wilor, or all" ;;
 esac
 
 if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
@@ -479,13 +582,19 @@ EGO_MANO_MODELS="$(realpath -m "${EGO_MANO_MODELS}")"
 select_python
 
 case "${EGO_STAGE}" in
-    check|all|stereo)
+    check|all|stereo|wilor)
+        if [[ "${EGO_HAND_ROUTE}" == "wilor" && "${EGO_STAGE}" != "stereo" ]]; then
+            :
+        else
         require_file "${EGO_MODEL}"
+        fi
         ;;
 esac
 case "${EGO_STAGE}" in
     check|all|fit|render)
-        validate_common_assets
+        if [[ "${EGO_HAND_ROUTE}" == "mediapipe" || "${EGO_HAND_ROUTE}" == "parallel" || "${EGO_STAGE}" != "check" && "${EGO_STAGE}" != "all" ]]; then
+            validate_common_assets
+        fi
         ;;
 esac
 
@@ -493,6 +602,9 @@ print_config
 
 case "${EGO_STAGE}" in
     check)
+        if [[ "${EGO_HAND_ROUTE}" == "wilor" || "${EGO_HAND_ROUTE}" == "parallel" ]]; then
+            validate_wilor_assets
+        fi
         if [[ "${EGO_SOURCE}" == "gen" ]]; then
             log "checking GEN runtime dependencies and one decoded stereo frame"
             run_python "${PROJECT_DIR}/scripts/check_gen_environment.py" \
@@ -518,12 +630,21 @@ case "${EGO_STAGE}" in
     render)
         run_render
         ;;
+    wilor)
+        run_prepare
+        run_wilor
+        ;;
     all)
         run_prepare
-        run_stereo
-        run_stabilize
-        run_fit
-        run_render
+        if [[ "${EGO_HAND_ROUTE}" == "mediapipe" || "${EGO_HAND_ROUTE}" == "parallel" ]]; then
+            run_stereo
+            run_stabilize
+            run_fit
+            run_render
+        fi
+        if [[ "${EGO_HAND_ROUTE}" == "wilor" || "${EGO_HAND_ROUTE}" == "parallel" ]]; then
+            run_wilor
+        fi
         log "pipeline complete: ${EGO_OUTPUT}"
         ;;
 esac

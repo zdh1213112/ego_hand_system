@@ -53,6 +53,7 @@ class RunOfflineScriptTest(unittest.TestCase):
         self.assertIn("EGO_SOURCE=orbbec|gen", result.stdout)
         self.assertIn("EGO_SESSION", result.stdout)
         self.assertIn("EGO_MCAP", result.stdout)
+        self.assertIn("EGO_HAND_ROUTE=mediapipe|wilor|parallel", result.stdout)
 
     def test_orbbec_check_accepts_complete_session_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -103,6 +104,22 @@ class RunOfflineScriptTest(unittest.TestCase):
             result = self.run_script("check", env=env)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("set EGO_SOURCE", result.stderr)
+
+    def test_rejects_unknown_route(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mcap = root / "recording.mcap"
+            mcap.touch()
+            env = os.environ.copy()
+            env.update({
+                "EGO_SOURCE": "gen",
+                "EGO_MCAP": str(mcap),
+                "EGO_OUTPUT": str(root / "output"),
+                "EGO_HAND_ROUTE": "bad",
+            })
+            result = self.run_script("check", env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("EGO_HAND_ROUTE", result.stderr)
 
 
 if __name__ == "__main__":
