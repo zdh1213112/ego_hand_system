@@ -5,14 +5,15 @@
 - `orbbec`：Orbbec EGO 左右视频、硬件时间戳、KB 鱼眼标定和可选 IMU；
 - `gen`：GEN DAS EGO MCAP/H264、KB 或 Double Sphere 双目标定。
 
-两类数据在双目校正后复用同一套处理链路：
+两类数据在双目校正后可选择 MediaPipe+MANO、WiLoR，或同时运行两条路线：
 
 ```text
-Orbbec session ─> 标准化 ─> 双目校正 ─┐
-                                      ├─> 双目 MediaPipe ─> 3D 稳定化
-GEN MCAP ─────> 标准化 ─> 双目校正 ──┘
-   ─> 两阶段 MANO 拟合 ─> 原始画面网格叠加 ─> 21-DOF / 末端 6D CSV
+  Orbbec ─┐
+          ├─> 标准化 ─> 双目校正 ─┬─> MediaPipe ─> MANO / 21-DOF
+  GEN ────┘                     └─> WiLoR ─> MANO / 21-keypoints
 ```
+
+两条路线从双目校正结果并行运行，可通过 `EGO_HAND_ROUTE` 选择。
 
 ## 效果展示
 
@@ -21,100 +22,94 @@ GEN MCAP ─────> 标准化 ─> 双目校正 ──┘
 Orbbec EGO 离线处理结果：左侧在原始鱼眼画面上叠加双手 MANO 网格、骨架和
 末端 6D 坐标轴；右侧同步显示左右手 21-DOF 数值及独立 MANO 3D 预览。
 
-## 离线快速开始
+![WiLoR 左右目检测与 21 点投影结果](docs/images/wilor_stereo_dual_view.png)
 
-### 1. 准备环境
+同一组校正双目数据的 WiLoR 左右目独立结果：每路显示手框、左右手分类、置信度和
+21 点投影骨架；逐帧数值结果同时保存为 JSONL 和 NPZ。
+
+## 离线启动
+
+下面的命令覆盖环境、源码、模型资产和完整运行。只需要把尖括号中的占位符替换成
+你自己的路径；没有 WiLoR 模型时，把 `EGO_HAND_ROUTE` 改为 `mediapipe`。
+
+### 一次性安装环境和公共依赖
 
 ```bash
+cd <ego_hand_system目录>
 conda env create -f environment.yml
 conda activate ego-hand
 unset PYTHONPATH
+git submodule sync --recursive
+git submodule update --init third_party/MANO third_party/basalt third_party/WiLoR
+./scripts/install_mediapipe_model.sh
 ```
 
-如果 `ego-hand` 环境是在 GEN 支持合入之前创建的，请同步新增的 MCAP/PyAV 依赖：
+准备授权资产。MANO 的两个 pkl 从官方页面下载后安装，放到models/MANO。WiLoR checkpoint 和 detector
+从官方 Hugging Face Space 下载：
 
 ```bash
-conda env update -n ego-hand -f environment.yml
+cd <ego_hand_system目录>
+mkdir -p models/wilor
+wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/detector.pt \
+  -P models/wilor/
+wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/wilor_final.ckpt \
+  -P models/wilor/
+wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/model_config.yaml \
+  -P models/wilor/
+python scripts/check_third_party.py --require-mano --require-wilor
 ```
 
-确认下列资产已准备好：
-
-```text
-models/hand_landmarker.task
-models/mano/MANO_LEFT.pkl
-models/mano/MANO_RIGHT.pkl
-third_party/MANO/mano/model.py
-```
-
-MANO 模型需要从官方渠道获取并接受许可，安装说明见
-[models/README.md](models/README.md)。外部源码和本地资产也可分别使用：
+### GEN DAS EGO：完整运行
 
 ```bash
-./scripts/setup_third_party.sh
-./scripts/install_local_assets.sh --archive /path/to/ego_hand_assets.tar.gz
-```
+cd <ego_hand_system目录>
+conda activate ego-hand
 
-### 2. 选择输入类型
-
-变量需要使用 `export`，这样 `run_offline.sh` 才能读取到它们。
-
-#### Orbbec EGO
-
-```bash
-export EGO_SOURCE=orbbec
-export EGO_SESSION=recordings/Orbbec_Ego_AZER764008C_20260806_110653
-export EGO_OUTPUT=output/recording_20260806_110653_run2
-```
-
-也可以从模板开始：
-
-```bash
-cp configs/offline_orbbec.env.example .env.offline
-# 编辑 .env.offline
-source .env.offline
-```
-
-Orbbec session 中应包含左右 MP4、左右硬件 PTS CSV 和相机标定 YAML。准备阶段会先
-生成统一的 normalized 数据集，再生成 rectified 数据集；程序按硬件时间戳配对，
-不能把两个视频的第 N 帧直接当作同一时刻。
-
-#### GEN DAS EGO
-
-```bash
+# 必须填写
 export EGO_SOURCE=gen
-export EGO_MCAP=/path/to/DAS-Ego_example.mcap
-export EGO_OUTPUT=output/gen_das_example
-export EGO_LEFT_CAMERA=camera2
-export EGO_RIGHT_CAMERA=camera3
-```
+export EGO_MCAP=<MCAP文件绝对路径>
+export EGO_OUTPUT=<新输出目录绝对路径>
 
-也可以使用模板：
-
-```bash
-cp configs/offline_gen.env.example .env.offline
-# 编辑 MCAP 路径和输出目录
-source .env.offline
-```
-
-GEN 默认使用头环中间双目 `camera2/camera3`。入口会先将 MCAP 解码为统一原始
-数据集，再根据标定自动选择 KB 或 Double Sphere 模型生成针孔双目数据。
-
-### 3. 检查配置并运行
-
-先只检查路径、输入格式和模型资产。GEN 还会检查 MCAP/PyAV 依赖，并真实解码一帧：
-
-```bash
+# 可选；以下均可不填写，右侧是默认值或示例值
+export EGO_LEFT_CAMERA=camera2       # 默认 camera2
+export EGO_RIGHT_CAMERA=camera3      # 默认 camera3
+export EGO_HAND_ROUTE=parallel       # mediapipe | wilor | parallel
+export EGO_DEVICE=auto               # auto | cuda | cpu
+export EGO_MAX_PAIRS=0               # 冒烟测试可改为 60
+export EGO_MAX_FRAMES=0              # GEN 解码帧数；0 表示全部
+export EGO_NO_VIDEO=0                # 1 表示跳过诊断视频
+export EGO_WILOR_CAMERAS=both        # left | right | both
+export EGO_WILOR_BATCH_SIZE=4
+export EGO_WILOR_FRAME_STRIDE=1
 ./scripts/run_offline.sh check
-```
-
-检查通过后运行完整流程：
-
-```bash
 ./scripts/run_offline.sh all
 ```
 
-脚本会自动使用当前激活的 `ego-hand` 环境；未激活但系统存在 Conda 时，会使用
-`conda run -n ego-hand`。MANO 默认 `EGO_DEVICE=auto`，CUDA 可用时自动使用 GPU。
+### Orbbec EGO：完整运行
+
+```bash
+cd <ego_hand_system目录>
+conda activate ego-hand
+
+# 必须填写
+export EGO_SOURCE=orbbec
+export EGO_SESSION=<Orbbec会话目录绝对路径>
+export EGO_OUTPUT=<新输出目录绝对路径>
+
+# 可选；以下均可不填写，右侧是默认值或示例值
+export EGO_HAND_ROUTE=parallel       # mediapipe | wilor | parallel
+export EGO_DEVICE=auto               # auto | cuda | cpu
+export EGO_MAX_PAIRS=0
+export EGO_NO_VIDEO=0
+export EGO_WILOR_CAMERAS=both
+export EGO_WILOR_BATCH_SIZE=4
+./scripts/run_offline.sh check
+./scripts/run_offline.sh all
+```
+
+路线含义：`mediapipe` 运行现有 MediaPipe→双目三角化→稳定化→MANO→渲染；`wilor`
+只运行 WiLoR 左右目推理；`parallel` 顺序运行并保留两套结果。默认路线是
+`mediapipe`，不设置 `EGO_HAND_ROUTE` 即保持旧行为。
 
 ## 分阶段运行与断点恢复
 
@@ -153,10 +148,15 @@ export EGO_STAGE=stereo
 | `EGO_OUTPUT` | 必填 | 本次实验的统一输出根目录 |
 | `EGO_LEFT_CAMERA` | `camera2` | GEN 左相机 ID |
 | `EGO_RIGHT_CAMERA` | `camera3` | GEN 右相机 ID |
+| `EGO_HAND_ROUTE` | `mediapipe` | `mediapipe`、`wilor` 或 `parallel` |
 | `EGO_DEVICE` | `auto` | `auto`、`cuda` 或 `cpu` |
 | `EGO_MAX_PAIRS` | `0` | 下游最大双目帧对数，`0` 表示全部 |
 | `EGO_MAX_FRAMES` | `0` | GEN 每路最大解码帧数，`0` 表示全部 |
 | `EGO_NO_VIDEO` | `0` | 设为 `1` 时跳过诊断视频，保留 CSV/JSON/NPZ |
+| `EGO_WILOR_CAMERAS` | `both` | WiLoR 运行 `left`、`right` 或 `both` |
+| `EGO_WILOR_BATCH_SIZE` | `16` | WiLoR 单个 worker 的手部 crop batch 大小 |
+| `EGO_WILOR_FRAME_STRIDE` | `1` | WiLoR 每隔多少对帧处理一次 |
+| `EGO_WILOR_FAST` | `0` | 设为 `1` 启用 FP16/编译加速，要求 CUDA |
 | `EGO_CONDA_ENV` | `ego-hand` | 自动使用的 Conda 环境名 |
 | `EGO_PYTHON` | 未设置 | 指定 Python 路径并绕过 Conda 自动选择 |
 
@@ -188,6 +188,14 @@ $EGO_OUTPUT/
     stereo_frames.csv
     stereo_landmarks_3d.csv
     summary.json
+  wilor_stereo/
+    left/predictions.jsonl
+    left/predictions.npz
+    left/wilor_annotated.mp4
+    right/predictions.jsonl
+    right/predictions.npz
+    right/wilor_annotated.mp4
+    summary.json
   mano_preparation/
     mano_input.npz
     stabilized_landmarks_3d.csv
@@ -210,6 +218,8 @@ $EGO_OUTPUT/
 ```bash
 xdg-open "$EGO_OUTPUT/mediapipe_stereo/stereo_annotated.mp4"
 xdg-open "$EGO_OUTPUT/mano_overlay_optimized/mano_overlay_21dof.mp4"
+xdg-open "$EGO_OUTPUT/wilor_stereo/left/wilor_annotated.mp4"
+xdg-open "$EGO_OUTPUT/wilor_stereo/right/wilor_annotated.mp4"
 ```
 
 如果设置了 `EGO_NO_VIDEO=1`，请改看各阶段的 `summary.json` 和 CSV。
