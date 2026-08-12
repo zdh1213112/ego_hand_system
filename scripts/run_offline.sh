@@ -29,12 +29,12 @@ The positional stage overrides EGO_STAGE. The default stage is "all".
 Useful optional variables:
   EGO_DEVICE=auto|cuda|cpu      MANO device; default: auto
   EGO_MAX_PAIRS=0               limit downstream pairs; 0 means all
-  EGO_MAX_FRAMES=0              GEN normalization frame limit; 0 means all
+  EGO_MAX_FRAMES=0              normalization frame limit; 0 means all (GEN only)
   EGO_NO_VIDEO=0|1              skip diagnostic videos; final CSVs remain
   EGO_CONDA_ENV=ego-hand        Conda environment used when not already active
   EGO_PYTHON=/path/to/python    override Python/Conda selection
-  EGO_NORMALIZED_DATASET=...    reuse/relocate the GEN normalized dataset
-  EGO_RECTIFIED_DATASET=...     reuse/relocate the GEN rectified dataset
+  EGO_NORMALIZED_DATASET=...    reuse/relocate the normalized dataset
+  EGO_RECTIFIED_DATASET=...     reuse/relocate the rectified dataset
 
 Examples:
   export EGO_SOURCE=orbbec
@@ -177,6 +177,35 @@ prepare_orbbec() {
         --output "${output}"
 }
 
+normalize_orbbec() {
+    if stage_output_ready "Orbbec normalization" "${NORMALIZED_DATASET}" "${NORMALIZED_DATASET}/manifest.json"; then
+        return
+    fi
+    log "normalizing Orbbec session"
+    run_python "${PROJECT_DIR}/scripts/normalize_orbbec_session.py" \
+        --session "${EGO_SESSION}" \
+        --output "${NORMALIZED_DATASET}"
+}
+
+rectify_dataset() {
+    if stage_output_ready "stereo rectification" "${RECTIFIED_DATASET}" "${RECTIFIED_DATASET}/manifest.json"; then
+        return
+    fi
+    local rectify_limit=()
+    if ((EGO_MAX_PAIRS > 0)); then
+        rectify_limit=(--max-pairs "${EGO_MAX_PAIRS}")
+    fi
+    log "rectifying stereo dataset"
+    run_python "${PROJECT_DIR}/scripts/rectify_stereo_dataset.py" \
+        --input "${NORMALIZED_DATASET}" \
+        --output "${RECTIFIED_DATASET}" \
+        --camera-model auto \
+        --focal-scale 1.0 \
+        --video-codec h264 \
+        --crf 18 \
+        "${rectify_limit[@]}"
+}
+
 prepare_gen() {
     if ! stage_output_ready "GEN normalization" "${NORMALIZED_DATASET}" "${NORMALIZED_DATASET}/manifest.json"; then
         log "checking GEN Python dependencies and MCAP decoding"
@@ -198,26 +227,14 @@ prepare_gen() {
             "${normalize_limit[@]}"
     fi
 
-    if ! stage_output_ready "GEN rectification" "${RECTIFIED_DATASET}" "${RECTIFIED_DATASET}/manifest.json"; then
-        local rectify_limit=()
-        if ((EGO_MAX_PAIRS > 0)); then
-            rectify_limit=(--max-pairs "${EGO_MAX_PAIRS}")
-        fi
-        log "rectifying GEN stereo dataset"
-        run_python "${PROJECT_DIR}/scripts/rectify_stereo_dataset.py" \
-            --input "${NORMALIZED_DATASET}" \
-            --output "${RECTIFIED_DATASET}" \
-            --camera-model auto \
-            --focal-scale 1.0 \
-            --video-codec h264 \
-            --crf 18 \
-            "${rectify_limit[@]}"
-    fi
+    rectify_dataset
 }
 
 run_prepare() {
     if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
         prepare_orbbec
+        normalize_orbbec
+        rectify_dataset
     else
         prepare_gen
     fi
@@ -229,13 +246,8 @@ run_stereo() {
     if stage_output_ready "stereo MediaPipe" "${output}" "${marker}"; then
         return
     fi
-    local source_args=()
-    if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
-        source_args=(--session "${EGO_SESSION}")
-    else
-        require_file "${RECTIFIED_DATASET}/manifest.json"
-        source_args=(--rectified-dataset "${RECTIFIED_DATASET}")
-    fi
+    require_file "${RECTIFIED_DATASET}/manifest.json"
+    local source_args=(--rectified-dataset "${RECTIFIED_DATASET}")
     local pair_limit=()
     if ((EGO_MAX_PAIRS > 0)); then
         pair_limit=(--max-pairs "${EGO_MAX_PAIRS}")
@@ -377,17 +389,12 @@ run_render() {
     if stage_output_ready "MANO overlay" "${output}" "${marker}"; then
         return
     fi
-    local source_args=()
-    if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
-        source_args=(--session "${EGO_SESSION}")
-    else
-        require_file "${NORMALIZED_DATASET}/manifest.json"
-        require_file "${RECTIFIED_DATASET}/manifest.json"
-        source_args=(
-            --normalized-dataset "${NORMALIZED_DATASET}"
-            --rectified-dataset "${RECTIFIED_DATASET}"
-        )
-    fi
+    require_file "${NORMALIZED_DATASET}/manifest.json"
+    require_file "${RECTIFIED_DATASET}/manifest.json"
+    local source_args=(
+        --normalized-dataset "${NORMALIZED_DATASET}"
+        --rectified-dataset "${RECTIFIED_DATASET}"
+    )
     local pair_limit=()
     if ((EGO_MAX_PAIRS > 0)); then
         pair_limit=(--max-pairs "${EGO_MAX_PAIRS}")

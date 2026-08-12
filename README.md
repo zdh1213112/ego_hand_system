@@ -8,9 +8,9 @@
 两类数据在双目校正后复用同一套处理链路：
 
 ```text
-Orbbec session ───────────────────────┐
+Orbbec session ─> 标准化 ─> 双目校正 ─┐
                                       ├─> 双目 MediaPipe ─> 3D 稳定化
-GEN MCAP ─> 标准化 ─> 双目校正 ──────┘
+GEN MCAP ─────> 标准化 ─> 双目校正 ──┘
    ─> 两阶段 MANO 拟合 ─> 原始画面网格叠加 ─> 21-DOF / 末端 6D CSV
 ```
 
@@ -74,8 +74,9 @@ cp configs/offline_orbbec.env.example .env.offline
 source .env.offline
 ```
 
-Orbbec session 中应包含左右 MP4、左右硬件 PTS CSV 和相机标定 YAML。程序按硬件
-时间戳配对，不能把两个视频的第 N 帧直接当作同一时刻。
+Orbbec session 中应包含左右 MP4、左右硬件 PTS CSV 和相机标定 YAML。准备阶段会先
+生成统一的 normalized 数据集，再生成 rectified 数据集；程序按硬件时间戳配对，
+不能把两个视频的第 N 帧直接当作同一时刻。
 
 #### GEN DAS EGO
 
@@ -122,7 +123,7 @@ GEN 默认使用头环中间双目 `camera2/camera3`。入口会先将 MCAP 解�
 | 阶段 | 命令 | 作用 |
 |---|---|---|
 | 配置检查 | `./scripts/run_offline.sh check` | 检查数据源、模型和 MANO 资产 |
-| 输入准备 | `./scripts/run_offline.sh prepare` | Orbbec 会话预览；GEN 标准化与校正 |
+| 输入准备 | `./scripts/run_offline.sh prepare` | Orbbec/GEN 标准化与双目校正；Orbbec 另含可选会话预览 |
 | 双目重建 | `./scripts/run_offline.sh stereo` | MediaPipe、跨相机关联和 21 点三角化 |
 | 3D 稳定 | `./scripts/run_offline.sh stabilize` | 离群管理、短缺口补全和骨长约束 |
 | MANO 拟合 | `./scripts/run_offline.sh fit` | 稳定初值和低学习率精修两阶段拟合 |
@@ -175,13 +176,13 @@ export EGO_MAX_FRAMES=80
 
 ## 输出目录
 
-Orbbec 和 GEN 的后半段输出结构一致；GEN 额外包含标准化和校正数据集：
+Orbbec 和 GEN 现在都先生成统一的标准化、校正数据集，再进入同一套后处理：
 
 ```text
 $EGO_OUTPUT/
   session_check/                         # 仅 Orbbec，可选会话预览
-  normalized/                            # 仅 GEN，原始统一数据集
-  rectified/                             # 仅 GEN，校正后的针孔双目数据集
+  normalized/                            # 统一原始双目数据集（Orbbec/GEN）
+  rectified/                             # 统一校正后的针孔双目数据集
   mediapipe_stereo/
     stereo_annotated.mp4
     stereo_frames.csv
