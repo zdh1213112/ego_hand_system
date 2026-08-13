@@ -1,0 +1,45 @@
+name: CI
+
+# No `paths:` filter on purpose: `test` is a required status check on main, and a
+# path-filtered workflow reports nothing on PRs that miss the filter — such a PR
+# would sit at "pending" forever and never become mergeable.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the light dependencies. requirements/core.txt additionally pulls
+      # mediapipe, opencv-contrib-python and friends, and requirements/wilor.txt
+      # pulls a torch stack — far too heavy for a per-PR gate.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install --upgrade pip numpy PyYAML pytest ruff
+
+      # Fatal errors only — syntax errors and undefined names — across the whole
+      # tree, so a broken file is caught even where the tests below don't reach.
+      # This repo has never been linted; widen the selection once the pre-existing
+      # style backlog is cleared. third_party/ is vendored, so it is excluded.
+      - name: Lint
+        run: ruff check --select E9,F63,F7,F82 --exclude third_party .
+
+      # The tests that run without cv2 / torch / mediapipe. The other 11 test
+      # modules import those at collection time and can only run in the full conda
+      # environment (environment.yml). Add them here if that ever becomes cheap.
+      - name: Test
+        run: |
+          pytest -q \
+            tests/test_third_party_manifest.py \
+            tests/test_run_basalt_offline.py \
+            tests/test_run_offline_script.py \
+            tests/test_python_environment_setup.py \
+            tests/test_wilor_inference_io.py
