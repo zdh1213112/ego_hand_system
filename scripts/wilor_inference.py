@@ -174,6 +174,24 @@ def _json_record(record: dict[str, Any], save_vertices: bool) -> dict[str, Any]:
     return result
 
 
+def _coerce_mano_param(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
+    """Convert one WiLoR MANO parameter to the stable NPZ shape.
+
+    WiLoR emits ``global_orient`` with a singleton joint dimension, i.e.
+    ``(1, 3, 3)``, while the per-hand archive contract stores one matrix as
+    ``(3, 3)``.  Keep accepting that native form, but fail with a useful error
+    if a checkpoint produces a genuinely incompatible tensor.
+    """
+    result = np.asarray(value, dtype=np.float32)
+    if result.shape != shape and result.ndim == len(shape) + 1 and result.shape[0] == 1:
+        result = result[0]
+    if result.shape != shape:
+        raise ValueError(
+            f"WiLoR MANO parameter {name} has shape {result.shape}; expected {shape}"
+        )
+    return result
+
+
 def _write_npz(path: Path, rows: list[dict[str, Any]]) -> None:
     max_hands = max((len(row["hands"]) for row in rows), default=0)
     frames = len(rows)
@@ -196,11 +214,17 @@ def _write_npz(path: Path, rows: list[dict[str, Any]]) -> None:
             camera_translation[frame_index, hand_index] = hand["camera_translation"]
             mano = hand.get("mano", {})
             if "global_orient" in mano:
-                global_orient[frame_index, hand_index] = mano["global_orient"]
+                global_orient[frame_index, hand_index] = _coerce_mano_param(
+                    mano["global_orient"], (3, 3), "global_orient"
+                )
             if "hand_pose" in mano:
-                hand_pose[frame_index, hand_index] = mano["hand_pose"]
+                hand_pose[frame_index, hand_index] = _coerce_mano_param(
+                    mano["hand_pose"], (15, 3, 3), "hand_pose"
+                )
             if "betas" in mano:
-                betas[frame_index, hand_index] = mano["betas"]
+                betas[frame_index, hand_index] = _coerce_mano_param(
+                    mano["betas"], (10,), "betas"
+                )
     np.savez_compressed(
         path,
         frame_index=np.asarray([row["frame_index"] for row in rows], dtype=np.int64),

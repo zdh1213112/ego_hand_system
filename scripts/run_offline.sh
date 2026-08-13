@@ -434,8 +434,14 @@ run_render() {
 run_wilor() {
     local output="${EGO_OUTPUT}/wilor_stereo"
     local marker="${output}/summary.json"
-    if stage_output_ready "WiLoR stereo" "${output}" "${marker}"; then
+    if [[ -f "${marker}" ]]; then
+        log "skip WiLoR stereo: already complete (${marker})"
         return
+    fi
+    if [[ -e "${output}" ]]; then
+        local failed_backup="${output}.failed-$(date +%Y%m%d-%H%M%S)"
+        warn "WiLoR output is incomplete; preserving it at ${failed_backup} before retry"
+        mv -- "${output}" "${failed_backup}"
     fi
     require_file "${RECTIFIED_DATASET}/manifest.json"
     validate_wilor_assets

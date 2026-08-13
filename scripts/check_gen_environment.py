@@ -40,8 +40,8 @@ def main() -> int:
     if missing:
         names = ", ".join(name for name, _ in missing)
         raise RuntimeError(
-            f"missing GEN dependencies: {names}; update the environment with "
-            "'conda env update -n ego-hand -f environment.yml'"
+            f"missing GEN dependencies: {names}; install/update the complete runtime with "
+            "'./scripts/setup_python_environment.sh'"
         )
     av = modules["av"]
     cv2 = modules["cv2"]

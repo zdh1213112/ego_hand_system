@@ -1,0 +1,14 @@
+mcap==1.2.2
+mcap-protobuf-support==0.5.3
+av==14.2.0
+protobuf>=4.25,<6
+zstandard>=0.22,<1
+lz4>=4.3,<5
+mediapipe==0.10.35
+opencv-contrib-python==5.0.0.93
+numpy==2.2.6
+PyYAML==6.0.3
+python-dateutil==2.9.0.post0
+scipy==1.15.3
+trimesh==4.7.4
+typeguard==4.4.4

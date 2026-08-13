@@ -36,13 +36,31 @@ Orbbec EGO 离线处理结果：左侧在原始鱼眼画面上叠加双手 MANO 
 
 ```bash
 cd <ego_hand_system目录>
-conda env create -f environment.yml
+./scripts/setup_python_environment.sh
 conda activate ego-hand
 unset PYTHONPATH
 git submodule sync --recursive
 git submodule update --init third_party/MANO third_party/basalt third_party/WiLoR
 ./scripts/install_mediapipe_model.sh
 ```
+
+`environment.yml` 只负责创建稳定的 Python/Conda 基础环境；安装脚本会继续完成完整、
+固定版本的运行时安装。它把 CUDA PyTorch、普通 PyPI 包和 chumpy 分开处理，避免普通
+包误访问 PyTorch CUDA 下载源，也避免一次下载中断导致整个 Conda 环境创建失败。
+
+MANO v1.2 模型需要旧版 chumpy 来反序列化。chumpy 的 GitHub 源码构建脚本与现代 pip
+的隔离构建不兼容，因此安装脚本会明确执行固定提交的非隔离构建：
+
+```bash
+python -m pip install --no-build-isolation \
+  git+https://github.com/mattloper/chumpy.git@580566eafc9ac68b2614b64d6f7aaa84eebb70da
+```
+
+项目在加载 MANO 时还会补上 chumpy 所需的 NumPy 2 兼容别名。安装完成后，脚本会
+自动检查 WiLoR、MediaPipe、GEN、PyTorch/CUDA 和 OpenCV 包是否可用。如果网络中断，
+重新执行 `./scripts/setup_python_environment.sh` 即可；已下载内容保存在 `/tmp/ego-hand-pip-cache`。
+脚本也会清理 `ultralytics` 可能引入的 `opencv-python`，然后修复安装项目统一使用的
+`opencv-contrib-python`，避免两个提供同名 `cv2` 模块的发行包互相覆盖。
 
 准备授权资产。MANO 的两个 pkl 从官方页面下载后安装，放到models/MANO。WiLoR checkpoint 和 detector
 从官方 Hugging Face Space 下载：
