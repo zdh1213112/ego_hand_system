@@ -7,11 +7,17 @@ OUTPUT=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
 MAX_FRAMES=60
-BATCH_SIZE=4
+BATCH_SIZE=""
+FRAME_BATCH_SIZE=""
+PREPROCESS_WORKERS=""
+MAX_DETECTIONS_PER_CLASS=""
+COMPILE_BACKBONE=""
+GPU_PROFILE="compatible"
 NO_VIDEO=0
+TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
-  echo "Usage: $0 --mcap FILE --output DIR [--max-frames N] [--device cuda] [--conda-env NAME] [--batch-size N] [--no-video]"
+  echo "Usage: $0 --mcap FILE --output DIR [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--no-video]"
 }
 
 while (($#)); do
@@ -22,11 +28,37 @@ while (($#)); do
     --device) DEVICE="$2"; shift 2 ;;
     --max-frames) MAX_FRAMES="$2"; shift 2 ;;
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --frame-batch-size) FRAME_BATCH_SIZE="$2"; shift 2 ;;
+    --preprocess-workers) PREPROCESS_WORKERS="$2"; shift 2 ;;
+    --max-detections-per-class) MAX_DETECTIONS_PER_CLASS="$2"; shift 2 ;;
+    --compile-backbone) COMPILE_BACKBONE="$2"; shift 2 ;;
+    --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+case "$GPU_PROFILE" in
+  compatible)
+    BATCH_SIZE="${BATCH_SIZE:-4}"
+    FRAME_BATCH_SIZE="${FRAME_BATCH_SIZE:-1}"
+    PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-1}"
+    MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-0}"
+    COMPILE_BACKBONE="${COMPILE_BACKBONE:-0}"
+    ;;
+  rtx5090d)
+    BATCH_SIZE="${BATCH_SIZE:-16}"
+    FRAME_BATCH_SIZE="${FRAME_BATCH_SIZE:-4}"
+    PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-8}"
+    MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-1}"
+    COMPILE_BACKBONE="${COMPILE_BACKBONE:-1}"
+    ;;
+  *)
+    echo "--gpu-profile must be compatible or rtx5090d: $GPU_PROFILE" >&2
+    exit 2
+    ;;
+esac
 
 if [[ -z "$MCAP" || -z "$OUTPUT" ]]; then
   usage >&2
@@ -36,8 +68,8 @@ if [[ ! -f "$MCAP" ]]; then
   echo "MCAP does not exist: $MCAP" >&2
   exit 2
 fi
-if ! [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
-  echo "--max-frames must be non-negative and --batch-size must be positive" >&2
+if ! [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$FRAME_BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$PREPROCESS_WORKERS" =~ ^[1-9][0-9]*$ && "$MAX_DETECTIONS_PER_CLASS" =~ ^[0-9]+$ && "$COMPILE_BACKBONE" =~ ^[01]$ ]]; then
+  echo "frames/detection limit must be non-negative; batch sizes/workers must be positive" >&2
   exit 2
 fi
 
@@ -49,15 +81,16 @@ FUSION="$OUTPUT/fusion_multiview"
 run_python() {
   conda run --no-capture-output -n "$CONDA_ENV" \
     env PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
+    TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
     python "$@"
 }
 
-run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" <<'PY'
+run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-config_path, source_text, max_frames, device, batch_size = sys.argv[1:]
+config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone = sys.argv[1:]
 source = Path(source_text).resolve()
 stat = source.stat()
 config = {
@@ -67,6 +100,11 @@ config = {
     "max_frames": int(max_frames),
     "device": device,
     "batch_size": int(batch_size),
+    "gpu_profile": gpu_profile,
+    "frame_batch_size": int(frame_batch_size),
+    "preprocess_workers": int(preprocess_workers),
+    "max_detections_per_class": int(max_detections_per_class),
+    "compile_backbone": bool(int(compile_backbone)),
     "camera_confidences": {"camera0": 0.2, "camera1": 0.3, "camera2": 0.3,
                            "camera3": 0.3, "camera4": 0.1, "camera5": 0.1},
     "fusion_algorithm": "anchor_guided_dynamic_temporal_handedness_v3",
@@ -74,6 +112,14 @@ config = {
 path = Path(config_path)
 if path.exists():
     previous = json.loads(path.read_text(encoding="utf-8"))
+    # Outputs made before GPU profiles were introduced used this exact path.
+    previous.setdefault("gpu_profile", "compatible")
+    previous.setdefault("frame_batch_size", 1)
+    previous.setdefault(
+        "preprocess_workers", 8 if previous["gpu_profile"] == "rtx5090d" else 1
+    )
+    previous.setdefault("max_detections_per_class", 0)
+    previous.setdefault("compile_backbone", False)
     if previous != config:
         changed = next(key for key in config if previous.get(key) != config[key])
         raise SystemExit(
@@ -111,7 +157,12 @@ if [[ ! -f "$PREDICTIONS/summary.json" ]]; then
   echo "[multiview] run six-view dual-hypothesis WiLoR"
   run_python "$ROOT/scripts/wilor_multiview_inference.py" \
     --dataset "$NORMALIZED" --output "$PREDICTIONS" \
-    --device "$DEVICE" --batch-size "$BATCH_SIZE" --max-frames "$MAX_FRAMES" \
+    --device "$DEVICE" --gpu-profile "$GPU_PROFILE" \
+    --batch-size "$BATCH_SIZE" --frame-batch-size "$FRAME_BATCH_SIZE" \
+    --preprocess-workers "$PREPROCESS_WORKERS" \
+    --max-detections-per-class "$MAX_DETECTIONS_PER_CLASS" \
+    --compile-backbone "$COMPILE_BACKBONE" \
+    --max-frames "$MAX_FRAMES" \
     --camera-confidence camera0=0.2 \
     --camera-confidence camera4=0.1 \
     --camera-confidence camera5=0.1

@@ -16,8 +16,10 @@ MODULES = (
     "av", "cv2", "mediapipe", "mcap", "torch", "torchvision", "scipy", "trimesh",
     "skimage", "pyrender", "pytorch_lightning", "smplx", "yacs", "timm", "einops",
     "xtcocotools", "pandas", "hydra", "pyrootutils", "rich", "webdataset", "gradio",
-    "ultralytics", "dill",
+    "ultralytics", "polars", "psutil", "dill",
 )
+
+EXPECTED_ULTRALYTICS_VERSION = "8.4.56"
 
 
 def import_chumpy_compatibly() -> None:
@@ -54,6 +56,20 @@ def main() -> int:
     if "opencv-contrib-python" not in installed:
         failures.append("opencv-contrib-python is not installed")
 
+    try:
+        ultralytics_version = metadata.version("ultralytics")
+        if ultralytics_version != EXPECTED_ULTRALYTICS_VERSION:
+            failures.append(
+                "ultralytics "
+                f"{ultralytics_version} is installed; detector.pt requires "
+                f"{EXPECTED_ULTRALYTICS_VERSION}"
+            )
+        block = importlib.import_module("ultralytics.nn.modules.block")
+        if not hasattr(block, "C3k2"):
+            failures.append("ultralytics does not provide C3k2 required by detector.pt")
+    except Exception as error:
+        failures.append(f"ultralytics checkpoint compatibility: {error}")
+
     if failures:
         print("Python environment validation failed:", file=sys.stderr)
         for failure in failures:
@@ -65,6 +81,7 @@ def main() -> int:
     print(f"Python: {sys.version.split()[0]}")
     print(f"NumPy: {np.__version__}")
     print(f"PyTorch: {torch.__version__}")
+    print(f"Ultralytics: {metadata.version('ultralytics')}")
     print(f"CUDA available: {torch.cuda.is_available()}")
     return 0
 

@@ -61,6 +61,8 @@ python -m pip install --no-build-isolation \
 重新执行 `./scripts/setup_python_environment.sh` 即可；已下载内容保存在 `/tmp/ego-hand-pip-cache`。
 脚本也会清理 `ultralytics` 可能引入的 `opencv-python`，然后修复安装项目统一使用的
 `opencv-contrib-python`，避免两个提供同名 `cv2` 模块的发行包互相覆盖。
+当前官方 `detector.pt` 含有 `C3k2` 层，因此安装脚本固定使用与该权重一致的
+Ultralytics 8.4.56；环境检查也会在版本或模型层不兼容时提前报出明确错误。
 
 准备授权资产。MANO 的两个 pkl 从官方页面下载后安装，放到models/MANO。WiLoR checkpoint 和 detector
 从官方 Hugging Face Space 下载：
@@ -148,13 +150,28 @@ conda activate ego-hand
 ```
 ```bash
 ./scripts/run_multiview_wilor_experiment.sh \
-    --mcap       /home/zdh/ego_hand_system/recordings/20260818/DAS-Ego_20260818164752_none_none_689985_b5adb46c.mcap \
-    --output     /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
+    --mcap       /home/p3/data_sda1/ego_hand_system/recordings/20260818/DAS-Ego_20260818164752_none_none_689985_b5adb46c.mcap \
+    --output     /home/p3/data_sda1/ego_hand_system/output/gen6_pose_full_v5_5090d \
     --conda-env  ego-hand \
     --device     cuda \
+    --gpu-profile rtx5090d \
     --max-frames 0 \
-    --batch-size 4
+    --batch-size 16
 ```
+
+`--gpu-profile rtx5090d` 会使用 4 帧检测批次、16 个 WiLoR 假设批次、8 个并行
+OpenCV 抗锯齿裁剪线程、FP16 autocast/TF32，并仅在每路相机结束后清理 CUDA 缓存。
+WiLoR backbone 默认通过 `torch.compile` 合并 CUDA kernel；首次运行会有一次编译等待，
+之后的完整序列会摊薄该开销。
+由于严格 handedness 模式下每帧物理上最多只有一只左手和一只右手，该配置还会为
+每个 detector 类别只保留最高置信度框，避免低阈值侧相机的重复假框成倍运行 WiLoR。
+RTX 5060 保持默认的
+`--gpu-profile compatible --batch-size 4`，继续使用原有逐帧 FP32 路径。可用
+`--frame-batch-size` 和 `--preprocess-workers` 单独覆盖批次与裁剪线程数；显存不足
+时先把 `--batch-size` 从 `16` 降为 `8`，再把帧批次从 `4` 降为 `2`。
+如需保留所有候选框，可显式传入 `--max-detections-per-class 0`。
+如当前 PyTorch/驱动组合无法编译，可用 `--compile-backbone 0` 关闭编译，其余 5090D
+优化仍然保留。
 
 确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
 序列。脚本会生成 `fusion_multiview/diagnostic_6view.mp4`，其中六个画面按 3x2 排列；

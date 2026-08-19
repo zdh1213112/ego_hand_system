@@ -72,13 +72,20 @@ else
 fi
 
 printf '[python-env] installing WiLoR runtime from PyPI\n'
+# Ultralytics 8.4 uses the maintained ultralytics-thop distribution. The old
+# thop distribution installs into the same Python package directory, so remove
+# it before upgrading an environment created by an earlier project revision.
+if "${PIP[@]}" show thop >/dev/null 2>&1; then
+    printf '[python-env] replacing legacy thop with ultralytics-thop\n'
+    "${PIP[@]}" uninstall -y thop
+fi
 "${PIP[@]}" install --upgrade "${NETWORK_OPTIONS[@]}" \
     --index-url "${PYPI_INDEX}" \
     -r "${PROJECT_DIR}/requirements/wilor.txt"
 
 printf '[python-env] installing ultralytics without its duplicate OpenCV distribution\n'
 "${PIP[@]}" install --upgrade "${NETWORK_OPTIONS[@]}" \
-    --index-url "${PYPI_INDEX}" --no-deps ultralytics==8.1.34
+    --index-url "${PYPI_INDEX}" --no-deps ultralytics==8.4.56
 
 printf '[python-env] validating imports and package invariants\n'
 # Import validation does not perform network requests. Do not let a shell-level

@@ -22,5 +22,6 @@ dill==0.4.1
 psutil==7.2.2
 py-cpuinfo==9.0.0
 requests==2.32.5
-thop==0.1.1.post2209072238
+polars==1.43.2
+ultralytics-thop==2.0.18
 seaborn==0.13.2
