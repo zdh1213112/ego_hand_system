@@ -28,6 +28,7 @@ class PythonEnvironmentSetupTests(unittest.TestCase):
         self.assertIn("--no-deps ultralytics==8.1.34", installer)
         self.assertIn("uninstall -y opencv-python opencv-python-headless", installer)
         self.assertIn("--force-reinstall --no-deps", installer)
+        self.assertIn("env -u ALL_PROXY -u all_proxy", installer)
 
     def test_requirements_do_not_install_duplicate_opencv(self):
         requirements = "\n".join(
@@ -35,6 +36,8 @@ class PythonEnvironmentSetupTests(unittest.TestCase):
             for name in ("requirements/core.txt", "requirements/wilor.txt")
         )
         self.assertIn("opencv-contrib-python==5.0.0.93", requirements)
+        self.assertIn("psutil==7.2.2", requirements)
+        self.assertIn("requests==2.32.5", requirements)
         self.assertNotIn("\nopencv-python==", f"\n{requirements}")
 
 

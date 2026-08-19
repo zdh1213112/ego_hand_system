@@ -81,8 +81,13 @@ printf '[python-env] installing ultralytics without its duplicate OpenCV distrib
     --index-url "${PYPI_INDEX}" --no-deps ultralytics==8.1.34
 
 printf '[python-env] validating imports and package invariants\n'
+# Import validation does not perform network requests. Do not let a shell-level
+# generic SOCKS proxy (notably the unsupported "socks://" spelling) prevent
+# httpx from being imported by Gradio. HTTP(S) proxy settings remain available
+# to every preceding download step.
 conda run --no-capture-output -n "${ENV_NAME}" \
-    env PYTHONNOUSERSITE=1 PYTHONPATH= MPLCONFIGDIR=/tmp/ego-hand-matplotlib \
+    env -u ALL_PROXY -u all_proxy \
+    PYTHONNOUSERSITE=1 PYTHONPATH= MPLCONFIGDIR=/tmp/ego-hand-matplotlib \
     python "${PROJECT_DIR}/scripts/check_python_environment.py"
 
 printf '\n[python-env] ready. Activate with: conda activate %s\n' "${ENV_NAME}"
