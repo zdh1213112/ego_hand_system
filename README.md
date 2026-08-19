@@ -185,9 +185,34 @@ RTX 5060 保持默认的
 `fusion_multiview/summary.json` 还会把六目结果和 `camera2+camera3` 双目结果投影到所有
 可用视角，给出跨视角一致性对比。
 
-该链路目前用于验证六目检测、关联和三角化收益，输出是 GEN base 坐标系的 21 个 3D
-关节 JSONL；尚未接入主流程的时序 MANO 拟合、21-DOF 和训练 NPY 导出。低置信度的
-侧视角由逐相机检测阈值处理，RANSAC 会忽略仍然错误的检测，但诊断视频仍应人工抽查。
+六目结果确认无误后，可以直接导出与 WiLoR 训练数据一致的成对图片和 `.npy` 标签：
+
+```bash
+./scripts/run_multiview_wilor_label_export.sh \
+  --experiment /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
+  --fusion /home/zdh/ego_hand_system/output/gen6_pose_full_v3/fusion_handedness_strict_full \
+  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels \
+  --conda-env ego-hand \
+  --device cuda \
+  --max-samples 0
+```
+
+导出结构：
+
+```text
+wilor_training_labels/dataset/
+├── images/000000.jpg
+├── labels/000000.npy
+├── index.jsonl
+├── rejected.jsonl
+└── summary.json
+```
+
+`images` 和 `labels` 文件名严格一一对应。图片是 `camera2/3` 的共同针孔校正图像，标签内
+的 `K` 与图片一致；不能把原始 DS 鱼眼图片和针孔 `K` 混用。每个标签会严格对照
+`/home/zdh/tool/npy_decoder/000865.npy` 校验字段顺序、类型、dtype 和 shape，并验证
+`vertices + trans` 经 `K` 投影后与 `joints_2d[778,2]` 一致。六目融合提供可靠 3D 和
+身份，随后共享 MANO 时序拟合生成 778 顶点、21 关节、旋转矩阵、shape 和 translation。
 
 路线含义：`mediapipe` 运行现有 MediaPipe→双目三角化→稳定化→MANO→渲染；`wilor`
 只运行 WiLoR 左右目推理；`parallel` 顺序运行并保留两套结果。默认路线是
