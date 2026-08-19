@@ -257,6 +257,7 @@ def _serialize_hand(
                 "detection_index": int(hand["detection_index"]),
                 "bbox_xyxy": hand["bbox_xyxy"],
                 "confidence": hand["confidence"],
+                "detector_is_right": hand.get("detector_is_right"),
                 "joints_2d": hand["joints_2d"],
                 "inlier_joint_count": int(
                     result["inlier_mask"][:, result["cameras"].index(camera)].sum()

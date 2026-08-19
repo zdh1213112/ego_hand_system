@@ -13,7 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 from camera_models import project_points
 from ego_data.calibration import CameraCalibration
 from fuse_multiview_wilor import triangulate_ransac
-from fuse_multiview_wilor_guided import _match_camera
+from fuse_multiview_wilor_guided import _match_camera, _ordered_hand_pairs
 from normalize_multiview_recording import synchronize_rows
 
 
@@ -67,22 +67,23 @@ class MultiviewWilorTests(unittest.TestCase):
         false_pixels = left_pixels + np.asarray([350.0, -220.0])
         groups = {
             0: {
-                0: {"detection_index": 0, "confidence": 0.8, "joints_2d": left_pixels.tolist()},
-                1: {"detection_index": 0, "confidence": 0.8, "joints_2d": false_pixels.tolist()},
+                0: {"detection_index": 0, "confidence": 0.8, "detector_is_right": 0, "joints_2d": left_pixels.tolist()},
+                1: {"detection_index": 0, "confidence": 0.8, "detector_is_right": 0, "joints_2d": false_pixels.tolist()},
             },
             1: {
-                0: {"detection_index": 1, "confidence": 0.7, "joints_2d": false_pixels.tolist()},
-                1: {"detection_index": 1, "confidence": 0.7, "joints_2d": right_pixels.tolist()},
+                0: {"detection_index": 1, "confidence": 0.7, "detector_is_right": 1, "joints_2d": false_pixels.tolist()},
+                1: {"detection_index": 1, "confidence": 0.7, "detector_is_right": 1, "joints_2d": right_pixels.tolist()},
             },
         }
         selected, errors = _match_camera(
             "camera0", groups, {0: {"points": left_points}, 1: {"points": right_points}},
-            camera, 55.0, 4,
+            camera, 55.0, 4, "strict",
         )
         self.assertEqual(selected[0]["detection_index"], 0)
         self.assertEqual(selected[1]["detection_index"], 1)
         self.assertLess(errors[0], 1e-9)
         self.assertLess(errors[1], 1e-9)
+        self.assertEqual(_ordered_hand_pairs([0, 1], groups, "strict"), [(0, 1)])
 
 
 if __name__ == "__main__":

@@ -69,7 +69,7 @@ config = {
     "batch_size": int(batch_size),
     "camera_confidences": {"camera0": 0.2, "camera1": 0.3, "camera2": 0.3,
                            "camera3": 0.3, "camera4": 0.1, "camera5": 0.1},
-    "fusion_algorithm": "anchor_guided_dynamic_temporal_v2",
+    "fusion_algorithm": "anchor_guided_dynamic_temporal_handedness_v3",
 }
 path = Path(config_path)
 if path.exists():
@@ -123,7 +123,7 @@ if [[ ! -f "$FUSION/summary.json" ]]; then
   echo "[multiview] fuse native Double-Sphere rays with RANSAC"
   run_python "$ROOT/scripts/fuse_multiview_wilor_guided.py" \
     --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --output "$FUSION" \
-    --anchor-cameras camera2 camera3 --max-frames "$MAX_FRAMES"
+    --anchor-cameras camera2 camera3 --detector-handedness strict --max-frames "$MAX_FRAMES"
 else
   echo "[multiview] reuse fused result"
 fi

@@ -132,6 +132,10 @@ export EGO_WILOR_BATCH_SIZE=4
 双假设 WiLoR，以 `camera2/3` 为首选锚点并在缺失时动态选择其他相机对，再让外围
 相机逐只手按重投影匹配，最后用原生 Double-Sphere 射线和 RANSAC 融合 3D 关节：
 
+最终 Left/Right 身份由 `detector.pt` 的 `left/right` 类别严格锁定；双假设只用于估计
+对应身份的姿态，几何误差和手掌翻转不能再交换两只手。汇总中的
+`detector_handedness_mismatch_observation_count` 应为 `0`。
+
 ```bash
 cd <ego_hand_system目录>
 conda activate ego-hand
@@ -141,6 +145,15 @@ conda activate ego-hand
   --device cuda \
   --max-frames 60 \
   --batch-size 4
+```
+```bash
+./scripts/run_multiview_wilor_experiment.sh \
+    --mcap       /home/zdh/ego_hand_system/recordings/20260818/DAS-Ego_20260818164752_none_none_689985_b5adb46c.mcap \
+    --output     /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
+    --conda-env  ego-hand \
+    --device     cuda \
+    --max-frames 0 \
+    --batch-size 4
 ```
 
 确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整

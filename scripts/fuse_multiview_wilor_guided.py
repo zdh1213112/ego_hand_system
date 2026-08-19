@@ -40,6 +40,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-cameras", nargs=2, default=("camera2", "camera3"))
     parser.add_argument("--max-anchor-detections", type=int, default=3)
     parser.add_argument("--max-side-detections", type=int, default=4)
+    parser.add_argument(
+        "--detector-handedness", choices=("strict", "ignore"), default="strict",
+        help="strict keeps detector.pt left/right identity through all fusion stages",
+    )
     parser.add_argument("--association-threshold-px", type=float, default=55.0)
     parser.add_argument("--anchor-threshold-px", type=float, default=60.0)
     parser.add_argument("--ransac-threshold-px", type=float, default=20.0)
@@ -63,8 +67,23 @@ def _complete_detections(
     return detections[:limit]
 
 
-def _ordered_hand_pairs(detections: list[int]) -> list[tuple[int, int]]:
-    return list(itertools.permutations(detections, 2))
+def _detector_side(hand: dict[str, Any]) -> int | None:
+    value = hand.get("detector_is_right")
+    return None if value is None else int(value)
+
+
+def _ordered_hand_pairs(
+    detections: list[int], groups: dict[int, dict[int, dict[str, Any]]],
+    handedness_mode: str,
+) -> list[tuple[int, int]]:
+    pairs = list(itertools.permutations(detections, 2))
+    if handedness_mode == "strict":
+        pairs = [
+            pair for pair in pairs
+            if _detector_side(groups[pair[0]][0]) in (None, 0)
+            and _detector_side(groups[pair[1]][1]) in (None, 1)
+        ]
+    return pairs
 
 
 def _project_base_points(
@@ -95,6 +114,7 @@ def _match_camera(
     calibration: CameraCalibration,
     threshold_px: float,
     max_detections: int,
+    handedness_mode: str,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, float]]:
     detections = _complete_detections(groups, max_detections)
     candidates: dict[int, list[tuple[int | None, float, dict[str, Any] | None]]] = {}
@@ -104,6 +124,8 @@ def _match_camera(
         ]
         for detection in detections:
             hand = groups[detection][side]
+            if handedness_mode == "strict" and _detector_side(hand) not in (None, side):
+                continue
             error = _candidate_error(anchors[side]["points"], calibration, hand)
             if error <= threshold_px:
                 values.append((detection, error, hand))
@@ -168,6 +190,7 @@ def _evaluate_anchor_assignment(
         matched, errors = _match_camera(
             camera, groups[camera], anchor_results, calibrations[camera],
             args.association_threshold_px, args.max_side_detections,
+            args.detector_handedness,
         )
         for side, hand in matched.items():
             selected_by_side[side][camera] = hand
@@ -234,6 +257,7 @@ def _recover_from_reference(
         matched, errors = _match_camera(
             camera, groups[camera], seeds, calibrations[camera],
             args.temporal_association_threshold_px, args.max_side_detections,
+            args.detector_handedness,
         )
         for side, hand in matched.items():
             selected_by_side[side][camera] = hand
@@ -315,40 +339,56 @@ def main() -> int:
             camera: _complete_detections(groups[camera], args.max_anchor_detections)
             for camera in cameras
         }
-        anchor_pairs = []
-        if all(len(complete_by_camera[camera]) >= 2 for camera in preferred_anchors):
-            anchor_pairs.append(preferred_anchors)
-        anchor_pairs.extend(
+        preferred_available = all(
+            len(complete_by_camera[camera]) >= 2 for camera in preferred_anchors
+        )
+        fallback_pairs = [
             pair for pair in itertools.combinations(cameras, 2)
             if pair != preferred_anchors
             and any(camera in preferred_anchors for camera in pair)
             and all(len(complete_by_camera[camera]) >= 2 for camera in pair)
-        )
-        if not anchor_pairs:
+        ]
+        if not preferred_available and not fallback_pairs:
             reason = "no_two_camera_anchor_with_two_hands"
             rejected.append({"sync_index": sync_index, "reason": reason})
             reasons[reason] += 1
             continue
-        candidates = []
-        for anchor_pair in anchor_pairs:
-            pair_options = [
-                _ordered_hand_pairs(complete_by_camera[camera]) for camera in anchor_pair
+        def evaluate_pairs(anchor_pairs: list[tuple[str, str]]) -> list[dict[str, Any]]:
+            result = []
+            for anchor_pair in anchor_pairs:
+                pair_options = [
+                    _ordered_hand_pairs(
+                        complete_by_camera[camera], groups[camera], args.detector_handedness
+                    )
+                    for camera in anchor_pair
+                ]
+                for detection_pairs in itertools.product(*pair_options):
+                    candidate = _evaluate_anchor_assignment(
+                        anchor_pair, detection_pairs, groups, calibrations, cameras, args
+                    )
+                    if np.isfinite(candidate["cost"]):
+                        missing_preferred = len(set(preferred_anchors) - set(anchor_pair))
+                        candidate["cost"] += 5.0 * missing_preferred
+                        result.append(candidate)
+            return result
+
+        candidates = evaluate_pairs([preferred_anchors]) if preferred_available else []
+        usable = [candidate for candidate in candidates if not _quality_reasons(candidate["results"], args)]
+        if not usable and fallback_pairs:
+            fallback_candidates = evaluate_pairs(fallback_pairs)
+            candidates.extend(fallback_candidates)
+            usable = [
+                candidate for candidate in fallback_candidates
+                if not _quality_reasons(candidate["results"], args)
             ]
-            for detection_pairs in itertools.product(*pair_options):
-                candidate = _evaluate_anchor_assignment(
-                    anchor_pair, detection_pairs, groups, calibrations, cameras, args
-                )
-                if np.isfinite(candidate["cost"]):
-                    missing_preferred = len(set(preferred_anchors) - set(anchor_pair))
-                    candidate["cost"] += 5.0 * missing_preferred
-                    candidates.append(candidate)
         if not candidates:
             reason = "no_valid_anchor_assignment"
             rejected.append({"sync_index": sync_index, "reason": reason})
             reasons[reason] += 1
             continue
         candidates.sort(key=lambda item: item["cost"])
-        best = candidates[0]
+        usable.sort(key=lambda item: item["cost"])
+        best = usable[0] if usable else candidates[0]
         chosen_anchors = tuple(best["anchor_cameras"])
         quality_reasons = _quality_reasons(best["results"], args)
         if quality_reasons:
@@ -356,7 +396,7 @@ def main() -> int:
             rejected.append({"sync_index": sync_index, "reasons": quality_reasons})
             reasons.update(quality_reasons)
             continue
-        margin = candidates[1]["cost"] - best["cost"] if len(candidates) > 1 else None
+        margin = usable[1]["cost"] - best["cost"] if len(usable) > 1 else None
         hands = []
         for side, result in enumerate(best["results"]):
             hand = _serialize_hand(
@@ -430,6 +470,13 @@ def main() -> int:
         for hand in hands for camera, view in hand["views"].items()
         if int(view.get("inlier_joint_count", 0)) > 0
     )
+    detector_handedness_mismatches = sum(
+        1
+        for hand in hands for view in hand["views"].values()
+        if int(view.get("inlier_joint_count", 0)) > 0
+        and view.get("detector_is_right") is not None
+        and int(view["detector_is_right"]) != int(hand["side"])
+    )
     stereo_cross_view = [
         hand["stereo_baseline_comparison"]["cross_view_reprojection_median_px"]
         for hand in hands
@@ -456,6 +503,7 @@ def main() -> int:
         "camera_contribution_hand_counts": {
             camera: camera_contribution_counts.get(camera, 0) for camera in cameras
         },
+        "detector_handedness_mismatch_observation_count": detector_handedness_mismatches,
         "processed_frame_count": len(frame_ids),
         "accepted_frame_count": len(accepted),
         "primary_accepted_frame_count": primary_accepted_count,
@@ -496,6 +544,7 @@ def main() -> int:
             "min_valid_joints": args.min_valid_joints,
             "temporal_recovery_gap": args.temporal_recovery_gap,
             "temporal_association_threshold_px": args.temporal_association_threshold_px,
+            "detector_handedness": args.detector_handedness,
         },
     }
     (output / "summary.json").write_text(
