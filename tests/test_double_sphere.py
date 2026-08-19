@@ -12,6 +12,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from camera_models import RectificationOptions, create_stereo_rectification, project_points
+from camera_models.double_sphere import unproject
 from ego_data.calibration import CameraCalibration, StereoCalibration
 
 
@@ -43,6 +44,18 @@ class DoubleSphereTests(unittest.TestCase):
         ))
         self.assertTrue(valid.all())
         np.testing.assert_allclose(pixels, expected, atol=1e-12)
+
+    def test_unprojection_round_trip(self):
+        camera = ds_camera("camera2", 0.0)
+        points = np.asarray([
+            [0.2, -0.1, 1.2], [-0.1, 0.3, 0.8], [0.45, 0.25, 0.7],
+        ])
+        pixels, projected = project_points(camera, points)
+        rays, unprojected = unproject(camera, pixels)
+        expected = points / np.linalg.norm(points, axis=1, keepdims=True)
+        self.assertTrue(projected.all())
+        self.assertTrue(unprojected.all())
+        np.testing.assert_allclose(rays, expected, atol=1e-10)
 
     def test_rectification_produces_positive_disparity_and_metric_3d(self):
         left = ds_camera("camera2", 0.0)

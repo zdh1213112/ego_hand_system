@@ -197,7 +197,7 @@ def _same_calibration(first: CameraCalibration, second: CameraCalibration) -> bo
 
 def decode_stereo_mcap(
     path: Path,
-    camera_ids: tuple[str, str],
+    camera_ids: tuple[str, ...],
     on_frame: Callable[[DecodedFrame], None],
     max_frames_per_camera: int = 0,
 ) -> tuple[dict[str, CameraCalibration], dict[str, dict], dict[str, str]]:
@@ -266,7 +266,7 @@ def decode_stereo_mcap(
 
 def remux_stereo_mcap(
     path: Path,
-    camera_ids: tuple[str, str],
+    camera_ids: tuple[str, ...],
     output_paths: dict[str, Path],
     max_frames_per_camera: int = 0,
 ) -> tuple[dict[str, CameraCalibration], dict[str, list[dict]], dict[str, dict], dict[str, str]]:

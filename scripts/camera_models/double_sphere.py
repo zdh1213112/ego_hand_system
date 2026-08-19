@@ -33,6 +33,45 @@ def project(camera: CameraCalibration, points: np.ndarray) -> tuple[np.ndarray, 
     return pixels.reshape(points.shape[:-1] + (2,)), valid.reshape(points.shape[:-1])
 
 
+def unproject(camera: CameraCalibration, pixels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Convert Double Sphere image pixels to unit camera-frame rays."""
+    if camera.model != "DS":
+        raise ValueError("Double Sphere unprojection requires a DS camera")
+    pixels = np.asarray(pixels, dtype=np.float64)
+    if pixels.shape[-1] != 2:
+        raise ValueError("pixels must have a final dimension of two")
+    flat = pixels.reshape(-1, 2)
+    fx, fy, cx, cy, xi, alpha = camera.distortion
+    mx = (flat[:, 0] - cx) / fx
+    my = (flat[:, 1] - cy) / fy
+    radius2 = mx * mx + my * my
+    # GEN stores and projects the two DS coefficients in its own convention:
+    #   z1 = alpha * ||p|| + (1-alpha) * z
+    #   m  = (x, y) / (xi * sqrt(x*x+y*y+z1*z1) + z1)
+    # Invert that exact equation rather than the more common Usenko parameter
+    # ordering.  q is z1 divided by the unknown projection denominator.
+    xi_denominator = 1.0 - xi * xi
+    valid = np.all(np.isfinite(flat), axis=1) & (abs(xi_denominator) > 1e-12)
+    xi_root = np.sqrt(np.maximum(1.0 + xi_denominator * radius2, 0.0))
+    q = (1.0 - xi * xi_root) / xi_denominator
+    scale_denominator = q * q + (1.0 - alpha) ** 2 * radius2
+    root_argument = q * q + (1.0 - 2.0 * alpha) * radius2
+    valid &= (scale_denominator > 1e-12) & (root_argument >= 0.0)
+    scale = np.full(len(flat), np.nan, dtype=np.float64)
+    scale[valid] = (
+        alpha * q[valid]
+        + (1.0 - alpha) * np.sqrt(root_argument[valid])
+    ) / scale_denominator[valid]
+    rays = np.full((len(flat), 3), np.nan, dtype=np.float64)
+    rays[valid, 0] = scale[valid] * mx[valid]
+    rays[valid, 1] = scale[valid] * my[valid]
+    rays[valid, 2] = (q[valid] * scale[valid] - alpha) / (1.0 - alpha)
+    norms = np.linalg.norm(rays, axis=1)
+    valid &= norms > 1e-12
+    rays[valid] /= norms[valid, None]
+    return rays.reshape(pixels.shape[:-1] + (3,)), valid.reshape(pixels.shape[:-1])
+
+
 def _rectification_rotations(calibration: StereoCalibration) -> tuple[np.ndarray, np.ndarray]:
     R = calibration.R_left_to_right
     t = calibration.t_left_to_right_m

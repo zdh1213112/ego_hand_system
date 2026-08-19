@@ -125,6 +125,37 @@ export EGO_WILOR_BATCH_SIZE=4
 ./scripts/run_offline.sh all
 ```
 
+### GEN 六目 WiLoR 实验
+
+主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
+`camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
+双假设 WiLoR，以 `camera2/3` 为首选锚点并在缺失时动态选择其他相机对，再让外围
+相机逐只手按重投影匹配，最后用原生 Double-Sphere 射线和 RANSAC 融合 3D 关节：
+
+```bash
+cd <ego_hand_system目录>
+conda activate ego-hand
+./scripts/run_multiview_wilor_experiment.sh \
+  --mcap <MCAP文件绝对路径> \
+  --output <新的六目实验输出目录> \
+  --device cuda \
+  --max-frames 60 \
+  --batch-size 4
+```
+
+确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
+序列。脚本会生成 `fusion_multiview/diagnostic_6view.mp4`，其中六个画面按 3x2 排列；
+绿色 `USED` 显示该相机实际贡献的内点关节，灰色 `INACTIVE` 表示未参与，红色
+`OUTLIER/REJECTED` 显示离群候选或整帧拒绝原因。
+短缺口会由邻近已确认姿态引导六路当前帧重新关联；恢复帧仍须至少两个相机的真实
+观测通过 RANSAC，不直接使用关节插值代替识别。
+`fusion_multiview/summary.json` 还会把六目结果和 `camera2+camera3` 双目结果投影到所有
+可用视角，给出跨视角一致性对比。
+
+该链路目前用于验证六目检测、关联和三角化收益，输出是 GEN base 坐标系的 21 个 3D
+关节 JSONL；尚未接入主流程的时序 MANO 拟合、21-DOF 和训练 NPY 导出。低置信度的
+侧视角由逐相机检测阈值处理，RANSAC 会忽略仍然错误的检测，但诊断视频仍应人工抽查。
+
 路线含义：`mediapipe` 运行现有 MediaPipe→双目三角化→稳定化→MANO→渲染；`wilor`
 只运行 WiLoR 左右目推理；`parallel` 顺序运行并保留两套结果。默认路线是
 `mediapipe`，不设置 `EGO_HAND_ROUTE` 即保持旧行为。
