@@ -129,6 +129,9 @@ export EGO_WILOR_BATCH_SIZE=4
 
 ### GEN 六目 WiLoR 实验
 
+完整设计、算法改进、指标、左右手身份修复和排错记录见
+[`docs/GEN_SIX_CAMERA_WILOR_FUSION.md`](docs/GEN_SIX_CAMERA_WILOR_FUSION.md)。
+
 主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
 `camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
 双假设 WiLoR，以 `camera2/3` 为首选锚点并在缺失时动态选择其他相机对，再让外围
