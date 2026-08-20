@@ -2,12 +2,15 @@
 
 This directory may contain MANO model data in a local working bundle, but Git is
 configured to ignore it. Obtain the assets through the official MANO licensing
-process, then place the two files here with these exact names:
+process. The active WiLoR-compatible fitting, validation and visualization
+pipeline requires only this file:
 
 ```text
-MANO_LEFT.pkl
 MANO_RIGHT.pkl
 ```
+
+`MANO_LEFT.pkl` may remain for legacy experiments, but current runtime code
+does not load it.
 
 Validate the files and the prepared EGO input before fitting:
 

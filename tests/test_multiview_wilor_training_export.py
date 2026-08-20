@@ -15,6 +15,14 @@ from export_multiview_wilor_training_dataset import (
     _full_pose_matrices, _mesh_bbox, _project, _rectify_mano_geometry,
 )
 from prepare_multiview_mano_input import _project_rectified
+from mano_conventions import (
+    MIRROR_X,
+    canonical_projection_rotation,
+    canonical_rectification_rotation,
+    horizontally_flipped_intrinsics,
+    mirror_left_points,
+    physicalize_geometry,
+)
 
 
 class MultiviewWilorTrainingExportTests(unittest.TestCase):
@@ -64,15 +72,14 @@ class MultiviewWilorTrainingExportTests(unittest.TestCase):
         source = root / "third_party" / "MANO"
         model_dir = root / "models" / "mano"
         if (not (source / "mano" / "model.py").is_file()
-                or not all((model_dir / name).is_file()
-                           for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl"))):
+                or not (model_dir / "MANO_RIGHT.pkl").is_file()):
             self.skipTest("external MANO source/licensed assets are not installed")
         mano = import_mano(source)
         rotation = Rotation.from_rotvec([0.12, -0.08, 0.2]).as_matrix().astype(np.float32)
         records = []
         for side in (0, 1):
             model = mano.load(
-                str(model_dir), is_rhand=bool(side), use_pca=False,
+                str(model_dir), is_rhand=True, use_pca=False,
                 num_pca_comps=45, batch_size=1, flat_hand_mean=False,
             ).eval()
             with torch.no_grad():
@@ -103,33 +110,65 @@ class MultiviewWilorTrainingExportTests(unittest.TestCase):
             records,
             source,
             model_dir,
-            {"left": "MANO_LEFT.pkl", "right": "MANO_RIGHT.pkl"},
-            tolerance_m=1e-5,
-        )
-        self.assertLess(vertex_error, 1e-6)
-        self.assertLess(joint_error, 1e-6)
-
-        # The production history is irrelevant: declaring a right-hand model
-        # for a physical left hand makes the checker compare against mirrored
-        # label geometry automatically.
-        right_canonical = records[1][1]
-        mirrored_left = {
-            "side": np.asarray(0.0, np.float32),
-            "vertices": right_canonical["vertices"].copy(),
-            "joints_3d": right_canonical["joints_3d"].copy(),
-            "mano": right_canonical["mano"],
-        }
-        mirrored_left["vertices"][:, 0] *= -1.0
-        mirrored_left["joints_3d"][:, 0] *= -1.0
-        vertex_error, joint_error = _replay_mano(
-            [(Path("left_with_right_model.npy"), mirrored_left)],
-            source,
-            model_dir,
             {"left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl"},
             tolerance_m=1e-5,
         )
         self.assertLess(vertex_error, 1e-6)
         self.assertLess(joint_error, 1e-6)
+
+        with self.assertRaisesRegex(ValueError, "right-canonical replay requires"):
+            _replay_mano(
+                records, source, model_dir,
+                {"left": "MANO_LEFT.pkl", "right": "MANO_RIGHT.pkl"},
+                tolerance_m=1e-5,
+            )
+
+    def test_left_canonical_projection_preserves_physical_pixels(self):
+        rotation = np.asarray(
+            [[0.98, -0.1, 0.17], [0.12, 0.99, -0.03], [-0.16, 0.05, 0.98]],
+            dtype=np.float32,
+        )
+        physical = np.asarray([[0.08, -0.03, 0.55], [-0.04, 0.06, 0.72]], np.float32)
+        canonical = mirror_left_points(physical, "Left")
+        effective = canonical_projection_rotation(rotation, "Left")
+        np.testing.assert_allclose(
+            (effective @ canonical.T).T, (rotation @ physical.T).T, atol=1e-7
+        )
+
+    def test_left_canonical_rectified_image_and_intrinsics_match(self):
+        width = 1600
+        K = np.asarray(
+            [[510.0, 0.0, 790.0], [0.0, 512.0, 645.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        rotation = np.asarray(
+            [[0.99, -0.03, 0.12], [0.04, 1.0, -0.02], [-0.12, 0.02, 0.99]],
+            dtype=np.float32,
+        )
+        physical = np.asarray([[0.05, -0.02, 0.6], [-0.03, 0.04, 0.7]], np.float32)
+        physical_rectified = (rotation @ physical.T).T
+        physical_h = (K @ physical_rectified.T).T
+        physical_px = physical_h[:, :2] / physical_h[:, 2:]
+
+        canonical = mirror_left_points(physical, 0)
+        canonical_rotation = canonical_rectification_rotation(rotation, 0)
+        canonical_rectified = (canonical_rotation @ canonical.T).T
+        canonical_K = horizontally_flipped_intrinsics(K, width)
+        canonical_h = (canonical_K @ canonical_rectified.T).T
+        canonical_px = canonical_h[:, :2] / canonical_h[:, 2:]
+        np.testing.assert_allclose(canonical_px[:, 0], width - 1 - physical_px[:, 0], atol=1e-4)
+        np.testing.assert_allclose(canonical_px[:, 1], physical_px[:, 1], atol=1e-4)
+
+    def test_physical_visualization_roundtrip_and_winding(self):
+        canonical_vertices = np.asarray([[0.1, 0.2, 0.3], [-0.2, 0.1, 0.4]], np.float32)
+        canonical_joints = np.asarray([[0.03, -0.04, 0.5]], np.float32)
+        faces = np.asarray([[1, 4, 7]], np.int32)
+        vertices, joints, physical_faces = physicalize_geometry(
+            canonical_vertices, canonical_joints, faces, "Left"
+        )
+        np.testing.assert_allclose(vertices, canonical_vertices @ MIRROR_X)
+        np.testing.assert_allclose(joints, canonical_joints @ MIRROR_X)
+        np.testing.assert_array_equal(physical_faces, [[1, 7, 4]])
 
     def test_rectified_projection_and_reference_projection_are_consistent(self):
         points = np.asarray([

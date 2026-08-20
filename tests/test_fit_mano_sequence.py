@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import numpy as np
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fit_mano_sequence.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("fit_mano_sequence", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -40,20 +42,36 @@ class FitManoSequenceTests(unittest.TestCase):
         source = Path(os.environ.get("MANO_SOURCE", SCRIPT.parents[1] / "third_party" / "MANO"))
         model_dir = SCRIPT.parents[1] / "models" / "mano"
         assets_available = all(
-            (model_dir / name).is_file() for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl")
+            (model_dir / name).is_file() for name in ("MANO_RIGHT.pkl",)
         )
         if not assets_available or not (source / "mano" / "model.py").is_file():
             self.skipTest("external MANO source/licensed assets are not installed")
         mano = MODULE.import_mano(source)
-        for is_right in (True, False):
-            model = mano.load(
-                str(model_dir), is_rhand=is_right, num_pca_comps=15,
-                batch_size=1, flat_hand_mean=False,
-            )
-            output = model(return_tips=True)
-            self.assertEqual(tuple(output.vertices.shape), (1, 778, 3))
-            self.assertEqual(tuple(output.joints.shape), (1, 21, 3))
-            self.assertTrue(torch.isfinite(output.vertices).all())
+        model = mano.load(
+            str(model_dir), is_rhand=True, num_pca_comps=15,
+            batch_size=1, flat_hand_mean=False,
+        )
+        output = model(return_tips=True)
+        self.assertEqual(tuple(output.vertices.shape), (1, 778, 3))
+        self.assertEqual(tuple(output.joints.shape), (1, 21, 3))
+        self.assertTrue(torch.isfinite(output.vertices).all())
+
+    def test_left_observations_use_right_canonical_space(self):
+        positions = np.asarray([[[0.1, 0.2, 0.7], [-0.05, 0.3, 0.8]]], np.float32)
+        rotation = np.asarray(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            np.float32,
+        )
+        canonical = MODULE.canonicalize_observations(
+            {"positions": positions, "rotation": rotation}, "Left"
+        )
+        np.testing.assert_allclose(canonical["positions"][..., 0], -positions[..., 0])
+        np.testing.assert_allclose(canonical["positions"][..., 1:], positions[..., 1:])
+        np.testing.assert_allclose(
+            np.einsum("ij,bkj->bki", canonical["rotation"], canonical["positions"]),
+            np.einsum("ij,bkj->bki", rotation, positions),
+            atol=1e-7,
+        )
 
     def test_weighted_loss_ignores_nan_at_zero_weight(self):
         import torch

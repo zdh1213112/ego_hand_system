@@ -165,7 +165,6 @@ validate_common_assets() {
     require_file "${EGO_MODEL}"
     require_dir "${EGO_MANO_SOURCE}"
     require_file "${EGO_MANO_SOURCE}/mano/model.py"
-    require_file "${EGO_MANO_MODELS}/MANO_LEFT.pkl"
     require_file "${EGO_MANO_MODELS}/MANO_RIGHT.pkl"
 }
 
@@ -311,8 +310,8 @@ run_stabilize() {
 
 run_fit() {
     local input="${EGO_OUTPUT}/mano_preparation/mano_input.npz"
-    local initial_output="${EGO_OUTPUT}/mano_fit_optimized_initial_rigid"
-    local final_output="${EGO_OUTPUT}/mano_fit_optimized_final"
+    local initial_output="${EGO_OUTPUT}/mano_fit_right_canonical_initial_rigid"
+    local final_output="${EGO_OUTPUT}/mano_fit_right_canonical_final"
     require_file "${input}"
     run_python "${PROJECT_DIR}/scripts/check_mano_assets.py" \
         --mano-source "${EGO_MANO_SOURCE}" \
@@ -330,6 +329,7 @@ run_fit() {
             --input "${input}" \
             --mano-source "${EGO_MANO_SOURCE}" \
             --model-dir "${EGO_MANO_MODELS}" \
+            --mano-convention wilor_right_canonical_v1 \
             --output "${initial_output}" \
             --shape-iterations 300 \
             --pose-iterations 140 \
@@ -365,6 +365,7 @@ run_fit() {
             --input "${input}" \
             --mano-source "${EGO_MANO_SOURCE}" \
             --model-dir "${EGO_MANO_MODELS}" \
+            --mano-convention wilor_right_canonical_v1 \
             --output "${final_output}" \
             --initial-output "${initial_output}" \
             --shape-iterations 0 \
@@ -396,7 +397,7 @@ run_fit() {
 }
 
 run_render() {
-    local mano_fit="${EGO_OUTPUT}/mano_fit_optimized_final"
+    local mano_fit="${EGO_OUTPUT}/mano_fit_right_canonical_final"
     local stereo_frames="${EGO_OUTPUT}/mediapipe_stereo/stereo_frames.csv"
     local output="${EGO_OUTPUT}/mano_overlay_optimized"
     local marker="${output}/summary.json"

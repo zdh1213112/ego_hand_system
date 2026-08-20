@@ -12,6 +12,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from mano_conventions import WILOR_RIGHT_CANONICAL
+
 
 EXPECTED_KEYS = (
     "bbox", "vertices", "joints_3d", "joints_2d", "side", "trans", "K", "mano"
@@ -32,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mano-source", type=Path, help="licensed MANO Python source")
     parser.add_argument(
         "--mano-model-dir", type=Path,
-        help="directory containing the exact MANO_LEFT.pkl and MANO_RIGHT.pkl assets",
+        help="directory containing the exact MANO_RIGHT.pkl asset",
     )
     return parser.parse_args()
 
@@ -98,68 +100,60 @@ def _replay_mano(
     records: list[tuple[Path, dict[str, Any]]], source: Path, model_dir: Path,
     model_by_side: dict[str, str], tolerance_m: float,
 ) -> tuple[float, float]:
-    """Reconstruct geometry using the model declared for each physical side."""
+    """Reconstruct every exported label using only MANO_RIGHT.pkl."""
     import torch
     from scipy.spatial.transform import Rotation
 
     from fit_mano_sequence import MANO_TO_MEDIAPIPE, import_mano
 
+    expected_mapping = {"left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl"}
+    if model_by_side != expected_mapping:
+        raise ValueError(
+            f"right-canonical replay requires {expected_mapping}, got {model_by_side}"
+        )
     mano = import_mano(source)
     maximum_vertex_error = 0.0
     maximum_joint_error = 0.0
-    for side in (0, 1):
-        side_name = "right" if side else "left"
-        model_name = model_by_side[side_name]
-        is_right_model = model_name == "MANO_RIGHT.pkl"
-        selected = [(path, sample) for path, sample in records
-                    if int(float(sample["side"])) == side]
-        if not selected:
-            continue
-        model = mano.load(
-            model_path=str(model_dir), is_rhand=is_right_model, use_pca=False,
-            num_pca_comps=45, batch_size=1, flat_hand_mean=True,
-        ).eval()
-        order = torch.as_tensor(MANO_TO_MEDIAPIPE, dtype=torch.long)
-        for start in range(0, len(selected), 256):
-            chunk = selected[start:start + 256]
-            global_matrices = np.concatenate(
-                [sample["mano"]["global_orient"] for _, sample in chunk], axis=0
+    model = mano.load(
+        model_path=str(model_dir), is_rhand=True, use_pca=False,
+        num_pca_comps=45, batch_size=1, flat_hand_mean=True,
+    ).eval()
+    order = torch.as_tensor(MANO_TO_MEDIAPIPE, dtype=torch.long)
+    for start in range(0, len(records), 256):
+        chunk = records[start:start + 256]
+        global_matrices = np.concatenate(
+            [sample["mano"]["global_orient"] for _, sample in chunk], axis=0
+        )
+        hand_matrices = np.stack(
+            [sample["mano"]["hand_pose"] for _, sample in chunk], axis=0
+        )
+        global_axis_angle = Rotation.from_matrix(global_matrices).as_rotvec()
+        hand_axis_angle = Rotation.from_matrix(
+            hand_matrices.reshape(-1, 3, 3)
+        ).as_rotvec().reshape(len(chunk), 45)
+        betas = np.stack(
+            [sample["mano"]["betas"] for _, sample in chunk], axis=0
+        )
+        with torch.no_grad():
+            output = model(
+                betas=torch.from_numpy(betas).float(),
+                global_orient=torch.from_numpy(global_axis_angle).float(),
+                hand_pose=torch.from_numpy(hand_axis_angle).float(),
+                transl=torch.zeros((len(chunk), 3), dtype=torch.float32),
+                return_verts=True, return_tips=True,
             )
-            hand_matrices = np.stack(
-                [sample["mano"]["hand_pose"] for _, sample in chunk], axis=0
-            )
-            global_axis_angle = Rotation.from_matrix(global_matrices).as_rotvec()
-            hand_axis_angle = Rotation.from_matrix(
-                hand_matrices.reshape(-1, 3, 3)
-            ).as_rotvec().reshape(len(chunk), 45)
-            betas = np.stack(
-                [sample["mano"]["betas"] for _, sample in chunk], axis=0
-            )
-            with torch.no_grad():
-                output = model(
-                    betas=torch.from_numpy(betas).float(),
-                    global_orient=torch.from_numpy(global_axis_angle).float(),
-                    hand_pose=torch.from_numpy(hand_axis_angle).float(),
-                    transl=torch.zeros((len(chunk), 3), dtype=torch.float32),
-                    return_verts=True, return_tips=True,
+            vertices = output.vertices.cpu().numpy()
+            joints = output.joints.index_select(1, order).cpu().numpy()
+        for index, (path, sample) in enumerate(chunk):
+            vertex_error = float(np.max(np.abs(vertices[index] - sample["vertices"])))
+            joint_error = float(np.max(np.abs(joints[index] - sample["joints_3d"])))
+            maximum_vertex_error = max(maximum_vertex_error, vertex_error)
+            maximum_joint_error = max(maximum_joint_error, joint_error)
+            if max(vertex_error, joint_error) > tolerance_m:
+                raise ValueError(
+                    f"{path}: MANO_RIGHT replay error exceeds {tolerance_m}m "
+                    f"(vertices={vertex_error:.6g}m, joints={joint_error:.6g}m)"
                 )
-                vertices = output.vertices.cpu().numpy()
-                joints = output.joints.index_select(1, order).cpu().numpy()
-            for index, (path, sample) in enumerate(chunk):
-                target_vertices = sample["vertices"].copy()
-                target_joints = sample["joints_3d"].copy()
-                if bool(side) != is_right_model:
-                    target_vertices[:, 0] *= -1.0
-                    target_joints[:, 0] *= -1.0
-                vertex_error = float(np.max(np.abs(vertices[index] - target_vertices)))
-                joint_error = float(np.max(np.abs(joints[index] - target_joints)))
-                maximum_vertex_error = max(maximum_vertex_error, vertex_error)
-                maximum_joint_error = max(maximum_joint_error, joint_error)
-                if max(vertex_error, joint_error) > tolerance_m:
-                    raise ValueError(
-                        f"{path}: {model_name} replay error exceeds {tolerance_m}m "
-                        f"(vertices={vertex_error:.6g}m, joints={joint_error:.6g}m)"
-                    )
     return maximum_vertex_error, maximum_joint_error
 
 
@@ -184,6 +178,11 @@ def main() -> int:
     ]
     if len(index_rows) != len(labels):
         raise ValueError("index.jsonl length disagrees with paired files")
+    index_by_stem = {
+        Path(row["label"]).stem: row for row in index_rows
+    }
+    if len(index_by_stem) != len(index_rows):
+        raise ValueError("index.jsonl contains duplicate label names")
 
     import torch
     reference_signature = None
@@ -225,26 +224,45 @@ def main() -> int:
                 f"{args.projection_tolerance_px}px"
             )
         side_counts[int(float(sample["side"]))] += 1
+        index_row = index_by_stem.get(label_path.stem)
+        if index_row is None:
+            raise ValueError(f"{label_path}: missing index.jsonl record")
+        physical_side = int(float(sample["side"]))
+        if int(index_row.get("physical_side", -1)) != physical_side:
+            raise ValueError(f"{label_path}: physical_side disagrees with label side")
+        if index_row.get("stored_image_space") != "right_canonical":
+            raise ValueError(f"{label_path}: image is not marked right_canonical")
+        if bool(index_row.get("stored_image_horizontally_flipped")) != (physical_side == 0):
+            raise ValueError(f"{label_path}: left image canonicalization flag is wrong")
         records.append((label_path, sample))
 
+    mano_convention = summary.get("mano_convention")
     mano_model_by_side = summary.get("mano_model_by_side")
     maximum_mano_vertex_error = None
     maximum_mano_joint_error = None
     if mano_model_by_side is not None:
         if not isinstance(mano_model_by_side, dict) or set(mano_model_by_side) != {"left", "right"}:
             raise ValueError("mano_model_by_side must contain exactly left and right")
-        supported_models = {"MANO_LEFT.pkl", "MANO_RIGHT.pkl"}
-        if any(name not in supported_models for name in mano_model_by_side.values()):
+        expected_mapping = {"left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl"}
+        if mano_model_by_side != expected_mapping:
             raise ValueError(
-                f"mano_model_by_side supports only {sorted(supported_models)}"
+                f"right-canonical dataset requires {expected_mapping}, got {mano_model_by_side}"
             )
         if summary.get("mano_pose_representation") != "rotation_matrix_full_mean":
             raise ValueError(
                 "mano_pose_representation must be rotation_matrix_full_mean"
             )
+        if mano_convention != WILOR_RIGHT_CANONICAL:
+            raise ValueError(f"unsupported MANO convention: {mano_convention}")
+        if summary.get("image_space") != "right_canonical":
+            raise ValueError("right-canonical MANO labels require right-canonical images")
+        if summary.get("side_semantics") != "physical_identity_only":
+            raise ValueError("side must describe physical identity, not request another flip")
+        if summary.get("consumer_must_not_flip_left_again") is not True:
+            raise ValueError("dataset must explicitly prohibit a second left-hand flip")
         if args.mano_source is None or args.mano_model_dir is None:
             raise ValueError(
-                "schema-v2 MANO replay requires --mano-source and --mano-model-dir"
+                "schema-v3 MANO replay requires --mano-source and --mano-model-dir"
             )
         source = args.mano_source.resolve()
         model_dir = args.mano_model_dir.resolve()
@@ -271,6 +289,7 @@ def main() -> int:
         "schema": "000865-compatible",
         "reference_compared": str(args.reference.resolve()) if args.reference else None,
         "maximum_projection_error_px": maximum_projection_error,
+        "mano_convention": mano_convention,
         "mano_model_by_side": mano_model_by_side,
         "maximum_mano_vertex_replay_error_m": maximum_mano_vertex_error,
         "maximum_mano_joint_replay_error_m": maximum_mano_joint_error,

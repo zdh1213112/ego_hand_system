@@ -28,7 +28,7 @@ Options:
   --right-camera CAMERA     Second training view (default camera3)
   --max-samples N           Export sample limit; 0 means all
   --mano-source DIR         Licensed MANO Python source
-  --mano-model-dir DIR      Directory containing MANO_LEFT/RIGHT.pkl
+  --mano-model-dir DIR      Directory containing MANO_RIGHT.pkl
   --reference-npy FILE      Reference schema sample (default 000865.npy)
 EOF
 }
@@ -69,12 +69,12 @@ FUSION="$(cd "$FUSION" && pwd)"
 [[ -s "$FUSION/accepted.jsonl" && -f "$FUSION/summary.json" ]] || {
   echo "Missing completed fusion result: $FUSION" >&2; exit 2;
 }
-[[ -f "$MANO_MODEL_DIR/MANO_LEFT.pkl" && -f "$MANO_MODEL_DIR/MANO_RIGHT.pkl" ]] || {
-  echo "Missing MANO model files in: $MANO_MODEL_DIR" >&2; exit 2;
+[[ -f "$MANO_MODEL_DIR/MANO_RIGHT.pkl" ]] || {
+  echo "Missing MANO_RIGHT.pkl in: $MANO_MODEL_DIR" >&2; exit 2;
 }
 [[ -f "$MANO_SOURCE/mano/model.py" ]] || { echo "Invalid MANO source: $MANO_SOURCE" >&2; exit 2; }
 
-OUTPUT="${OUTPUT:-$EXPERIMENT/wilor_training_labels}"
+OUTPUT="${OUTPUT:-$EXPERIMENT/wilor_training_labels_right_v1}"
 [[ "$OUTPUT" != "/" && "$OUTPUT" != "$EXPERIMENT" ]] || { echo "Unsafe output path" >&2; exit 2; }
 mkdir -p "$OUTPUT"
 OUTPUT="$(cd "$OUTPUT" && pwd)"
@@ -91,14 +91,14 @@ run_python() {
 
 run_python - "$OUTPUT/run_config.json" "$NORMALIZED/manifest.json" \
   "$FUSION/accepted.jsonl" "$MANO_SOURCE/mano/model.py" \
-  "$MANO_MODEL_DIR/MANO_LEFT.pkl" "$MANO_MODEL_DIR/MANO_RIGHT.pkl" \
+  "$MANO_MODEL_DIR/MANO_RIGHT.pkl" \
   "$LEFT_CAMERA" "$RIGHT_CAMERA" "$MAX_SAMPLES" "$DEVICE" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 config_path, *values = sys.argv[1:]
-manifest, accepted, mano_source, mano_left, mano_right, left_camera, right_camera, max_samples, device = values
+manifest, accepted, mano_source, mano_right, left_camera, right_camera, max_samples, device = values
 
 def signature(value):
     path = Path(value).resolve()
@@ -106,11 +106,12 @@ def signature(value):
     return {"path": str(path), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 config = {
-    "schema_version": 2,
-    "algorithm": "strict_six_view_fusion_shared_mano_wilor_dataset_v2",
+    "schema_version": 3,
+    "algorithm": "strict_six_view_fusion_wilor_right_canonical_dataset_v3",
     "normalized_manifest": signature(manifest),
     "fusion_accepted": signature(accepted),
-    "mano_assets": [signature(mano_source), signature(mano_left), signature(mano_right)],
+    "mano_convention": "wilor_right_canonical_v1",
+    "mano_assets": [signature(mano_source), signature(mano_right)],
     "left_camera": left_camera,
     "right_camera": right_camera,
     "max_samples": int(max_samples),
@@ -157,10 +158,11 @@ if [[ ! -f "$MANO_FIT/summary.json" || ! -f "$MANO_FIT/track_0.npz" || ! -f "$MA
     echo "Incomplete MANO fit exists: $MANO_FIT; preserve it and use a new output directory." >&2
     exit 2
   fi
-  echo "[labels] fit one temporally consistent MANO shape/pose track per physical hand"
+  echo "[labels] fit both physical hands in the MANO_RIGHT canonical space"
   run_python "$ROOT/scripts/fit_mano_sequence.py" \
     --input "$MANO_INPUT" \
     --mano-source "$MANO_SOURCE" --model-dir "$MANO_MODEL_DIR" \
+    --mano-convention wilor_right_canonical_v1 \
     --output "$MANO_FIT" --device "$DEVICE" --no-video \
     --shape-iterations 180 --pose-iterations 120 \
     --pose-window 48 --pose-overlap 16 --learning-rate 0.008 \

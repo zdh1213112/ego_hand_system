@@ -83,7 +83,7 @@ def main() -> int:
     print(f"MANO source: {source} revision={revision}")
 
     missing = []
-    for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl"):
+    for name in ("MANO_RIGHT.pkl",):
         path = args.model_dir / name
         if not path.is_file():
             missing.append(str(path))
@@ -109,18 +109,17 @@ def main() -> int:
     fit_spec.loader.exec_module(fit_module)
     mano = fit_module.import_mano(source)
     import torch
-    for handedness, is_right in (("Right", True), ("Left", False)):
-        model = mano.load(
-            str(args.model_dir.resolve()), is_rhand=is_right, num_pca_comps=15,
-            batch_size=1, flat_hand_mean=False,
-        )
-        with torch.no_grad():
-            output = model(return_tips=True)
-        if tuple(output.vertices.shape) != (1, 778, 3) or tuple(output.joints.shape) != (1, 21, 3):
-            raise RuntimeError(f"unexpected {handedness} MANO output shapes")
-        if not np.isfinite(output.vertices.detach().cpu().numpy()).all():
-            raise RuntimeError(f"non-finite {handedness} MANO vertices")
-        print(f"{handedness} MANO forward: vertices=778 joints=21 faces={len(model.faces)}")
+    model = mano.load(
+        str(args.model_dir.resolve()), is_rhand=True, num_pca_comps=15,
+        batch_size=1, flat_hand_mean=False,
+    )
+    with torch.no_grad():
+        output = model(return_tips=True)
+    if tuple(output.vertices.shape) != (1, 778, 3) or tuple(output.joints.shape) != (1, 21, 3):
+        raise RuntimeError("unexpected MANO_RIGHT output shapes")
+    if not np.isfinite(output.vertices.detach().cpu().numpy()).all():
+        raise RuntimeError("non-finite MANO_RIGHT vertices")
+    print(f"MANO_RIGHT forward: vertices=778 joints=21 faces={len(model.faces)}")
     print("MANO assets and prepared input are ready for fitting.")
     return 0
 

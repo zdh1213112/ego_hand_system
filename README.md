@@ -193,7 +193,7 @@ RTX 5060 保持默认的
 ./scripts/run_multiview_wilor_label_export.sh \
   --experiment /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
   --fusion /home/zdh/ego_hand_system/output/gen6_pose_full_v3/fusion_handedness_strict_full \
-  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels \
+  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_right_v1 \
   --conda-env ego-hand \
   --device cuda \
   --max-samples 0
@@ -202,7 +202,7 @@ RTX 5060 保持默认的
 导出结构：
 
 ```text
-wilor_training_labels/dataset/
+wilor_training_labels_right_v1/dataset/
 ├── images/000000.jpg
 ├── labels/000000.npy
 ├── index.jsonl
@@ -210,13 +210,14 @@ wilor_training_labels/dataset/
 └── summary.json
 ```
 
-`images` 和 `labels` 文件名严格一一对应。图片是 `camera2/3` 的共同针孔校正图像，标签内
-的 `K` 与图片一致；不能把原始 DS 鱼眼图片和针孔 `K` 混用。每个标签会严格对照
+`images` 和 `labels` 文件名严格一一对应。图片是 `camera2/3` 的共同针孔校正图像；物理
+左手样本会在校正后水平翻转到 WiLoR 右手规范空间，标签内的 `K` 同步变换。训练读取器
+不得再依据 `side=0` 重复翻转图片或标签。不能把原始 DS 鱼眼图片和针孔 `K` 混用。每个标签会严格对照
 `/home/zdh/tool/npy_decoder/000865.npy` 校验字段顺序、类型、dtype 和 shape，并验证
 `vertices + trans` 经 `K` 投影后与 `joints_2d[778,2]` 一致，并用导出时相同的
-`MANO_LEFT.pkl`/`MANO_RIGHT.pkl` 重放参数，严格比对 778 顶点和 21 关节。六目融合
+`MANO_RIGHT.pkl` 重放左右手全部参数，严格比对 778 顶点和 21 关节。六目融合
 提供可靠 3D 和身份，随后共享 MANO 时序拟合生成顶点、关节、旋转矩阵、shape 和
-translation。
+translation。物理可视化时，左手再从右手规范空间镜像回相机空间并反转三角面绕序。
 
 路线含义：`mediapipe` 运行现有 MediaPipe→双目三角化→稳定化→MANO→渲染；`wilor`
 只运行 WiLoR 左右目推理；`parallel` 顺序运行并保留两套结果。默认路线是
@@ -311,10 +312,10 @@ $EGO_OUTPUT/
     mano_input.npz
     stabilized_landmarks_3d.csv
     summary.json
-  mano_fit_optimized_initial_rigid/
+  mano_fit_right_canonical_initial_rigid/
     summary.json
     track_*.npz
-  mano_fit_optimized_final/
+  mano_fit_right_canonical_final/
     summary.json
     track_*.npz
   mano_overlay_optimized/
@@ -339,7 +340,7 @@ xdg-open "$EGO_OUTPUT/wilor_stereo/right/wilor_annotated.mp4"
 
 1. `check` 失败：先修正输入路径、Conda 环境或模型资产；
 2. 双目视频中手身份跳变：检查 `mediapipe_stereo/stereo_annotated.mp4`，问题位于检测、左右关联或三角化；
-3. 双目点稳定但网格不贴手：检查 `mano_fit_optimized_final/summary.json`；
+3. 双目点稳定但网格不贴手：检查 `mano_fit_right_canonical_final/summary.json`；
 4. GEN 无法解码：单独运行 `python scripts/check_gen_environment.py --mcap "$EGO_MCAP"`；
 5. 某阶段留下不完整目录：保留它用于排错，并换一个新的 `EGO_OUTPUT` 重跑。
 

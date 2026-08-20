@@ -17,6 +17,13 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
+from mano_conventions import (
+    WILOR_RIGHT_CANONICAL,
+    canonical_projection_rotation,
+    mirror_left_points,
+    physicalize_geometry,
+)
+
 
 # otaheri/MANO output order -> MediaPipe semantic order.
 MANO_TO_MEDIAPIPE = np.asarray([
@@ -38,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mano-source", required=True, type=Path)
     parser.add_argument("--model-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--mano-convention", choices=(WILOR_RIGHT_CANONICAL,),
+        default=WILOR_RIGHT_CANONICAL,
+        help="MANO representation; WiLoR uses MANO_RIGHT for both physical hands",
+    )
     parser.add_argument("--initial-output", type=Path, help="warm-start from track_*.npz files")
     parser.add_argument("--track-id", type=int, action="append", help="fit only selected track(s)")
     parser.add_argument("--start-pair", type=int, default=0)
@@ -102,9 +114,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_source_and_assets(source: Path, model_dir: Path) -> str:
-    missing = [model_dir / name for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl")
-               if not (model_dir / name).is_file()]
+def validate_source_and_assets(
+    source: Path, model_dir: Path, mano_convention: str = WILOR_RIGHT_CANONICAL,
+) -> str:
+    if mano_convention != WILOR_RIGHT_CANONICAL:
+        raise ValueError(f"unsupported MANO convention: {mano_convention}")
+    missing = [model_dir / "MANO_RIGHT.pkl"] if not (
+        model_dir / "MANO_RIGHT.pkl"
+    ).is_file() else []
     if missing:
         raise FileNotFoundError(
             "missing licensed MANO model data: " + ", ".join(str(path) for path in missing)
@@ -120,6 +137,28 @@ def validate_source_and_assets(source: Path, model_dir: Path) -> str:
     except (OSError, subprocess.CalledProcessError):
         pass
     return revision
+
+
+def canonicalize_observations(observations: dict, handedness: str) -> dict:
+    """Put a physical track into WiLoR's MANO_RIGHT optimization space."""
+    canonical = dict(observations)
+    canonical["positions"] = mirror_left_points(observations["positions"], handedness)
+    canonical["rotation"] = canonical_projection_rotation(
+        observations["rotation"], handedness
+    )
+    return canonical
+
+
+def physical_result(result: dict, handedness: str, faces: np.ndarray) -> tuple[dict, np.ndarray]:
+    """Return a shallow result copy suitable for physical-space CSV/video output."""
+    vertices, joints, physical_faces = physicalize_geometry(
+        result["vertices"], result["joints"], faces, handedness
+    )
+    converted = dict(result)
+    converted["vertices"] = vertices
+    converted["joints"] = joints
+    converted["translation"] = mirror_left_points(result["translation"], handedness)
+    return converted, physical_faces
 
 
 def import_mano(source: Path):
@@ -972,7 +1011,7 @@ def main() -> int:
         raise ValueError("--max-unobserved-gap must be non-negative")
     source = args.mano_source.resolve()
     model_dir = args.model_dir.resolve()
-    revision = validate_source_and_assets(source, model_dir)
+    revision = validate_source_and_assets(source, model_dir, args.mano_convention)
     mano = import_mano(source)
     import torch
 
@@ -1005,7 +1044,6 @@ def main() -> int:
         if track_id not in selected_track_ids:
             continue
         handedness = str(data["handedness"][track_slot])
-        is_right = handedness.lower() == "right"
         track_has_data = (
             np.any(data["valid"][track_slot, selected_pairs], axis=1)
             | np.any(np.isfinite(data["left_rectified_px"][track_slot, selected_pairs]).all(axis=-1), axis=1)
@@ -1016,7 +1054,7 @@ def main() -> int:
             continue
         track_pairs = selected_pairs[active[0]:active[-1] + 1]
         model = mano.load(
-            model_path=str(model_dir), is_rhand=is_right, use_pca=True,
+            model_path=str(model_dir), is_rhand=True, use_pca=True,
             num_pca_comps=args.pca_components, batch_size=len(track_pairs),
             flat_hand_mean=False,
         ).to(device)
@@ -1041,11 +1079,21 @@ def main() -> int:
             "p1": data["projection_left_rectified"],
             "p2": data["projection_right_rectified"],
         }
+        observations = canonicalize_observations(observations, handedness)
         if initial_output is not None:
             initial_path = initial_output / f"track_{track_id}.npz"
             if not initial_path.is_file():
                 raise FileNotFoundError(f"warm-start track is missing: {initial_path}")
             with np.load(initial_path) as initial_archive:
+                initial_convention = (
+                    str(initial_archive["mano_convention"])
+                    if "mano_convention" in initial_archive.files else None
+                )
+                if initial_convention != args.mano_convention:
+                    raise RuntimeError(
+                        f"warm-start {initial_path} uses {initial_convention!r}, "
+                        f"expected {args.mano_convention!r}"
+                    )
                 initial_pairs = initial_archive["pair_indices"].astype(np.int64)
                 requested_pairs = data["pair_indices"][track_pairs].astype(np.int64)
                 lookup = {int(pair): index for index, pair in enumerate(initial_pairs)}
@@ -1062,15 +1110,21 @@ def main() -> int:
         if np.count_nonzero(observations["valid"]) < 21:
             continue
         result = optimize_track(model, observations, args, device)
+        rendered_result, rendered_faces = physical_result(
+            result, handedness, np.asarray(model.faces)
+        )
         prefix = output / f"track_{track_id}"
         np.savez_compressed(
             prefix.with_suffix(".npz"), pair_indices=data["pair_indices"][track_pairs],
             track_id=np.asarray(track_id), handedness=np.asarray(handedness), faces=model.faces,
+            mano_convention=np.asarray(args.mano_convention),
+            mano_model=np.asarray("MANO_RIGHT.pkl"),
+            geometry_space=np.asarray("right_canonical"),
             **result,
         )
         write_track_csv(
             prefix.with_name(prefix.name + "_joints.csv"), data["pair_indices"][track_pairs],
-            track_id, result,
+            track_id, rendered_result,
         )
         write_parameter_csv(
             prefix.with_name(prefix.name + "_parameters.csv"),
@@ -1079,8 +1133,10 @@ def main() -> int:
         if not args.no_video:
             render_track_video(
                 prefix.with_name(prefix.name + "_fit.mp4"), data["pair_indices"][track_pairs],
-                track_id, handedness, observations["positions"], observations["valid"], result,
-                np.asarray(model.faces), float(data.get("fps", np.asarray(30.0))),
+                track_id, handedness,
+                mirror_left_points(observations["positions"], handedness),
+                observations["valid"], rendered_result, rendered_faces,
+                float(data.get("fps", np.asarray(30.0))),
             )
         finite_errors = result["joint_error_m"][np.isfinite(result["joint_error_m"])] * 1000.0
         left_errors = result["left_reprojection_error_px"][
@@ -1091,6 +1147,8 @@ def main() -> int:
         ]
         summaries.append({
             "track_id": track_id, "handedness": handedness,
+            "mano_model": "MANO_RIGHT.pkl",
+            "geometry_space": "right_canonical",
             "frames": int(len(track_pairs)),
             "render_visible_frames": int(np.count_nonzero(result["render_valid"])),
             "render_hidden_frames": int(np.count_nonzero(~result["render_valid"])),
@@ -1112,6 +1170,12 @@ def main() -> int:
     summary = {
         "stage": "mano_sequence_fitting", "input": str(args.input.resolve()),
         "mano_source": str(source), "mano_revision": revision, "model_dir": str(model_dir),
+        "mano_convention": args.mano_convention,
+        "mano_model": "MANO_RIGHT.pkl",
+        "mano_model_by_side": {
+            "left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl",
+        },
+        "physical_left_transform": "mirror canonical X and reverse triangle winding",
         "torch_version": torch.__version__, "device": str(device),
         "pair_range": [int(data["pair_indices"][selected_pairs[0]]), int(data["pair_indices"][selected_pairs[-1]])],
         "tracks": summaries, "elapsed_seconds": time.perf_counter() - start,

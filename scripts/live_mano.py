@@ -17,6 +17,12 @@ from fit_mano_sequence import (
     run_model,
     weighted_kabsch,
 )
+from mano_conventions import (
+    WILOR_RIGHT_CANONICAL,
+    canonical_projection_rotation,
+    mirror_left_points,
+    physicalize_geometry,
+)
 from render_mano_overlay_angles import (
     build_kinematic_axes,
     compute_hand_end_effector_pose,
@@ -91,6 +97,11 @@ class LiveManoFitter:
             with np.load(path) as archive:
                 if "handedness" not in archive.files or "betas" not in archive.files:
                     continue
+                if (
+                    "mano_convention" not in archive.files
+                    or str(archive["mano_convention"]) != WILOR_RIGHT_CANONICAL
+                ):
+                    continue
                 handedness = str(archive["handedness"])
                 betas = np.asarray(archive["betas"], dtype=np.float32).reshape(10)
                 if np.isfinite(betas).all():
@@ -98,38 +109,32 @@ class LiveManoFitter:
         return profiles
 
     def _model(self, handedness: str):
-        model = self.models.get(handedness)
+        model = self.models.get(WILOR_RIGHT_CANONICAL)
         if model is None:
             model = self.mano.load(
                 model_path=str(self.model_dir),
-                is_rhand=handedness == "Right",
+                is_rhand=True,
                 use_pca=True,
                 num_pca_comps=15,
                 batch_size=1,
                 flat_hand_mean=False,
             ).to(self.device)
             model.eval()
-            self.models[handedness] = model
+            self.models[WILOR_RIGHT_CANONICAL] = model
         return model
 
     def warmup(self) -> None:
-        """Load both licensed models and initialize CUDA kernels before camera streaming."""
+        """Load MANO_RIGHT and initialize CUDA kernels before camera streaming."""
         torch = self.torch
         with torch.no_grad():
-            for handedness in ("Right", "Left"):
-                model = self._model(handedness)
-                betas_np = self.profile_betas.get(
-                    handedness, np.zeros(10, dtype=np.float32)
-                )
-                betas = torch.as_tensor(
-                    betas_np[None], dtype=torch.float32, device=self.device
-                )
-                orient = torch.zeros((1, 3), dtype=torch.float32, device=self.device)
-                pose = torch.zeros((1, 15), dtype=torch.float32, device=self.device)
-                transl = torch.tensor(
-                    ((0.0, 0.0, 0.35),), dtype=torch.float32, device=self.device
-                )
-                run_model(model, betas, orient, pose, transl)
+            model = self._model("Right")
+            betas = torch.zeros((1, 10), dtype=torch.float32, device=self.device)
+            orient = torch.zeros((1, 3), dtype=torch.float32, device=self.device)
+            pose = torch.zeros((1, 15), dtype=torch.float32, device=self.device)
+            transl = torch.tensor(
+                ((0.0, 0.0, 0.35),), dtype=torch.float32, device=self.device
+            )
+            run_model(model, betas, orient, pose, transl)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
@@ -145,7 +150,9 @@ class LiveManoFitter:
         with torch.no_grad():
             _, template_tensor, _ = run_model(model, betas, orient, pose, transl)
         template = template_tensor[0].detach().cpu().numpy()
-        target = np.asarray(match["filtered_points_left"], dtype=np.float64)
+        target = mirror_left_points(
+            np.asarray(match["filtered_points_left"], dtype=np.float64), handedness
+        )
         valid = np.asarray(match["filtered_valid"], dtype=bool)
         confidence = np.asarray(match["depth_quality"], dtype=np.float64)
         palm = np.asarray((0, 1, 5, 9, 13, 17), dtype=np.int64)
@@ -176,13 +183,26 @@ class LiveManoFitter:
         optimizer = torch.optim.Adam([pose, orient, transl], lr=self.learning_rate)
         rest_joints = load_rest_joints(
             self.mano, self.model_dir,
-            {"handedness": handedness, "betas": betas_np},
+            {
+                "handedness": handedness, "betas": betas_np,
+                "mano_convention": WILOR_RIGHT_CANONICAL,
+            },
+        )
+        _, _, physical_faces = physicalize_geometry(
+            template, template, np.asarray(model.faces, dtype=np.int32), handedness
         )
         return {
             "track_id": track_id,
             "handedness": handedness,
             "model": model,
-            "faces": np.asarray(model.faces, dtype=np.int32),
+            "faces": physical_faces,
+            "mano_convention": WILOR_RIGHT_CANONICAL,
+            "projection_rotation": self.torch.as_tensor(
+                canonical_projection_rotation(
+                    self.rotation.detach().cpu().numpy(), handedness
+                ),
+                dtype=self.torch.float32, device=self.device,
+            ),
             "betas": betas,
             "pose": pose,
             "orient": orient,
@@ -232,7 +252,9 @@ class LiveManoFitter:
             predicted = dict(state["last_result"])
             predicted.update({"observed": False, "fit_ms": 0.0, "iterations": 0})
             return predicted
-        target_np = np.asarray(match["filtered_points_left"], dtype=np.float32)
+        target_np = mirror_left_points(
+            np.asarray(match["filtered_points_left"], dtype=np.float32), handedness
+        )
         confidence_np = np.asarray(match["depth_quality"], dtype=np.float32)
         confidence_np = np.maximum(confidence_np, 0.04)
         confidence_np[np.asarray(match["predicted_3d"], dtype=bool)] *= 0.18
@@ -356,8 +378,12 @@ class LiveManoFitter:
             vertices, joints, _ = run_model(model, betas, orient, pose, transl)
             weights3d = confidence * valid
             loss3d = robust_weighted_loss(joints - target, weights3d, 0.005)
-            left_prediction = project_rectified(joints, self.rotation, self.p1)
-            right_prediction = project_rectified(joints, self.rotation, self.p2)
+            left_prediction = project_rectified(
+                joints, state["projection_rotation"], self.p1
+            )
+            right_prediction = project_rectified(
+                joints, state["projection_rotation"], self.p2
+            )
             weights2d_left = torch.clamp(left_quality, min=0.03, max=1.0)
             weights2d_right = torch.clamp(right_quality, min=0.03, max=1.0)
             loss2d = robust_weighted_loss(
@@ -444,12 +470,16 @@ class LiveManoFitter:
         state["previous_left_px"] = current_left_px_np.copy()
         state["updates"] += 1
         angles = extract_kinematic_sequence(
-            axis_angle[None], state["kinematic_axes"], handedness
+            axis_angle[None], state["kinematic_axes"], "Right"
         )[0]
         state["angle_history"].append(angles.copy())
         smoothed_angles = np.median(np.stack(state["angle_history"]), axis=0)
+        physical_vertices, physical_joints, _ = physicalize_geometry(
+            vertices[0].detach().cpu().numpy(), joints[0].detach().cpu().numpy(),
+            state["faces"], handedness,
+        )
         end_effector_pose = compute_hand_end_effector_pose(
-            joints[0].detach().cpu().numpy(), handedness
+            physical_joints, handedness
         )
         if state["trajectory_origin_position"] is None:
             state["trajectory_origin_position"] = end_effector_pose["position_m"].copy()
@@ -467,9 +497,10 @@ class LiveManoFitter:
         result = {
             "track_id": track_id,
             "handedness": handedness,
-            "vertices": vertices[0].detach().cpu().numpy(),
-            "joints": joints[0].detach().cpu().numpy(),
+            "vertices": physical_vertices,
+            "joints": physical_joints,
             "faces": state["faces"],
+            "mano_convention": WILOR_RIGHT_CANONICAL,
             "hand_pose_axis_angle": axis_angle,
             "kinematic_raw": angles,
             "kinematic": smoothed_angles,

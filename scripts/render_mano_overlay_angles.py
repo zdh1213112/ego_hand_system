@@ -27,6 +27,10 @@ from mediapipe_left_baseline import (  # noqa: E402
     unique_file,
 )
 from fit_mano_sequence import MANO_TO_MEDIAPIPE, import_mano  # noqa: E402
+from mano_conventions import (  # noqa: E402
+    WILOR_RIGHT_CANONICAL,
+    physicalize_geometry,
+)
 
 
 FINGER_CHAINS = {
@@ -365,7 +369,8 @@ def load_rest_joints(mano, model_dir: Path, track: dict) -> np.ndarray:
     import torch
 
     model = mano.load(
-        str(model_dir), is_rhand=track["handedness"] == "Right", num_pca_comps=45,
+        str(model_dir), is_rhand=True,
+        num_pca_comps=45,
         batch_size=1, flat_hand_mean=True,
     )
     betas = torch.as_tensor(track["betas"][None], dtype=torch.float32)
@@ -424,6 +429,10 @@ def load_tracks(
             if missing:
                 raise RuntimeError(f"{path} missing arrays: {sorted(missing)}")
             track = {name: archive[name].copy() for name in required}
+            track["mano_convention"] = (
+                str(archive["mano_convention"])
+                if "mano_convention" in archive.files else None
+            )
             track["render_valid"] = (
                 archive["render_valid"].astype(bool).copy()
                 if "render_valid" in archive.files
@@ -432,21 +441,29 @@ def load_tracks(
         pairs = track["pair_indices"].astype(np.int64)
         if len(np.unique(pairs)) != len(pairs):
             raise RuntimeError(f"duplicate pair index in {path}")
+        track["lookup"] = {int(pair): index for index, pair in enumerate(pairs)}
+        if track["render_valid"].shape != (len(pairs),):
+            raise RuntimeError(f"invalid render_valid shape in {path}")
+        track["track_id"] = int(track["track_id"])
+        track["handedness"] = str(track["handedness"])
+        if track["mano_convention"] != WILOR_RIGHT_CANONICAL:
+            raise RuntimeError(
+                f"{path} must use {WILOR_RIGHT_CANONICAL}; "
+                f"got {track['mano_convention']!r}"
+            )
+        track["vertices"], track["joints"], track["faces"] = physicalize_geometry(
+            track["vertices"], track["joints"], track["faces"], track["handedness"]
+        )
         raw = np.asarray([
             [angles[key] for key in ANGLE_KEYS]
             for angles in (compute_joint_angles(joints) for joints in track["joints"])
         ])
         track["angles_raw"] = raw
         track["angles"] = median_filter(raw, angle_radius)
-        track["lookup"] = {int(pair): index for index, pair in enumerate(pairs)}
-        if track["render_valid"].shape != (len(pairs),):
-            raise RuntimeError(f"invalid render_valid shape in {path}")
-        track["track_id"] = int(track["track_id"])
-        track["handedness"] = str(track["handedness"])
         track["rest_joints"] = load_rest_joints(mano, model_dir, track)
         track["kinematic_axes"] = build_kinematic_axes(track["rest_joints"])
         track["kinematic_raw"] = extract_kinematic_sequence(
-            track["hand_pose_axis_angle"], track["kinematic_axes"], track["handedness"]
+            track["hand_pose_axis_angle"], track["kinematic_axes"], "Right"
         )
         track["kinematic"] = median_filter(track["kinematic_raw"], angle_radius)
         end_poses = [
@@ -988,8 +1005,8 @@ def main() -> int:
         source_video_description = str(left_video_path)
     if not (mano_source / "mano" / "model.py").is_file():
         raise FileNotFoundError(f"invalid MANO source: {mano_source}")
-    if not all((model_dir / name).is_file() for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl")):
-        raise FileNotFoundError(f"missing licensed MANO models in {model_dir}")
+    if not (model_dir / "MANO_RIGHT.pkl").is_file():
+        raise FileNotFoundError(f"missing licensed MANO_RIGHT.pkl in {model_dir}")
     tracks = load_tracks(fit_dir, args.angle_radius, mano_source, model_dir)
     frame_rows = load_frame_rows(frames_path, args.start_pair, args.max_pairs)
 

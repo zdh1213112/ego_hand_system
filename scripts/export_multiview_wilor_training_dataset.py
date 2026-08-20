@@ -17,6 +17,12 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from ego_data.dataset import SequentialVideoReader
+from mano_conventions import (
+    MIRROR_X,
+    WILOR_RIGHT_CANONICAL,
+    canonical_rectification_rotation,
+    horizontally_flipped_intrinsics,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -174,9 +180,22 @@ def main() -> int:
     if not fit_summary_path.is_file():
         raise FileNotFoundError(fit_summary_path)
     fit_summary = json.loads(fit_summary_path.read_text(encoding="utf-8"))
+    if fit_summary.get("mano_convention") != WILOR_RIGHT_CANONICAL:
+        raise ValueError(
+            f"MANO fit must use {WILOR_RIGHT_CANONICAL}, got "
+            f"{fit_summary.get('mano_convention')!r}"
+        )
+    expected_model_mapping = {
+        "left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl",
+    }
+    if fit_summary.get("mano_model_by_side") != expected_model_mapping:
+        raise ValueError(
+            f"MANO fit model mapping must be {expected_model_mapping}, got "
+            f"{fit_summary.get('mano_model_by_side')!r}"
+        )
     model_dir = Path(fit_summary["model_dir"]).expanduser().resolve()
     mano_assets = {}
-    for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl"):
+    for name in ("MANO_RIGHT.pkl",):
         path = model_dir / name
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -212,6 +231,18 @@ def main() -> int:
         )
     K = rectification["P1"][:, :3].copy().astype(np.float32)
     right_offset = np.linalg.solve(K, rectification["P2"][:, 3]).astype(np.float32)
+    canonical_K = {
+        0: horizontally_flipped_intrinsics(K, rectification["image_size"][0]),
+        1: K.copy(),
+    }
+    canonical_rotation = {
+        side: canonical_rectification_rotation(rectification["R1"], side)
+        for side in (0, 1)
+    }
+    canonical_right_offset = {
+        0: (MIRROR_X @ right_offset).astype(np.float32),
+        1: right_offset.copy(),
+    }
     sync_rows = _load_sync_rows(dataset / "multiview_frames.csv")
     fusion_rows = _load_fusion(fusion / "accepted.jsonl")
     tracks = {}
@@ -221,6 +252,14 @@ def main() -> int:
         if not path.is_file():
             raise FileNotFoundError(path)
         tracks[side] = _load_track(path)
+        track_convention = (
+            str(tracks[side]["mano_convention"])
+            if "mano_convention" in tracks[side] else None
+        )
+        if track_convention != WILOR_RIGHT_CANONICAL:
+            raise ValueError(
+                f"{path} uses {track_convention!r}, expected {WILOR_RIGHT_CANONICAL!r}"
+            )
         track_lookup[side] = {
             int(pair): index for index, pair in enumerate(tracks[side]["pair_indices"])
         }
@@ -262,12 +301,12 @@ def main() -> int:
                     local_vertices,
                     local_joints,
                     translation,
-                    rectification["R1"],
+                    canonical_rotation[side],
                 )
             )
             global_rectified, hand_pose = _full_pose_matrices(
                 track["full_pose_axis_angle"][frame_index],
-                rectification["R1"],
+                canonical_rotation[side],
             )
 
             for camera in cameras:
@@ -294,9 +333,10 @@ def main() -> int:
                     continue
                 trans = trans_left.copy()
                 if camera == right_camera:
-                    trans += right_offset
+                    trans += canonical_right_offset[side]
+                sample_K = canonical_K[side]
                 try:
-                    projected = _project(local_rectified, trans, K)
+                    projected = _project(local_rectified, trans, sample_K)
                 except ValueError as error:
                     rejected.append({
                         "sync_index": sync_index, "side": side, "camera": camera,
@@ -320,7 +360,7 @@ def main() -> int:
                     "joints_2d_array": projected,
                     "side": np.asarray(float(side), dtype=np.float32),
                     "trans": trans,
-                    "K": K.copy(),
+                    "K": sample_K.copy(),
                     "mano": {
                         "global_orient": global_rectified.copy(),
                         "hand_pose": hand_pose.copy(),
@@ -337,6 +377,9 @@ def main() -> int:
                         "camera": camera,
                         "side": side,
                         "handedness": "right" if side else "left",
+                        "physical_side": side,
+                        "stored_image_space": "right_canonical",
+                        "stored_image_horizontally_flipped": bool(side == 0),
                         "camera_inlier_joint_count": int(view["inlier_joint_count"]),
                         "fit_reprojection_median_px": median_error,
                         "fit_reprojection_p95_px": p95_error,
@@ -410,9 +453,12 @@ def main() -> int:
                         borderMode=cv2.BORDER_CONSTANT,
                     )
                     for item in grouped[sync_index]:
+                        stored_image = (
+                            cv2.flip(rectified, 1) if item["side"] == 0 else rectified
+                        )
                         image_path = image_root / f"{item['stem']}.jpg"
                         if not cv2.imwrite(
-                            str(image_path), rectified,
+                            str(image_path), stored_image,
                             [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
                         ):
                             raise RuntimeError(f"cannot write image: {image_path}")
@@ -442,7 +488,7 @@ def main() -> int:
             camera: sum(item["camera"] == camera for item in pending) for camera in cameras
         }
         summary = {
-            "schema_version": 2,
+            "schema_version": 3,
             "stage": "six_view_refined_wilor_training_dataset",
             "schema_reference": "000865.npy",
             "sample_count": len(pending),
@@ -452,14 +498,22 @@ def main() -> int:
             "camera_counts": camera_counts,
             "rejected_count": len(rejected),
             "image_size": list(rectification["image_size"]),
-            "K": K.tolist(),
+            "K_by_physical_side": {
+                "left": canonical_K[0].tolist(), "right": canonical_K[1].tolist(),
+            },
             "cameras": list(cameras),
             "source": "strict six-view WiLoR fusion + shared MANO sequence fit",
             "mano_model_by_side": {
-                "left": "MANO_LEFT.pkl",
+                "left": "MANO_RIGHT.pkl",
                 "right": "MANO_RIGHT.pkl",
             },
+            "mano_convention": WILOR_RIGHT_CANONICAL,
             "mano_pose_representation": "rotation_matrix_full_mean",
+            "mano_model": "MANO_RIGHT.pkl",
+            "image_space": "right_canonical",
+            "side_semantics": "physical_identity_only",
+            "physical_left_image_transform": "horizontal_flip_after_rectification",
+            "consumer_must_not_flip_left_again": True,
             "mano_source_revision": fit_summary.get("mano_revision", "unknown"),
             "mano_assets": mano_assets,
             "quality_thresholds": {
