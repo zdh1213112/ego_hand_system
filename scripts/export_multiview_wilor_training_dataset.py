@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -97,6 +98,59 @@ def _finite_error(values: np.ndarray) -> tuple[float, float]:
     return float(np.median(finite)), float(np.percentile(finite, 95))
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _rectify_mano_geometry(
+    local_vertices: np.ndarray,
+    local_joints: np.ndarray,
+    translation: np.ndarray,
+    rotation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Rotate a MANO result while preserving its root-centred convention.
+
+    MANO applies ``global_orient`` around its wrist joint rather than the
+    coordinate origin.  Left-multiplying the global rotation therefore moves
+    the local root by ``rotation @ root - root``.  Move that offset from the
+    local geometry into camera translation so both MANO replay and camera-space
+    projection remain exact.
+    """
+    local_vertices = np.asarray(local_vertices, dtype=np.float32)
+    local_joints = np.asarray(local_joints, dtype=np.float32)
+    translation = np.asarray(translation, dtype=np.float32)
+    rotation = np.asarray(rotation, dtype=np.float32)
+    root_offset = (rotation @ local_joints[0] - local_joints[0]).astype(np.float32)
+    vertices = (
+        (rotation @ local_vertices.T).T - root_offset[None]
+    ).astype(np.float32)
+    joints = (
+        (rotation @ local_joints.T).T - root_offset[None]
+    ).astype(np.float32)
+    rectified_translation = (
+        rotation @ translation + root_offset
+    ).astype(np.float32)
+    return vertices, joints, rectified_translation, root_offset
+
+
+def _full_pose_matrices(
+    full_pose_axis_angle: np.ndarray,
+    rectification_rotation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert the complete mean-inclusive MANO pose to rectified matrices."""
+    full_pose = np.asarray(full_pose_axis_angle, dtype=np.float64).reshape(16, 3)
+    global_matrix = Rotation.from_rotvec(full_pose[0]).as_matrix()
+    global_rectified = (
+        np.asarray(rectification_rotation, dtype=np.float64) @ global_matrix
+    ).astype(np.float32)[None]
+    hand_pose = Rotation.from_rotvec(full_pose[1:]).as_matrix().astype(np.float32)
+    return global_rectified, hand_pose
+
+
 def main() -> int:
     args = parse_args()
     if args.max_samples < 0:
@@ -116,6 +170,21 @@ def main() -> int:
     output = args.output.resolve()
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
+    fit_summary_path = fit_root / "summary.json"
+    if not fit_summary_path.is_file():
+        raise FileNotFoundError(fit_summary_path)
+    fit_summary = json.loads(fit_summary_path.read_text(encoding="utf-8"))
+    model_dir = Path(fit_summary["model_dir"]).expanduser().resolve()
+    mano_assets = {}
+    for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl"):
+        path = model_dir / name
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        mano_assets[name] = {
+            "path": str(path),
+            "sha256": _sha256(path),
+            "size_bytes": path.stat().st_size,
+        }
     manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("dataset_type") != "normalized_multiview":
         raise ValueError(f"not a normalized multiview dataset: {dataset}")
@@ -184,18 +253,22 @@ def main() -> int:
             local_joints = (
                 track["joints"][frame_index].astype(np.float32) - translation[None]
             )
-            local_rectified = (rectification["R1"] @ local_vertices.T).T.astype(np.float32)
-            joints_rectified = (rectification["R1"] @ local_joints.T).T.astype(np.float32)
-            trans_left = (rectification["R1"] @ translation).astype(np.float32)
-            global_matrix = Rotation.from_rotvec(
-                track["global_orient"][frame_index].astype(np.float64)
-            ).as_matrix()
-            global_rectified = (
-                rectification["R1"].astype(np.float64) @ global_matrix
-            ).astype(np.float32)[None]
-            hand_pose = Rotation.from_rotvec(
-                track["hand_pose_axis_angle"][frame_index].reshape(-1, 3)
-            ).as_matrix().astype(np.float32).reshape(15, 3, 3)
+            if "full_pose_axis_angle" not in track:
+                raise ValueError(
+                    f"track {side} is missing mean-inclusive full_pose_axis_angle"
+                )
+            local_rectified, joints_rectified, trans_left, root_offset = (
+                _rectify_mano_geometry(
+                    local_vertices,
+                    local_joints,
+                    translation,
+                    rectification["R1"],
+                )
+            )
+            global_rectified, hand_pose = _full_pose_matrices(
+                track["full_pose_axis_angle"][frame_index],
+                rectification["R1"],
+            )
 
             for camera in cameras:
                 view = hand.get("views", {}).get(camera)
@@ -268,6 +341,7 @@ def main() -> int:
                         "fit_reprojection_median_px": median_error,
                         "fit_reprojection_p95_px": p95_error,
                         "fusion_mode": hand.get("fusion_mode"),
+                        "mano_root_offset_m": root_offset.tolist(),
                     },
                 })
 
@@ -368,7 +442,7 @@ def main() -> int:
             camera: sum(item["camera"] == camera for item in pending) for camera in cameras
         }
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "stage": "six_view_refined_wilor_training_dataset",
             "schema_reference": "000865.npy",
             "sample_count": len(pending),
@@ -381,6 +455,10 @@ def main() -> int:
             "K": K.tolist(),
             "cameras": list(cameras),
             "source": "strict six-view WiLoR fusion + shared MANO sequence fit",
+            "mano_convention": "native_side_specific_v1",
+            "mano_pose_representation": "rotation_matrix_full_mean",
+            "mano_source_revision": fit_summary.get("mano_revision", "unknown"),
+            "mano_assets": mano_assets,
             "quality_thresholds": {
                 "min_camera_inlier_joints": args.min_camera_inlier_joints,
                 "max_reprojection_median_px": args.max_reprojection_median_px,
