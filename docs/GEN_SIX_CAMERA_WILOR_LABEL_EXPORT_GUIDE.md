@@ -55,7 +55,7 @@ GEN base 坐标系左右手 21x3 三维关节
 images/xxxxxx.jpg + labels/xxxxxx.npy
         |
         v
-与 000865.npy 对照校验 + 图片/标签配对校验
+与 000865.npy 对照 + 图片配对 + 左右 MANO 参数重放校验
 ```
 
 训练图片使用 `camera2/3` 的共同针孔校正视图，但三维标签仍来自六目融合。不能把原始
@@ -241,6 +241,12 @@ MANO 拟合使用：
 - 每帧独立 pose，并执行速度、加速度和窗口边界约束；
 - camera2/3 校正平面二维投影约束。
 
+导出时保存 `full_pose_axis_angle`（包含 MANO pose mean）对应的旋转矩阵，不能用
+仅包含 PCA 增量的 `hand_pose_axis_angle` 代替。校正旋转绕 wrist 根节点作用：导出器
+会将 `R @ wrist - wrist` 从局部顶点/关节移入 `trans`，使参数重放和相机空间投影
+同时保持一致。`summary.json` 会声明 `native_side_specific_v1` 并记录两个 MANO
+资产的 SHA-256。
+
 ## 7. 输出目录
 
 ```text
@@ -322,7 +328,9 @@ cd /home/zdh/ego_hand_system
 PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
   python scripts/check_wilor_training_dataset.py \
   output/gen6_pose_full_v3/wilor_training_labels/dataset \
-  --reference /home/zdh/tool/npy_decoder/000865.npy
+  --reference /home/zdh/tool/npy_decoder/000865.npy \
+  --mano-source third_party/MANO \
+  --mano-model-dir models/mano
 ```
 
 校验内容：
@@ -333,6 +341,8 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 4. bbox 位于配对图片内；
 5. 所有网格顶点位于相机前方；
 6. 778 个顶点通过 `K` 投影后与 `joints_2d` 一致。
+7. 左手参数用 `MANO_LEFT.pkl`、右手参数用 `MANO_RIGHT.pkl` 重建；778 顶点和
+   21 关节与标签一致，并校验模型文件 SHA-256 与导出时完全相同。
 
 成功输出示例：
 
@@ -342,7 +352,10 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
   "total_sample_count": 4117,
   "paired_images": 4117,
   "schema": "000865-compatible",
-  "maximum_projection_error_px": 0.0
+  "maximum_projection_error_px": 0.0,
+  "mano_convention": "native_side_specific_v1",
+  "maximum_mano_vertex_replay_error_m": 1.0e-8,
+  "maximum_mano_joint_replay_error_m": 1.0e-8
 }
 ```
 
@@ -442,4 +455,3 @@ camera2/3 是稳定主视角，并且可以构造共同针孔校正平面，使�
 | `scripts/fit_mano_sequence.py` | 左右手 MANO 时序拟合 |
 | `scripts/export_multiview_wilor_training_dataset.py` | 校正图片和 NPY 成对导出 |
 | `scripts/check_wilor_training_dataset.py` | 最终训练数据严格校验 |
-
