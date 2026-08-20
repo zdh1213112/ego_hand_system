@@ -193,7 +193,16 @@ RTX 5090D 服务器使用：
   --max-frames 0 \
   --batch-size 16
 ```
-
+```bash
+./scripts/run_multiview_wilor_experiment.sh \
+  --mcap /home/p3/data_sda1/ego_hand_system/recordings/20260820/DAS-Ego_20260820112315_none_none_689985_a9952163.mcap \
+  --output output/gen6_full_5090d \
+  --conda-env ego-hand \
+  --device cuda \
+  --gpu-profile rtx5090d \
+  --max-frames 0 \
+  --batch-size 16
+```
 如果 5090D 显存不足，先把 `--batch-size 16` 改为 `8`。如果当前 PyTorch/驱动组合不能
 使用编译优化，可加：
 
