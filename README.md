@@ -213,8 +213,10 @@ wilor_training_labels/dataset/
 `images` 和 `labels` 文件名严格一一对应。图片是 `camera2/3` 的共同针孔校正图像，标签内
 的 `K` 与图片一致；不能把原始 DS 鱼眼图片和针孔 `K` 混用。每个标签会严格对照
 `/home/zdh/tool/npy_decoder/000865.npy` 校验字段顺序、类型、dtype 和 shape，并验证
-`vertices + trans` 经 `K` 投影后与 `joints_2d[778,2]` 一致。六目融合提供可靠 3D 和
-身份，随后共享 MANO 时序拟合生成 778 顶点、21 关节、旋转矩阵、shape 和 translation。
+`vertices + trans` 经 `K` 投影后与 `joints_2d[778,2]` 一致，并用导出时相同的
+`MANO_LEFT.pkl`/`MANO_RIGHT.pkl` 重放参数，严格比对 778 顶点和 21 关节。六目融合
+提供可靠 3D 和身份，随后共享 MANO 时序拟合生成顶点、关节、旋转矩阵、shape 和
+translation。
 
 路线含义：`mediapipe` 运行现有 MediaPipe→双目三角化→稳定化→MANO→渲染；`wilor`
 只运行 WiLoR 左右目推理；`parallel` 顺序运行并保留两套结果。默认路线是

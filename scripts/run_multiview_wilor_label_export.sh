@@ -106,8 +106,8 @@ def signature(value):
     return {"path": str(path), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 config = {
-    "schema_version": 1,
-    "algorithm": "strict_six_view_fusion_shared_mano_wilor_dataset_v1",
+    "schema_version": 2,
+    "algorithm": "strict_six_view_fusion_shared_mano_wilor_dataset_v2",
     "normalized_manifest": signature(manifest),
     "fusion_accepted": signature(accepted),
     "mano_assets": [signature(mano_source), signature(mano_left), signature(mano_right)],
@@ -189,7 +189,10 @@ else
   echo "[labels] reuse completed paired training dataset"
 fi
 
-CHECK_ARGS=("$ROOT/scripts/check_wilor_training_dataset.py" "$TRAINING_DATASET")
+CHECK_ARGS=(
+  "$ROOT/scripts/check_wilor_training_dataset.py" "$TRAINING_DATASET"
+  --mano-source "$MANO_SOURCE" --mano-model-dir "$MANO_MODEL_DIR"
+)
 [[ -f "$REFERENCE_NPY" ]] && CHECK_ARGS+=(--reference "$REFERENCE_NPY")
 echo "[labels] validate image/NPY pairing, schema and exact mesh projection"
 run_python "${CHECK_ARGS[@]}"
