@@ -926,7 +926,7 @@ cd /home/zdh/ego_hand_system
 ./scripts/run_multiview_wilor_label_export.sh \
   --experiment /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
   --fusion /home/zdh/ego_hand_system/output/gen6_pose_full_v3/fusion_handedness_strict_full \
-  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_right_v1 \
+  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_physical_v1 \
   --conda-env ego-hand \
   --device cuda \
   --max-samples 0
@@ -981,10 +981,11 @@ mano.betas          numpy.float32 (10,)
 4. `vertices + trans` 全部位于相机前方；
 5. `K @ (vertices + trans)` 的投影与 `joints_2d` 最大误差不超过 `1e-3 px`；
 6. summary、index 和磁盘实际文件数量一致；
-7. 不论 `side` 是 0 还是 1，都只用 `MANO_RIGHT.pkl` 重放 778 顶点和 21 关节。
+7. 不论 `side` 是 0 还是 1，都只用 `MANO_RIGHT.pkl` 重放参数；左手标签几何先
+   临时镜像到右手规范，再比较 778 顶点和 21 关节。
 
 下面是旧版 side-specific 导出的历史结果，只用于数量和质量门限参考；它不是当前
-`wilor_right_canonical_v1` 正式训练数据，必须用上面的新输出目录重新生成：
+“物理侧几何 + MANO_RIGHT 参数”的正式训练数据，必须用上面的新输出目录重新生成：
 
 | 指标 | 数值 |
 |---|---:|
@@ -1003,5 +1004,5 @@ mano.betas          numpy.float32 (10,)
 正式数据位置：
 
 ```text
-/home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_right_v1/dataset
+/home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_physical_v1/dataset
 ```
