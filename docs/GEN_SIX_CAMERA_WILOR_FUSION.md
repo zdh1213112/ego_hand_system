@@ -915,6 +915,9 @@ output/gen6_pose_full_v3/fusion_multiview/
 
 ## 20. 接入 WiLoR 训练标注
 
+本节记录设计约束和本次结果。面向实际操作的独立手册见
+[`GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md`](GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md)。
+
 六目识别确认无左右手交换后，使用：
 
 ```bash

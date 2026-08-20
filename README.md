@@ -131,6 +131,8 @@ export EGO_WILOR_BATCH_SIZE=4
 
 完整设计、算法改进、指标、左右手身份修复和排错记录见
 [`docs/GEN_SIX_CAMERA_WILOR_FUSION.md`](docs/GEN_SIX_CAMERA_WILOR_FUSION.md)。
+从原始 MCAP 到 `images/*.jpg + labels/*.npy` 的完整操作步骤见
+[`docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md`](docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md)。
 
 主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
 `camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
