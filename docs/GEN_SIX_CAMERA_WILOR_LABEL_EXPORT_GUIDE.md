@@ -253,8 +253,8 @@ MANO 拟合使用：
 导出时保存 `full_pose_axis_angle`（包含 MANO pose mean）对应的旋转矩阵，不能用
 仅包含 PCA 增量的 `hand_pose_axis_angle` 代替。校正旋转绕 wrist 根节点作用：导出器
 会将 `R @ wrist - wrist` 从局部顶点/关节移入 `trans`，使参数重放和相机空间投影
-同时保持一致。`summary.json` 会声明 `native_side_specific_v1` 并记录两个 MANO
-资产的 SHA-256。
+同时保持一致。`summary.json` 通过 `mano_model_by_side` 直接声明物理左、右手
+分别使用的 PKL，并记录所用 MANO 资产的 SHA-256。
 
 ## 7. 输出目录
 
@@ -362,7 +362,10 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
   "paired_images": 4117,
   "schema": "000865-compatible",
   "maximum_projection_error_px": 0.0,
-  "mano_convention": "native_side_specific_v1",
+  "mano_model_by_side": {
+    "left": "MANO_LEFT.pkl",
+    "right": "MANO_RIGHT.pkl"
+  },
   "maximum_mano_vertex_replay_error_m": 1.0e-8,
   "maximum_mano_joint_replay_error_m": 1.0e-8
 }

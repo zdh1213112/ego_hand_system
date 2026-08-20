@@ -100,7 +100,33 @@ class MultiviewWilorTrainingExportTests(unittest.TestCase):
                 },
             }))
         vertex_error, joint_error = _replay_mano(
-            records, source, model_dir, tolerance_m=1e-5
+            records,
+            source,
+            model_dir,
+            {"left": "MANO_LEFT.pkl", "right": "MANO_RIGHT.pkl"},
+            tolerance_m=1e-5,
+        )
+        self.assertLess(vertex_error, 1e-6)
+        self.assertLess(joint_error, 1e-6)
+
+        # The production history is irrelevant: declaring a right-hand model
+        # for a physical left hand makes the checker compare against mirrored
+        # label geometry automatically.
+        right_canonical = records[1][1]
+        mirrored_left = {
+            "side": np.asarray(0.0, np.float32),
+            "vertices": right_canonical["vertices"].copy(),
+            "joints_3d": right_canonical["joints_3d"].copy(),
+            "mano": right_canonical["mano"],
+        }
+        mirrored_left["vertices"][:, 0] *= -1.0
+        mirrored_left["joints_3d"][:, 0] *= -1.0
+        vertex_error, joint_error = _replay_mano(
+            [(Path("left_with_right_model.npy"), mirrored_left)],
+            source,
+            model_dir,
+            {"left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl"},
+            tolerance_m=1e-5,
         )
         self.assertLess(vertex_error, 1e-6)
         self.assertLess(joint_error, 1e-6)

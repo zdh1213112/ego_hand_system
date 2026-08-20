@@ -96,9 +96,9 @@ def _sha256(path: Path) -> str:
 
 def _replay_mano(
     records: list[tuple[Path, dict[str, Any]]], source: Path, model_dir: Path,
-    tolerance_m: float,
+    model_by_side: dict[str, str], tolerance_m: float,
 ) -> tuple[float, float]:
-    """Reconstruct exported local geometry from side-specific MANO labels."""
+    """Reconstruct geometry using the model declared for each physical side."""
     import torch
     from scipy.spatial.transform import Rotation
 
@@ -108,12 +108,15 @@ def _replay_mano(
     maximum_vertex_error = 0.0
     maximum_joint_error = 0.0
     for side in (0, 1):
+        side_name = "right" if side else "left"
+        model_name = model_by_side[side_name]
+        is_right_model = model_name == "MANO_RIGHT.pkl"
         selected = [(path, sample) for path, sample in records
                     if int(float(sample["side"])) == side]
         if not selected:
             continue
         model = mano.load(
-            model_path=str(model_dir), is_rhand=bool(side), use_pca=False,
+            model_path=str(model_dir), is_rhand=is_right_model, use_pca=False,
             num_pca_comps=45, batch_size=1, flat_hand_mean=True,
         ).eval()
         order = torch.as_tensor(MANO_TO_MEDIAPIPE, dtype=torch.long)
@@ -143,13 +146,18 @@ def _replay_mano(
                 vertices = output.vertices.cpu().numpy()
                 joints = output.joints.index_select(1, order).cpu().numpy()
             for index, (path, sample) in enumerate(chunk):
-                vertex_error = float(np.max(np.abs(vertices[index] - sample["vertices"])))
-                joint_error = float(np.max(np.abs(joints[index] - sample["joints_3d"])))
+                target_vertices = sample["vertices"].copy()
+                target_joints = sample["joints_3d"].copy()
+                if bool(side) != is_right_model:
+                    target_vertices[:, 0] *= -1.0
+                    target_joints[:, 0] *= -1.0
+                vertex_error = float(np.max(np.abs(vertices[index] - target_vertices)))
+                joint_error = float(np.max(np.abs(joints[index] - target_joints)))
                 maximum_vertex_error = max(maximum_vertex_error, vertex_error)
                 maximum_joint_error = max(maximum_joint_error, joint_error)
                 if max(vertex_error, joint_error) > tolerance_m:
                     raise ValueError(
-                        f"{path}: side-specific MANO replay error exceeds {tolerance_m}m "
+                        f"{path}: {model_name} replay error exceeds {tolerance_m}m "
                         f"(vertices={vertex_error:.6g}m, joints={joint_error:.6g}m)"
                     )
     return maximum_vertex_error, maximum_joint_error
@@ -219,12 +227,21 @@ def main() -> int:
         side_counts[int(float(sample["side"]))] += 1
         records.append((label_path, sample))
 
-    mano_convention = summary.get("mano_convention")
+    mano_model_by_side = summary.get("mano_model_by_side")
     maximum_mano_vertex_error = None
     maximum_mano_joint_error = None
-    if mano_convention is not None:
-        if mano_convention != "native_side_specific_v1":
-            raise ValueError(f"unsupported MANO convention: {mano_convention}")
+    if mano_model_by_side is not None:
+        if not isinstance(mano_model_by_side, dict) or set(mano_model_by_side) != {"left", "right"}:
+            raise ValueError("mano_model_by_side must contain exactly left and right")
+        supported_models = {"MANO_LEFT.pkl", "MANO_RIGHT.pkl"}
+        if any(name not in supported_models for name in mano_model_by_side.values()):
+            raise ValueError(
+                f"mano_model_by_side supports only {sorted(supported_models)}"
+            )
+        if summary.get("mano_pose_representation") != "rotation_matrix_full_mean":
+            raise ValueError(
+                "mano_pose_representation must be rotation_matrix_full_mean"
+            )
         if args.mano_source is None or args.mano_model_dir is None:
             raise ValueError(
                 "schema-v2 MANO replay requires --mano-source and --mano-model-dir"
@@ -234,15 +251,18 @@ def main() -> int:
         if not (source / "mano" / "model.py").is_file():
             raise FileNotFoundError(f"invalid MANO source: {source}")
         expected_assets = summary.get("mano_assets", {})
-        for name in ("MANO_LEFT.pkl", "MANO_RIGHT.pkl"):
+        for name in sorted(set(mano_model_by_side.values())):
             asset = model_dir / name
             if not asset.is_file():
                 raise FileNotFoundError(asset)
             expected_hash = expected_assets.get(name, {}).get("sha256")
-            if expected_hash and _sha256(asset) != expected_hash:
+            if not expected_hash:
+                raise ValueError(f"summary does not declare the SHA-256 of {name}")
+            if _sha256(asset) != expected_hash:
                 raise ValueError(f"{asset}: SHA-256 differs from export asset")
         maximum_mano_vertex_error, maximum_mano_joint_error = _replay_mano(
-            records, source, model_dir, args.mano_reconstruction_tolerance_m,
+            records, source, model_dir, mano_model_by_side,
+            args.mano_reconstruction_tolerance_m,
         )
     result = {
         "validated_sample_count": len(selected),
@@ -251,7 +271,7 @@ def main() -> int:
         "schema": "000865-compatible",
         "reference_compared": str(args.reference.resolve()) if args.reference else None,
         "maximum_projection_error_px": maximum_projection_error,
-        "mano_convention": mano_convention,
+        "mano_model_by_side": mano_model_by_side,
         "maximum_mano_vertex_replay_error_m": maximum_mano_vertex_error,
         "maximum_mano_joint_replay_error_m": maximum_mano_joint_error,
         "side_counts_in_validated_subset": {

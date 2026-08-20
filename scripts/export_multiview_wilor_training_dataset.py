@@ -455,7 +455,10 @@ def main() -> int:
             "K": K.tolist(),
             "cameras": list(cameras),
             "source": "strict six-view WiLoR fusion + shared MANO sequence fit",
-            "mano_convention": "native_side_specific_v1",
+            "mano_model_by_side": {
+                "left": "MANO_LEFT.pkl",
+                "right": "MANO_RIGHT.pkl",
+            },
             "mano_pose_representation": "rotation_matrix_full_mean",
             "mano_source_revision": fit_summary.get("mano_revision", "unknown"),
             "mano_assets": mano_assets,
