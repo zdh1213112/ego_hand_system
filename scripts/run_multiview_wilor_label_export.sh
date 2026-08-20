@@ -74,7 +74,7 @@ FUSION="$(cd "$FUSION" && pwd)"
 }
 [[ -f "$MANO_SOURCE/mano/model.py" ]] || { echo "Invalid MANO source: $MANO_SOURCE" >&2; exit 2; }
 
-OUTPUT="${OUTPUT:-$EXPERIMENT/wilor_training_labels_right_v1}"
+OUTPUT="${OUTPUT:-$EXPERIMENT/wilor_training_labels_physical_v1}"
 [[ "$OUTPUT" != "/" && "$OUTPUT" != "$EXPERIMENT" ]] || { echo "Unsafe output path" >&2; exit 2; }
 mkdir -p "$OUTPUT"
 OUTPUT="$(cd "$OUTPUT" && pwd)"
@@ -106,11 +106,11 @@ def signature(value):
     return {"path": str(path), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 config = {
-    "schema_version": 3,
-    "algorithm": "strict_six_view_fusion_wilor_right_canonical_dataset_v3",
+    "schema_version": 4,
+    "algorithm": "strict_six_view_fusion_physical_labels_right_mano_v4",
     "normalized_manifest": signature(manifest),
     "fusion_accepted": signature(accepted),
-    "mano_convention": "wilor_right_canonical_v1",
+    "mano_fit_convention": "wilor_right_canonical_v1",
     "mano_assets": [signature(mano_source), signature(mano_right)],
     "left_camera": left_camera,
     "right_camera": right_camera,

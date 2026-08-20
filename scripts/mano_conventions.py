@@ -63,24 +63,6 @@ def canonical_rectification_rotation(
     return (mirror @ rotation @ mirror).astype(rotation.dtype, copy=False)
 
 
-def horizontally_flipped_intrinsics(
-    camera_matrix: np.ndarray, image_width: int,
-) -> np.ndarray:
-    """Return K for X-reflected 3D and a horizontally flipped image."""
-    matrix = np.asarray(camera_matrix)
-    if matrix.shape != (3, 3):
-        raise ValueError(f"camera matrix must be (3, 3), got {matrix.shape}")
-    if image_width <= 0:
-        raise ValueError("image width must be positive")
-    image_flip = np.asarray(
-        ((-1.0, 0.0, image_width - 1.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-        dtype=matrix.dtype,
-    )
-    return (image_flip @ matrix @ MIRROR_X.astype(matrix.dtype, copy=False)).astype(
-        matrix.dtype, copy=False
-    )
-
-
 def physicalize_geometry(
     vertices: np.ndarray,
     joints: np.ndarray,
