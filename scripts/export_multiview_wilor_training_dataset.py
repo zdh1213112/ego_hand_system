@@ -40,6 +40,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-visible-vertex-fraction", type=float, default=0.50)
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument(
+        "--sample-stride", type=int, default=0,
+        help="fixed sync-frame stride; 0 uses motion-adaptive sampling",
+    )
     return parser.parse_args()
 
 
@@ -157,10 +161,172 @@ def _full_pose_matrices(
     return global_rectified, hand_pose
 
 
+MOTION_MIN_INTERVAL_S = 0.10
+MOTION_MAX_INTERVAL_S = 0.50
+MOTION_TRANSLATION_THRESHOLD_M = 0.008
+MOTION_POSE_THRESHOLD_M = 0.010
+
+
+def _sync_time_s(sync_rows: dict[int, dict[str, str]], sync_index: int) -> float:
+    """Return a stable recording time for a synchronized frame."""
+    row = sync_rows.get(sync_index)
+    if row is not None:
+        try:
+            return float(row["reference_timestamp_ns"]) * 1e-9
+        except (KeyError, TypeError, ValueError):
+            pass
+    # Normalized recordings are nominally 30 Hz. This fallback is only used for
+    # malformed/missing timestamps and keeps adaptive sampling deterministic.
+    return float(sync_index) / 30.0
+
+
+def _motion_state(group: list[dict[str, Any]]) -> dict[int, dict[str, np.ndarray]]:
+    """Build one camera-independent motion state per physical hand."""
+    states: dict[int, dict[str, np.ndarray]] = {}
+    for item in group:
+        side = int(item["side"])
+        if side in states or "motion_points" not in item:
+            continue
+        points = np.asarray(item["motion_points"], dtype=np.float32)
+        if points.shape != (21, 3) or not np.isfinite(points).all():
+            continue
+        states[side] = {
+            "root": points[0].copy(),
+            "relative": (points - points[0]).astype(np.float32),
+        }
+    return states
+
+
+def _motion_change(
+    previous: dict[int, dict[str, np.ndarray]],
+    current: dict[int, dict[str, np.ndarray]],
+) -> tuple[float, float]:
+    """Return maximum root and root-aligned hand-shape changes in metres."""
+    common = sorted(set(previous) & set(current))
+    if not common:
+        return float("inf"), float("inf")
+    translation = 0.0
+    pose = 0.0
+    for side in common:
+        translation = max(
+            translation,
+            float(np.linalg.norm(current[side]["root"] - previous[side]["root"])),
+        )
+        delta = current[side]["relative"] - previous[side]["relative"]
+        pose = max(pose, float(np.linalg.norm(delta, axis=1).mean()))
+    return translation, pose
+
+
+def _select_sync_indices(
+    pending: list[dict[str, Any]],
+    sync_rows: dict[int, dict[str, str]],
+    sample_stride: int,
+) -> tuple[list[int], dict[str, Any]]:
+    """Select synchronized frames without separating cameras or hands.
+
+    A positive stride selects every Nth synchronized frame and also keeps the
+    final frame. With stride zero, frames are selected when the fitted hand has
+    moved enough, a hand appears/disappears, or a maximum quiet interval has
+    elapsed. The motion state is stored in a camera-independent physical frame,
+    so both training views remain paired at every selected sync index.
+    """
+    if sample_stride < 0:
+        raise ValueError("sample-stride must be non-negative")
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for item in pending:
+        groups.setdefault(int(item["sync_index"]), []).append(item)
+    sync_indices = sorted(groups)
+    if not sync_indices:
+        return [], {
+            "mode": "fixed_stride" if sample_stride else "motion_adaptive",
+            "source_sync_count": 0,
+            "selected_sync_count": 0,
+        }
+
+    if sample_stride > 0:
+        origin = sync_indices[0]
+        selected = [
+            sync_index for sync_index in sync_indices
+            if (sync_index - origin) % sample_stride == 0
+        ]
+        if selected[-1] != sync_indices[-1]:
+            selected.append(sync_indices[-1])
+        return selected, {
+            "mode": "fixed_stride",
+            "sample_stride": int(sample_stride),
+            "source_sync_count": len(sync_indices),
+            "selected_sync_count": len(selected),
+        }
+
+    selected = [sync_indices[0]]
+    previous_state = _motion_state(groups[sync_indices[0]])
+    previous_time = _sync_time_s(sync_rows, sync_indices[0])
+    hand_change_count = 0
+    motion_change_count = 0
+    quiet_interval_count = 0
+    for sync_index in sync_indices[1:]:
+        current_state = _motion_state(groups[sync_index])
+        current_time = _sync_time_s(sync_rows, sync_index)
+        elapsed = max(0.0, current_time - previous_time)
+        hand_changed = set(current_state) != set(previous_state)
+        translation_delta, pose_delta = _motion_change(previous_state, current_state)
+        motion_changed = (
+            translation_delta >= MOTION_TRANSLATION_THRESHOLD_M
+            or pose_delta >= MOTION_POSE_THRESHOLD_M
+        )
+        quiet_interval = elapsed + 1e-6 >= MOTION_MAX_INTERVAL_S
+        should_select = hand_changed or (
+            elapsed + 1e-6 >= MOTION_MIN_INTERVAL_S and motion_changed
+        ) or quiet_interval
+        if not should_select:
+            continue
+        selected.append(sync_index)
+        previous_state = current_state
+        previous_time = current_time
+        hand_change_count += int(hand_changed)
+        motion_change_count += int(motion_changed and not hand_changed)
+        quiet_interval_count += int(quiet_interval and not motion_changed and not hand_changed)
+
+    if selected[-1] != sync_indices[-1]:
+        selected.append(sync_indices[-1])
+    return selected, {
+        "mode": "motion_adaptive",
+        "source_sync_count": len(sync_indices),
+        "selected_sync_count": len(selected),
+        "selected_by_hand_presence_change": hand_change_count,
+        "selected_by_motion": motion_change_count,
+        "selected_by_quiet_interval": quiet_interval_count,
+        "min_interval_ms": MOTION_MIN_INTERVAL_S * 1000.0,
+        "max_interval_ms": MOTION_MAX_INTERVAL_S * 1000.0,
+        "translation_threshold_m": MOTION_TRANSLATION_THRESHOLD_M,
+        "pose_threshold_m": MOTION_POSE_THRESHOLD_M,
+    }
+
+
+def _limit_to_sync_groups(
+    pending: list[dict[str, Any]], selected_sync_indices: list[int], max_samples: int,
+) -> list[dict[str, Any]]:
+    """Apply the sample cap without splitting a synchronized image/label group."""
+    if max_samples <= 0:
+        return pending
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for item in pending:
+        groups.setdefault(int(item["sync_index"]), []).append(item)
+    selected: list[dict[str, Any]] = []
+    for sync_index in selected_sync_indices:
+        group = groups.get(sync_index, [])
+        if selected and len(selected) + len(group) > max_samples:
+            break
+        selected.extend(group)
+    return selected
+
+
 def main() -> int:
     args = parse_args()
     if args.max_samples < 0:
         raise ValueError("max-samples must be non-negative")
+    if args.sample_stride < 0:
+        raise ValueError("sample-stride must be non-negative")
     if not 1 <= args.min_camera_inlier_joints <= 21:
         raise ValueError("min-camera-inlier-joints must be in [1, 21]")
     if not 0.0 <= args.bbox_margin <= 1.0:
@@ -310,6 +476,12 @@ def main() -> int:
             physical_joints = mirror_left_points(
                 joints_rectified, side
             ).astype(np.float32)
+            motion_translation = mirror_left_points(
+                trans_left, side
+            ).astype(np.float32)
+            motion_points = (
+                physical_joints + motion_translation[None]
+            ).astype(np.float32)
 
             for camera in cameras:
                 view = hand.get("views", {}).get(camera)
@@ -377,6 +549,10 @@ def main() -> int:
                     "side": side,
                     "camera": camera,
                     "sample": sample,
+                    # Camera-independent physical coordinates used only for
+                    # motion-adaptive sampling. The exported label keeps the
+                    # camera-specific translation above.
+                    "motion_points": motion_points,
                     "metadata": {
                         "sync_index": sync_index,
                         "camera": camera,
@@ -397,9 +573,21 @@ def main() -> int:
     pending.sort(
         key=lambda item: (item["sync_index"], item["side"], camera_order[item["camera"]])
     )
-    pending = pending[: args.max_samples or None]
+    selected_sync_indices, sampling = _select_sync_indices(
+        pending, sync_rows, args.sample_stride
+    )
+    selected_sync_set = set(selected_sync_indices)
+    pending = [item for item in pending if item["sync_index"] in selected_sync_set]
+    pending = _limit_to_sync_groups(
+        pending, selected_sync_indices, args.max_samples
+    )
     if not pending:
         raise RuntimeError("no samples passed training export quality checks")
+    sampling = dict(sampling)
+    sampling.update({
+        "exported_sync_count": len({int(item["sync_index"]) for item in pending}),
+        "exported_sample_count": len(pending),
+    })
     for index, item in enumerate(pending):
         stem = f"{index:06d}"
         item["stem"] = stem
@@ -407,6 +595,8 @@ def main() -> int:
             "index": index,
             "image": f"images/{stem}.jpg",
             "label": f"labels/{stem}.npy",
+            "sampling_mode": sampling["mode"],
+            "sample_stride": args.sample_stride,
         })
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -491,10 +681,14 @@ def main() -> int:
             camera: sum(item["camera"] == camera for item in pending) for camera in cameras
         }
         summary = {
+            # The .npy physical-label contract is unchanged by sampling. Keep
+            # its schema version at 4; sampling details live in `sampling`.
             "schema_version": 4,
             "stage": "six_view_refined_wilor_training_dataset",
             "schema_reference": "000865.npy",
             "sample_count": len(pending),
+            "sampling": sampling,
+            "max_samples": args.max_samples,
             "image_count": len(list(image_root.glob("*.jpg"))),
             "label_count": len(list(label_root.glob("*.npy"))),
             "side_counts": side_counts,

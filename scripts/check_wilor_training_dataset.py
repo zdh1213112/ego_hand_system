@@ -177,8 +177,9 @@ def main() -> int:
     if not images or [path.stem for path in images] != [path.stem for path in labels]:
         raise ValueError("images/*.jpg and labels/*.npy must be non-empty one-to-one pairs")
     summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
-    if int(summary.get("schema_version", -1)) != 4:
-        raise ValueError("dataset must use physical-label schema_version 4")
+    schema_version = int(summary.get("schema_version", -1))
+    if schema_version not in (4, 5):
+        raise ValueError("dataset must use physical-label schema_version 4 or 5")
     if int(summary["sample_count"]) != len(labels):
         raise ValueError("summary sample_count disagrees with paired files")
     index_rows = [

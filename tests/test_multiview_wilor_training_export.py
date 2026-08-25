@@ -12,7 +12,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 from check_wilor_training_dataset import _contract, _replay_mano, _signature
 from export_multiview_wilor_training_dataset import (
-    _full_pose_matrices, _mesh_bbox, _project, _rectify_mano_geometry,
+    _full_pose_matrices, _limit_to_sync_groups, _mesh_bbox, _project,
+    _rectify_mano_geometry, _select_sync_indices,
 )
 from prepare_multiview_mano_input import _project_rectified
 from mano_conventions import (
@@ -25,6 +26,58 @@ from mano_conventions import (
 
 
 class MultiviewWilorTrainingExportTests(unittest.TestCase):
+    @staticmethod
+    def _sampling_pending(sync_indices, roots):
+        pending = []
+        for sync_index, root in zip(sync_indices, roots):
+            points = np.zeros((21, 3), dtype=np.float32)
+            points[0] = np.asarray(root, dtype=np.float32)
+            for camera in ("camera2", "camera3"):
+                pending.append({
+                    "sync_index": sync_index,
+                    "side": 0,
+                    "camera": camera,
+                    "motion_points": points.copy(),
+                })
+        return pending
+
+    def test_fixed_stride_uses_sync_index_and_keeps_final_frame(self):
+        sync_indices = [0, 1, 3, 4, 6, 7]
+        pending = self._sampling_pending(sync_indices, [(0, 0, 0)] * len(sync_indices))
+        rows = {
+            index: {"reference_timestamp_ns": str(index * 33_333_333)}
+            for index in sync_indices
+        }
+        selected, summary = _select_sync_indices(pending, rows, 3)
+        self.assertEqual(selected, [0, 3, 6, 7])
+        self.assertEqual(summary["mode"], "fixed_stride")
+
+    def test_motion_adaptive_sampling_keeps_motion_and_reduces_static_frames(self):
+        sync_indices = list(range(13))
+        roots = []
+        for index in sync_indices:
+            if index < 3:
+                roots.append((0.0, 0.0, 0.0))
+            elif index < 6:
+                roots.append((0.01, 0.0, 0.0))
+            else:
+                roots.append((0.02, 0.0, 0.0))
+        pending = self._sampling_pending(sync_indices, roots)
+        rows = {
+            index: {"reference_timestamp_ns": str(index * 33_333_333)}
+            for index in sync_indices
+        }
+        selected, summary = _select_sync_indices(pending, rows, 0)
+        self.assertEqual(selected, [0, 3, 6, 12])
+        self.assertEqual(summary["mode"], "motion_adaptive")
+        self.assertGreater(summary["selected_by_motion"], 0)
+
+    def test_sample_cap_does_not_split_sync_group(self):
+        pending = self._sampling_pending([0, 3], [(0, 0, 0), (0.01, 0, 0)])
+        limited = _limit_to_sync_groups(pending, [0, 3], 3)
+        self.assertEqual({item["sync_index"] for item in limited}, {0})
+        self.assertEqual(len(limited), 2)
+
     def test_rectification_moves_root_offset_into_translation(self):
         vertices = np.asarray([[0.03, 0.01, 0.0], [0.05, -0.02, 0.01]], np.float32)
         joints = np.asarray([[0.02, 0.01, 0.0], [0.04, 0.03, 0.0]], np.float32)

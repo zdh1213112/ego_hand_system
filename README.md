@@ -269,6 +269,15 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
   --max-samples 0
 ```
 
+标签导出默认使用运动自适应抽帧：静止阶段降低采样率，手部明显移动或手身份出现变化时保留关键帧。
+如需固定抽帧，例如每 3 个同步帧保留 1 帧，增加：
+
+```bash
+  --sample-stride 3
+```
+
+`--sample-stride 0`（默认）表示运动自适应；`--max-samples` 仍然只是最终数量上限。
+
 导出结构：
 
 ```text

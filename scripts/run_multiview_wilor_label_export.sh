@@ -10,6 +10,7 @@ DEVICE="cuda"
 LEFT_CAMERA="camera2"
 RIGHT_CAMERA="camera3"
 MAX_SAMPLES=0
+SAMPLE_STRIDE=0
 MANO_SOURCE="${GLOVE_MANO_SOURCE:-$ROOT/third_party/MANO}"
 MANO_MODEL_DIR="${GLOVE_MANO_MODEL_DIR:-$ROOT/models/mano}"
 REFERENCE_NPY="/home/zdh/tool/npy_decoder/000865.npy"
@@ -27,6 +28,7 @@ Options:
   --left-camera CAMERA      First training view (default camera2)
   --right-camera CAMERA     Second training view (default camera3)
   --max-samples N           Export sample limit; 0 means all
+  --sample-stride N         Fixed sync-frame stride; 0 means motion-adaptive sampling (default)
   --mano-source DIR         Licensed MANO Python source
   --mano-model-dir DIR      Directory containing MANO_RIGHT.pkl
   --reference-npy FILE      Reference schema sample (default 000865.npy)
@@ -43,6 +45,7 @@ while (($#)); do
     --left-camera) LEFT_CAMERA="$2"; shift 2 ;;
     --right-camera) RIGHT_CAMERA="$2"; shift 2 ;;
     --max-samples) MAX_SAMPLES="$2"; shift 2 ;;
+    --sample-stride) SAMPLE_STRIDE="$2"; shift 2 ;;
     --mano-source) MANO_SOURCE="$2"; shift 2 ;;
     --mano-model-dir) MANO_MODEL_DIR="$2"; shift 2 ;;
     --reference-npy) REFERENCE_NPY="$2"; shift 2 ;;
@@ -53,6 +56,7 @@ done
 
 [[ -n "$EXPERIMENT" ]] || { usage >&2; exit 2; }
 [[ "$MAX_SAMPLES" =~ ^[0-9]+$ ]] || { echo "--max-samples must be non-negative" >&2; exit 2; }
+[[ "$SAMPLE_STRIDE" =~ ^[0-9]+$ ]] || { echo "--sample-stride must be a non-negative integer" >&2; exit 2; }
 [[ "$LEFT_CAMERA" != "$RIGHT_CAMERA" ]] || { echo "left/right camera must differ" >&2; exit 2; }
 EXPERIMENT="$(cd "$EXPERIMENT" && pwd)"
 NORMALIZED="$EXPERIMENT/normalized_multiview"
@@ -92,13 +96,13 @@ run_python() {
 run_python - "$OUTPUT/run_config.json" "$NORMALIZED/manifest.json" \
   "$FUSION/accepted.jsonl" "$MANO_SOURCE/mano/model.py" \
   "$MANO_MODEL_DIR/MANO_RIGHT.pkl" \
-  "$LEFT_CAMERA" "$RIGHT_CAMERA" "$MAX_SAMPLES" "$DEVICE" <<'PY'
+  "$LEFT_CAMERA" "$RIGHT_CAMERA" "$MAX_SAMPLES" "$SAMPLE_STRIDE" "$DEVICE" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 config_path, *values = sys.argv[1:]
-manifest, accepted, mano_source, mano_right, left_camera, right_camera, max_samples, device = values
+manifest, accepted, mano_source, mano_right, left_camera, right_camera, max_samples, sample_stride, device = values
 
 def signature(value):
     path = Path(value).resolve()
@@ -106,8 +110,8 @@ def signature(value):
     return {"path": str(path), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 config = {
-    "schema_version": 4,
-    "algorithm": "strict_six_view_fusion_physical_labels_right_mano_v4",
+    "schema_version": 5,
+    "algorithm": "strict_six_view_fusion_physical_labels_right_mano_v5",
     "normalized_manifest": signature(manifest),
     "fusion_accepted": signature(accepted),
     "mano_fit_convention": "wilor_right_canonical_v1",
@@ -115,6 +119,10 @@ config = {
     "left_camera": left_camera,
     "right_camera": right_camera,
     "max_samples": int(max_samples),
+    "sampling": {
+        "mode": "fixed_stride" if int(sample_stride) > 0 else "motion_adaptive",
+        "sample_stride": int(sample_stride),
+    },
     "device": device,
     "fit": {
         "shape_iterations": 180, "pose_iterations": 120,
@@ -185,6 +193,7 @@ if [[ ! -f "$TRAINING_DATASET/summary.json" ]]; then
     --fusion "$FUSION" --mano-fit "$MANO_FIT" --dataset "$NORMALIZED"
     --rectification "$RECTIFICATION" --output "$TRAINING_DATASET"
     --cameras "$LEFT_CAMERA" "$RIGHT_CAMERA" --max-samples "$MAX_SAMPLES"
+    --sample-stride "$SAMPLE_STRIDE"
   )
   run_python "$ROOT/scripts/export_multiview_wilor_training_dataset.py" "${EXPORT_ARGS[@]}"
 else

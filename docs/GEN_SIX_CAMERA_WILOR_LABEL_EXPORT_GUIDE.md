@@ -120,7 +120,15 @@ conda activate ego-hand
   --max-samples 0
 ```
 
-`--max-samples 0` 表示导出全部合格样本。
+`--max-samples 0` 表示导出全部合格样本。导出阶段默认使用运动自适应抽帧，依据手腕位移、
+去除平移后的手部关节变化和静止时间间隔保留关键帧。若需要固定抽帧，可使用：
+
+```bash
+  --sample-stride 3
+```
+
+这表示按 `sync_index` 每 3 个同步帧保留 1 帧，并额外保留最后一帧；camera2/3、左右手标签
+仍然按同一个同步帧成组导出。`--sample-stride 0` 或省略参数时使用运动自适应模式。
 
 该命令不会重新运行六路 WiLoR。它只执行：
 
@@ -399,6 +407,7 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 - 更换 MANO 模型；
 - 更换 camera2/3；
 - 改变 `--max-samples`；
+- 改变 `--sample-stride` 或抽帧模式；
 - 改变关键拟合或质量参数。
 
 如果某阶段只有目录但没有 `summary.json`，脚本会停止，不会自动删除中间结果。保留失败
