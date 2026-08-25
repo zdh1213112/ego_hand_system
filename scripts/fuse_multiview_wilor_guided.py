@@ -37,6 +37,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--predictions", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--cameras", nargs="+",
+        help="camera subset used for fusion (default: all cameras in the dataset)",
+    )
     parser.add_argument("--anchor-cameras", nargs=2, default=("camera2", "camera3"))
     parser.add_argument("--max-anchor-detections", type=int, default=3)
     parser.add_argument("--max-side-detections", type=int, default=4)
@@ -316,7 +320,13 @@ def main() -> int:
     dataset = args.dataset.resolve()
     prediction_root = args.predictions.resolve()
     manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
-    cameras = tuple(manifest["camera_ids"])
+    available_cameras = tuple(manifest["camera_ids"])
+    cameras = tuple(dict.fromkeys(args.cameras or available_cameras))
+    if len(cameras) < 2:
+        raise ValueError("fusion requires at least two cameras")
+    unknown_cameras = [camera for camera in cameras if camera not in available_cameras]
+    if unknown_cameras:
+        raise ValueError(f"selected cameras are not present in the dataset: {unknown_cameras}")
     preferred_anchors = tuple(args.anchor_cameras)
     if len(set(preferred_anchors)) != 2 or any(camera not in cameras for camera in preferred_anchors):
         raise ValueError(f"invalid anchor cameras: {preferred_anchors}")

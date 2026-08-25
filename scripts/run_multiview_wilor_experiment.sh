@@ -6,6 +6,8 @@ MCAP=""
 OUTPUT=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
+CAMERAS=(camera0 camera1 camera2 camera3 camera4 camera5)
+REFERENCE_CAMERA="camera2"
 MAX_FRAMES=60
 BATCH_SIZE=""
 FRAME_BATCH_SIZE=""
@@ -17,7 +19,7 @@ NO_VIDEO=0
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
-  echo "Usage: $0 --mcap FILE --output DIR [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--no-video]"
+  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--no-video]"
 }
 
 while (($#)); do
@@ -26,6 +28,15 @@ while (($#)); do
     --output) OUTPUT="$2"; shift 2 ;;
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --cameras)
+      CAMERAS=()
+      shift
+      while (($#)) && [[ "$1" != --* ]]; do
+        CAMERAS+=("$1")
+        shift
+      done
+      ;;
+    --reference-camera) REFERENCE_CAMERA="$2"; shift 2 ;;
     --max-frames) MAX_FRAMES="$2"; shift 2 ;;
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --frame-batch-size) FRAME_BATCH_SIZE="$2"; shift 2 ;;
@@ -64,6 +75,31 @@ if [[ -z "$MCAP" || -z "$OUTPUT" ]]; then
   usage >&2
   exit 2
 fi
+if ((${#CAMERAS[@]} < 2)); then
+  echo "at least two cameras are required" >&2
+  exit 2
+fi
+declare -A CAMERA_SEEN=()
+for CAMERA in "${CAMERAS[@]}"; do
+  [[ "$CAMERA" =~ ^camera[0-9]+$ ]] || {
+    echo "invalid camera id: $CAMERA" >&2
+    exit 2
+  }
+  [[ -z "${CAMERA_SEEN[$CAMERA]:-}" ]] || {
+    echo "duplicate camera id: $CAMERA" >&2
+    exit 2
+  }
+  CAMERA_SEEN[$CAMERA]=1
+done
+[[ -n "${CAMERA_SEEN[$REFERENCE_CAMERA]:-}" ]] || {
+  echo "reference camera is not in the selected camera set: $REFERENCE_CAMERA" >&2
+  exit 2
+}
+if [[ "${CAMERA_SEEN[camera2]:-}" == 1 && "${CAMERA_SEEN[camera3]:-}" == 1 ]]; then
+  ANCHOR_CAMERAS=(camera2 camera3)
+else
+  ANCHOR_CAMERAS=("${CAMERAS[0]}" "${CAMERAS[1]}")
+fi
 if [[ ! -f "$MCAP" ]]; then
   echo "MCAP does not exist: $MCAP" >&2
   exit 2
@@ -77,26 +113,39 @@ OUTPUT="$(mkdir -p "$OUTPUT" && cd "$OUTPUT" && pwd)"
 NORMALIZED="$OUTPUT/normalized_multiview"
 PREDICTIONS="$OUTPUT/wilor_multiview"
 FUSION="$OUTPUT/fusion_multiview"
+VIDEO="$FUSION/diagnostic_${#CAMERAS[@]}view.mp4"
+CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
+CAMERA_CONFIDENCE_ARGS=()
+for CAMERA in "${CAMERAS[@]}"; do
+  case "$CAMERA" in
+    camera0) CONFIDENCE="0.2" ;;
+    camera4|camera5) CONFIDENCE="0.1" ;;
+    *) CONFIDENCE="0.3" ;;
+  esac
+  CAMERA_CONFIDENCE_ARGS+=(--camera-confidence "${CAMERA}=${CONFIDENCE}")
+done
 
 run_python() {
   conda run --no-capture-output -n "$CONDA_ENV" \
-    env PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
+    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
     TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
     python "$@"
 }
 
-run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" <<'PY'
+run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone = sys.argv[1:]
+config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, camera_csv, reference_camera, anchor_cameras_text = sys.argv[1:]
 source = Path(source_text).resolve()
 stat = source.stat()
+camera_ids = camera_csv.split(",")
 config = {
     "mcap": {"path": str(source), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns},
-    "cameras": [f"camera{index}" for index in range(6)],
-    "reference_camera": "camera2",
+    "cameras": camera_ids,
+    "reference_camera": reference_camera,
+    "anchor_cameras": anchor_cameras_text.split(),
     "max_frames": int(max_frames),
     "device": device,
     "batch_size": int(batch_size),
@@ -144,17 +193,17 @@ require_complete_or_absent "$PREDICTIONS" summary.json
 require_complete_or_absent "$FUSION" summary.json
 
 if [[ ! -f "$NORMALIZED/manifest.json" ]]; then
-  echo "[multiview] normalize and synchronize camera0..camera5"
+  echo "[multiview] normalize and synchronize ${CAMERAS[*]}"
   run_python "$ROOT/scripts/normalize_multiview_recording.py" \
     --input "$MCAP" --output "$NORMALIZED" \
-    --cameras camera0 camera1 camera2 camera3 camera4 camera5 \
-    --reference-camera camera2 --max-delta-us 1500 --max-frames "$MAX_FRAMES"
+    --cameras "${CAMERAS[@]}" \
+    --reference-camera "$REFERENCE_CAMERA" --max-delta-us 1500 --max-frames "$MAX_FRAMES"
 else
   echo "[multiview] reuse normalized dataset"
 fi
 
 if [[ ! -f "$PREDICTIONS/summary.json" ]]; then
-  echo "[multiview] run six-view dual-hypothesis WiLoR"
+  echo "[multiview] run ${#CAMERAS[@]}-view dual-hypothesis WiLoR"
   run_python "$ROOT/scripts/wilor_multiview_inference.py" \
     --dataset "$NORMALIZED" --output "$PREDICTIONS" \
     --device "$DEVICE" --gpu-profile "$GPU_PROFILE" \
@@ -163,9 +212,7 @@ if [[ ! -f "$PREDICTIONS/summary.json" ]]; then
     --max-detections-per-class "$MAX_DETECTIONS_PER_CLASS" \
     --compile-backbone "$COMPILE_BACKBONE" \
     --max-frames "$MAX_FRAMES" \
-    --camera-confidence camera0=0.2 \
-    --camera-confidence camera4=0.1 \
-    --camera-confidence camera5=0.1
+    "${CAMERA_CONFIDENCE_ARGS[@]}"
 else
   echo "[multiview] reuse WiLoR predictions"
 fi
@@ -174,16 +221,18 @@ if [[ ! -f "$FUSION/summary.json" ]]; then
   echo "[multiview] fuse native Double-Sphere rays with RANSAC"
   run_python "$ROOT/scripts/fuse_multiview_wilor_guided.py" \
     --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --output "$FUSION" \
-    --anchor-cameras camera2 camera3 --detector-handedness strict --max-frames "$MAX_FRAMES"
+    --cameras "${CAMERAS[@]}" \
+    --anchor-cameras "${ANCHOR_CAMERAS[@]}" --detector-handedness strict --max-frames "$MAX_FRAMES"
 else
   echo "[multiview] reuse fused result"
 fi
 
-if [[ "$NO_VIDEO" == 0 && ! -f "$FUSION/diagnostic_6view.mp4" ]]; then
-  echo "[multiview] render 3x2 diagnostic video"
+if [[ "$NO_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
+  echo "[multiview] render ${#CAMERAS[@]}-view diagnostic video"
   run_python "$ROOT/scripts/render_multiview_wilor.py" \
     --dataset "$NORMALIZED" --fusion "$FUSION" \
-    --output "$FUSION/diagnostic_6view.mp4" --max-frames "$MAX_FRAMES"
+    --output "$VIDEO" --cameras "${CAMERAS[@]}" \
+    --max-frames "$MAX_FRAMES"
 fi
 
 echo "[multiview] finished: $FUSION"

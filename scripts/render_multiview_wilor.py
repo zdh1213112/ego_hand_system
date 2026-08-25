@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Render a 3x2 diagnostic video for native six-camera WiLoR fusion."""
+"""Render a tiled diagnostic video for multiview WiLoR fusion."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -24,6 +25,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--fusion", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--cameras", nargs="+",
+        help="camera subset and display order (default: fusion summary or dataset order)",
+    )
+    parser.add_argument(
+        "--columns", type=int, default=0,
+        help="tile columns; 0 selects 2 for four views, 3 for six views, otherwise auto",
+    )
     parser.add_argument("--tile-width", type=int, default=480)
     parser.add_argument("--max-frames", type=int, default=0)
     return parser.parse_args()
@@ -67,9 +76,30 @@ def main() -> int:
     dataset = args.dataset.resolve()
     fusion = args.fusion.resolve()
     manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
-    cameras = tuple(manifest["camera_ids"])
-    if len(cameras) != 6:
-        raise ValueError(f"3x2 renderer requires six cameras, got {len(cameras)}")
+    available_cameras = tuple(manifest["camera_ids"])
+    fusion_summary_path = fusion / "summary.json"
+    fusion_summary = (
+        json.loads(fusion_summary_path.read_text(encoding="utf-8"))
+        if fusion_summary_path.is_file() else {}
+    )
+    default_cameras = fusion_summary.get("camera_ids", available_cameras)
+    cameras = tuple(dict.fromkeys(args.cameras or default_cameras))
+    if not cameras:
+        raise ValueError("at least one render camera is required")
+    unknown_cameras = [camera for camera in cameras if camera not in available_cameras]
+    if unknown_cameras:
+        raise ValueError(f"selected cameras are not present in the dataset: {unknown_cameras}")
+    if args.columns < 0:
+        raise ValueError("columns must be non-negative")
+    if args.columns:
+        columns = args.columns
+    elif len(cameras) == 4:
+        columns = 2
+    elif len(cameras) == 6:
+        columns = 3
+    else:
+        columns = max(1, int(math.ceil(math.sqrt(len(cameras)))))
+    row_count = int(math.ceil(len(cameras) / columns))
     with (dataset / "multiview_frames.csv").open("r", encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
     rows = rows[: args.max_frames or None]
@@ -84,7 +114,7 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(args.output), cv2.VideoWriter_fourcc(*"mp4v"), fps,
-        (tile_width * 3, tile_height * 2),
+        (tile_width * columns, tile_height * row_count),
     )
     if not writer.isOpened():
         raise RuntimeError(f"cannot create video: {args.output}")
@@ -130,7 +160,12 @@ def main() -> int:
                         0.75, status_color, 2, cv2.LINE_AA,
                     )
                 tiles.append(cv2.resize(frame, (tile_width, tile_height), interpolation=cv2.INTER_AREA))
-            canvas = np.vstack((np.hstack(tiles[:3]), np.hstack(tiles[3:])))
+            while len(tiles) < row_count * columns:
+                tiles.append(np.zeros((tile_height, tile_width, 3), dtype=np.uint8))
+            canvas = np.vstack([
+                np.hstack(tiles[start:start + columns])
+                for start in range(0, len(tiles), columns)
+            ])
             writer.write(canvas)
             if (ordinal + 1) % 50 == 0:
                 print(f"rendered {ordinal + 1}/{len(rows)}", flush=True)

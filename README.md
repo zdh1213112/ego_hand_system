@@ -5,15 +5,38 @@
 - `orbbec`：Orbbec EGO 左右视频、硬件时间戳、KB 鱼眼标定和可选 IMU；
 - `gen`：GEN DAS EGO MCAP/H264、KB 或 Double Sphere 双目标定。
 
-两类数据在双目校正后可选择 MediaPipe+MANO、WiLoR，或同时运行两条路线：
+当前系统包含统一的双目主流程，以及 GEN 六目 WiLoR 扩展流程：
 
 ```text
-  Orbbec ─┐
-          ├─> 标准化 ─> 双目校正 ─┬─> MediaPipe ─> MANO / 21-DOF
-  GEN ────┘                     └─> WiLoR ─> MANO / 21-keypoints
+Orbbec EGO session ─────┐
+                         ├─> 双目数据标准化 ─> 双目校正(KB/DS) ─┬─> MediaPipe 双路检测
+GEN 双目 MCAP ──────────┘                                      │   └─> 左右手关联
+                                                               │       └─> 三角化得到 3D 关节
+                                                               │           └─> 3D 稳定化
+                                                               │               └─> MANO 时序拟合
+                                                               │                   └─> MANO 网格
+                                                               │                       + 21-DOF
+                                                               │                       + 6D 位姿
+                                                               │
+                                                               └─> WiLoR 双路推理
+                                                                   └─> 21 个关键点
+                                                                       + MANO 参数/网格
+
+GEN 六目 MCAP(camera0~camera5)
+          └─> 六路标准化 + 微秒级同步 + DS 标定
+              └─> 六路 detector + WiLoR 双姿态推理
+                  └─> detector 左右手身份锁定
+                      └─> 动态锚点 + DS 射线三角化 + 逐关节 RANSAC
+                          └─> 六目融合 21 个 3D 关键点
+                              ├─> MANO 时序拟合
+                              │   └─> MANO 网格和姿态参数
+                              └─> WiLoR 自动标签导出
+                                  └─> images/*.jpg + labels/*.npy
 ```
 
-两条路线从双目校正结果并行运行，可通过 `EGO_HAND_ROUTE` 选择。
+Orbbec 和 GEN 双目数据经过标准化、校正后，可通过 `EGO_HAND_ROUTE` 选择
+MediaPipe、WiLoR 或并行运行。GEN 六目流程使用独立的多视角 Double-Sphere
+几何融合；camera2/3 校正视图主要用于 MANO 约束和 WiLoR 训练标签导出。
 
 ## 效果展示
 
@@ -131,8 +154,12 @@ export EGO_WILOR_BATCH_SIZE=4
 
 完整设计、算法改进、指标、左右手身份修复和排错记录见
 [`docs/GEN_SIX_CAMERA_WILOR_FUSION.md`](docs/GEN_SIX_CAMERA_WILOR_FUSION.md)。
+camera2/3 锚点选择、DS 射线、外围相机关联和逐关节 RANSAC 的详细过程见
+[`docs/GEN_MULTIVIEW_RANSAC_ANCHOR_FUSION.md`](docs/GEN_MULTIVIEW_RANSAC_ANCHOR_FUSION.md)。
 从原始 MCAP 到 `images/*.jpg + labels/*.npy` 的完整操作步骤见
 [`docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md`](docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md)。
+如果使用 NOKOV/XINGYING 光学动捕的 24 点手部模型生成 WiLoR 标签，见
+[`docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md`](docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md)。
 
 主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
 `camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
@@ -178,6 +205,21 @@ RTX 5060 保持默认的
 如当前 PyTorch/驱动组合无法编译，可用 `--compile-backbone 0` 关闭编译，其余 5090D
 优化仍然保留。
 
+如需从新的 GEN MCAP 只运行四目，例如 `camera1~camera4`，可直接指定相机子集：
+
+```bash
+./scripts/run_multiview_wilor_experiment.sh \
+  --mcap /path/to/new_recording.mcap \
+  --output /path/to/gen4_new_run \
+  --cameras camera1 camera2 camera3 camera4 \
+  --reference-camera camera2 \
+  --device cuda \
+  --max-frames 60
+```
+
+脚本会自动使用 `camera2/3` 作为锚点，并生成 `diagnostic_4view.mp4`；确认冒烟测试后将
+`--max-frames` 改为 `0` 运行完整数据。
+
 确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
 序列。脚本会生成 `fusion_multiview/diagnostic_6view.mp4`，其中六个画面按 3x2 排列；
 绿色 `USED` 显示该相机实际贡献的内点关节，灰色 `INACTIVE` 表示未参与，红色
@@ -186,6 +228,34 @@ RTX 5060 保持默认的
 观测通过 RANSAC，不直接使用关节插值代替识别。
 `fusion_multiview/summary.json` 还会把六目结果和 `camera2+camera3` 双目结果投影到所有
 可用视角，给出跨视角一致性对比。
+
+### GEN 四目子集测试
+
+已有六路标准化数据和 WiLoR 预测时，可以只选择部分相机重新融合，不需要重复运行模型。
+例如使用 `camera1~camera4`，并继续以 `camera2/3` 为首选锚点：
+
+```bash
+PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
+  python scripts/fuse_multiview_wilor_guided.py \
+  --dataset output/gen6_pose_full_v3/normalized_multiview \
+  --predictions output/gen6_pose_full_v3/wilor_multiview \
+  --output output/gen6_pose_full_v3/fusion_cam1_to_cam4_strict_full \
+  --cameras camera1 camera2 camera3 camera4 \
+  --anchor-cameras camera2 camera3 \
+  --detector-handedness strict \
+  --max-frames 0
+
+PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
+  python scripts/render_multiview_wilor.py \
+  --dataset output/gen6_pose_full_v3/normalized_multiview \
+  --fusion output/gen6_pose_full_v3/fusion_cam1_to_cam4_strict_full \
+  --output output/gen6_pose_full_v3/fusion_cam1_to_cam4_strict_full/diagnostic_4view.mp4 \
+  --cameras camera1 camera2 camera3 camera4 \
+  --columns 2
+```
+
+四目视频按 `camera1 | camera2 / camera3 | camera4` 的 2×2 布局生成。冒烟测试可先将两个
+命令都加上 `--max-frames 60`，正式运行时使用 `0` 或省略限制。
 
 六目结果确认无误后，可以直接导出与 WiLoR 训练数据一致的成对图片和 `.npy` 标签：
 
