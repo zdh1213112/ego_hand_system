@@ -204,6 +204,8 @@ RTX 5060 保持默认的
 如需保留所有候选框，可显式传入 `--max-detections-per-class 0`。
 如当前 PyTorch/驱动组合无法编译，可用 `--compile-backbone 0` 关闭编译，其余 5090D
 优化仍然保留。
+5090D profile 还会使用 8 个 CPU 进程并行处理相互独立的逐帧多视角 RANSAC；可用
+`--fusion-workers N` 单独调整。融合阶段每 25 帧输出一次当前吞吐率。
 
 如需从新的 GEN MCAP 只运行四目，例如 `camera1~camera4`，可直接指定相机子集：
 

@@ -21,6 +21,7 @@ class MultiviewGpuProfileTests(unittest.TestCase):
         self.assertIn("--preprocess-workers N", result.stdout)
         self.assertIn("--max-detections-per-class N", result.stdout)
         self.assertIn("--compile-backbone 0|1", result.stdout)
+        self.assertIn("--fusion-workers N", result.stdout)
 
     def test_compatible_defaults_preserve_original_path(self):
         runner = RUNNER.read_text(encoding="utf-8")
@@ -32,6 +33,7 @@ class MultiviewGpuProfileTests(unittest.TestCase):
             'MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-0}"', runner
         )
         self.assertIn('COMPILE_BACKBONE="${COMPILE_BACKBONE:-0}"', runner)
+        self.assertIn('FUSION_WORKERS="${FUSION_WORKERS:-1}"', runner)
 
     def test_5090d_defaults_enable_cross_frame_amp_path(self):
         runner = RUNNER.read_text(encoding="utf-8")
@@ -43,6 +45,7 @@ class MultiviewGpuProfileTests(unittest.TestCase):
             'MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-1}"', runner
         )
         self.assertIn('COMPILE_BACKBONE="${COMPILE_BACKBONE:-1}"', runner)
+        self.assertIn('FUSION_WORKERS="${FUSION_WORKERS:-8}"', runner)
         self.assertIn('args.gpu_profile == "rtx5090d"', inference)
         self.assertIn("infer_dual_batched", inference)
         self.assertIn("torch.autocast", inference)
