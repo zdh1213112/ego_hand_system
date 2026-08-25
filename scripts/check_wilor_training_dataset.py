@@ -12,7 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from mano_conventions import WILOR_RIGHT_CANONICAL
+from mano_conventions import mirror_left_points
 
 
 EXPECTED_KEYS = (
@@ -100,7 +100,7 @@ def _replay_mano(
     records: list[tuple[Path, dict[str, Any]]], source: Path, model_dir: Path,
     model_by_side: dict[str, str], tolerance_m: float,
 ) -> tuple[float, float]:
-    """Reconstruct every exported label using only MANO_RIGHT.pkl."""
+    """Replay right-canonical parameters against physical-side label geometry."""
     import torch
     from scipy.spatial.transform import Rotation
 
@@ -109,7 +109,7 @@ def _replay_mano(
     expected_mapping = {"left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl"}
     if model_by_side != expected_mapping:
         raise ValueError(
-            f"right-canonical replay requires {expected_mapping}, got {model_by_side}"
+            f"MANO_RIGHT replay requires {expected_mapping}, got {model_by_side}"
         )
     mano = import_mano(source)
     maximum_vertex_error = 0.0
@@ -145,8 +145,15 @@ def _replay_mano(
             vertices = output.vertices.cpu().numpy()
             joints = output.joints.index_select(1, order).cpu().numpy()
         for index, (path, sample) in enumerate(chunk):
-            vertex_error = float(np.max(np.abs(vertices[index] - sample["vertices"])))
-            joint_error = float(np.max(np.abs(joints[index] - sample["joints_3d"])))
+            side = int(float(sample["side"]))
+            canonical_vertices = mirror_left_points(sample["vertices"], side)
+            canonical_joints = mirror_left_points(sample["joints_3d"], side)
+            vertex_error = float(np.max(np.abs(
+                vertices[index] - canonical_vertices
+            )))
+            joint_error = float(np.max(np.abs(
+                joints[index] - canonical_joints
+            )))
             maximum_vertex_error = max(maximum_vertex_error, vertex_error)
             maximum_joint_error = max(maximum_joint_error, joint_error)
             if max(vertex_error, joint_error) > tolerance_m:
@@ -170,6 +177,8 @@ def main() -> int:
     if not images or [path.stem for path in images] != [path.stem for path in labels]:
         raise ValueError("images/*.jpg and labels/*.npy must be non-empty one-to-one pairs")
     summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    if int(summary.get("schema_version", -1)) != 4:
+        raise ValueError("dataset must use physical-label schema_version 4")
     if int(summary["sample_count"]) != len(labels):
         raise ValueError("summary sample_count disagrees with paired files")
     index_rows = [
@@ -230,13 +239,14 @@ def main() -> int:
         physical_side = int(float(sample["side"]))
         if int(index_row.get("physical_side", -1)) != physical_side:
             raise ValueError(f"{label_path}: physical_side disagrees with label side")
-        if index_row.get("stored_image_space") != "right_canonical":
-            raise ValueError(f"{label_path}: image is not marked right_canonical")
-        if bool(index_row.get("stored_image_horizontally_flipped")) != (physical_side == 0):
-            raise ValueError(f"{label_path}: left image canonicalization flag is wrong")
+        if index_row.get("stored_image_space") != "physical_rectified":
+            raise ValueError(f"{label_path}: image is not marked physical_rectified")
+        if bool(index_row.get("stored_image_horizontally_flipped")):
+            raise ValueError(f"{label_path}: physical image must not be flipped")
+        if index_row.get("mano_parameter_space") != "right_canonical":
+            raise ValueError(f"{label_path}: MANO parameters are not right_canonical")
         records.append((label_path, sample))
 
-    mano_convention = summary.get("mano_convention")
     mano_model_by_side = summary.get("mano_model_by_side")
     maximum_mano_vertex_error = None
     maximum_mano_joint_error = None
@@ -246,23 +256,23 @@ def main() -> int:
         expected_mapping = {"left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl"}
         if mano_model_by_side != expected_mapping:
             raise ValueError(
-                f"right-canonical dataset requires {expected_mapping}, got {mano_model_by_side}"
+                f"MANO parameter mapping requires {expected_mapping}, got {mano_model_by_side}"
             )
         if summary.get("mano_pose_representation") != "rotation_matrix_full_mean":
             raise ValueError(
                 "mano_pose_representation must be rotation_matrix_full_mean"
             )
-        if mano_convention != WILOR_RIGHT_CANONICAL:
-            raise ValueError(f"unsupported MANO convention: {mano_convention}")
-        if summary.get("image_space") != "right_canonical":
-            raise ValueError("right-canonical MANO labels require right-canonical images")
-        if summary.get("side_semantics") != "physical_identity_only":
-            raise ValueError("side must describe physical identity, not request another flip")
-        if summary.get("consumer_must_not_flip_left_again") is not True:
-            raise ValueError("dataset must explicitly prohibit a second left-hand flip")
+        if summary.get("image_space") != "physical_rectified":
+            raise ValueError("training images must remain in physical rectified space")
+        if summary.get("geometry_space") != "physical_side":
+            raise ValueError("vertices and joints must remain in physical-side space")
+        if summary.get("mano_parameter_space") != "right_canonical":
+            raise ValueError("MANO parameters must use the right-canonical space")
+        if summary.get("side_semantics") != "physical_identity":
+            raise ValueError("side must describe physical hand identity")
         if args.mano_source is None or args.mano_model_dir is None:
             raise ValueError(
-                "schema-v3 MANO replay requires --mano-source and --mano-model-dir"
+                "MANO replay requires --mano-source and --mano-model-dir"
             )
         source = args.mano_source.resolve()
         model_dir = args.mano_model_dir.resolve()
@@ -289,7 +299,6 @@ def main() -> int:
         "schema": "000865-compatible",
         "reference_compared": str(args.reference.resolve()) if args.reference else None,
         "maximum_projection_error_px": maximum_projection_error,
-        "mano_convention": mano_convention,
         "mano_model_by_side": mano_model_by_side,
         "maximum_mano_vertex_replay_error_m": maximum_mano_vertex_error,
         "maximum_mano_joint_replay_error_m": maximum_mano_joint_error,

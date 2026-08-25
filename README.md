@@ -263,7 +263,7 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 ./scripts/run_multiview_wilor_label_export.sh \
   --experiment /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
   --fusion /home/zdh/ego_hand_system/output/gen6_pose_full_v3/fusion_handedness_strict_full \
-  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_right_v1 \
+  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_physical_v1 \
   --conda-env ego-hand \
   --device cuda \
   --max-samples 0
@@ -272,7 +272,7 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 导出结构：
 
 ```text
-wilor_training_labels_right_v1/dataset/
+wilor_training_labels_physical_v1/dataset/
 ├── images/000000.jpg
 ├── labels/000000.npy
 ├── index.jsonl
