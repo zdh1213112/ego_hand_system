@@ -12,10 +12,12 @@ sys.path.insert(0, str(SCRIPTS))
 
 from check_wilor_training_dataset import _contract, _replay_mano, _signature
 from export_multiview_wilor_training_dataset import (
-    _full_pose_matrices, _limit_to_sync_groups, _mesh_bbox, _project,
-    _rectify_mano_geometry, _select_sync_indices,
+    _all_points_inside, _complete21_source_view, _full_pose_matrices,
+    _limit_to_sync_groups, _mesh_bbox, _project, _rectify_mano_geometry,
+    _select_sync_indices,
 )
 from prepare_multiview_mano_input import _project_rectified
+from render_wilor_training_dataset import _project_label_joints, _random_sync_indices
 from mano_conventions import (
     MIRROR_X,
     canonical_projection_rotation,
@@ -26,6 +28,42 @@ from mano_conventions import (
 
 
 class MultiviewWilorTrainingExportTests(unittest.TestCase):
+    def test_visualization_random_sampling_is_reproducible_and_unique(self):
+        first = _random_sync_indices(list(range(100)), 12, np.random.default_rng(42))
+        second = _random_sync_indices(list(range(100)), 12, np.random.default_rng(42))
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 12)
+        self.assertEqual(len(set(first)), 12)
+
+    def test_visualization_projects_exported_21_joint_geometry(self):
+        sample = {
+            "joints_3d": np.asarray([[0.01 * i, 0.0, 0.0] for i in range(21)], np.float32),
+            "trans": np.asarray([0.0, 0.0, 1.0], np.float32),
+            "K": np.asarray([[500.0, 0.0, 800.0], [0.0, 500.0, 650.0], [0.0, 0.0, 1.0]], np.float32),
+        }
+        projected = _project_label_joints(sample)
+        self.assertEqual(projected.shape, (21, 2))
+        np.testing.assert_allclose(projected[0], [800.0, 650.0])
+
+    def test_complete21_source_view_requires_all_inliers_and_visible_points(self):
+        points = np.column_stack((
+            np.linspace(100.0, 300.0, 21), np.linspace(200.0, 400.0, 21)
+        ))
+        view = {"inlier_joint_count": 21, "joints_2d": points.tolist()}
+        self.assertTrue(_complete21_source_view(view, (1600, 1300)))
+        view["inlier_joint_count"] = 20
+        self.assertFalse(_complete21_source_view(view, (1600, 1300)))
+        view["inlier_joint_count"] = 21
+        view["joints_2d"][0][0] = -1.0
+        self.assertFalse(_complete21_source_view(view, (1600, 1300)))
+
+    def test_all_points_inside_rejects_incomplete_or_outside_joint_sets(self):
+        points = np.full((21, 2), 10.0, dtype=np.float32)
+        self.assertTrue(_all_points_inside(points, (100, 100)))
+        self.assertFalse(_all_points_inside(points[:20], (100, 100)))
+        points[5, 1] = 100.0
+        self.assertFalse(_all_points_inside(points, (100, 100)))
+
     @staticmethod
     def _sampling_pending(sync_indices, roots):
         pending = []

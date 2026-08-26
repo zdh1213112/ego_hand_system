@@ -9,6 +9,11 @@ CONDA_ENV="ego-hand"
 DEVICE="cuda"
 LEFT_CAMERA="camera2"
 RIGHT_CAMERA="camera3"
+EXPORT_CAMERAS=()
+VIEW_FILTER="legacy"
+RENDER_VISUALIZATION=1
+VISUALIZATION_SAMPLES=12
+VISUALIZATION_SEED=42
 MAX_SAMPLES=0
 SAMPLE_STRIDE=0
 MANO_SOURCE="${GLOVE_MANO_SOURCE:-$ROOT/third_party/MANO}"
@@ -27,6 +32,11 @@ Options:
   --device cuda|cpu|auto    MANO fitting device (default cuda)
   --left-camera CAMERA      First training view (default camera2)
   --right-camera CAMERA     Second training view (default camera3)
+  --export-camera CAMERA    Export only this view; repeat for multiple views (default camera2+camera3)
+  --view-filter MODE        legacy|complete21 (default legacy)
+  --render-visualization N  Write random per-camera overlay JPGs: 1|0 (default 1)
+  --visualization-samples N Random sync frames per camera (default 12)
+  --visualization-seed N    Reproducible random seed (default 42)
   --max-samples N           Export sample limit; 0 means all
   --sample-stride N         Fixed sync-frame stride; 0 means motion-adaptive sampling (default)
   --mano-source DIR         Licensed MANO Python source
@@ -44,6 +54,11 @@ while (($#)); do
     --device) DEVICE="$2"; shift 2 ;;
     --left-camera) LEFT_CAMERA="$2"; shift 2 ;;
     --right-camera) RIGHT_CAMERA="$2"; shift 2 ;;
+    --export-camera) EXPORT_CAMERAS+=("$2"); shift 2 ;;
+    --view-filter) VIEW_FILTER="$2"; shift 2 ;;
+    --render-visualization) RENDER_VISUALIZATION="$2"; shift 2 ;;
+    --visualization-samples) VISUALIZATION_SAMPLES="$2"; shift 2 ;;
+    --visualization-seed) VISUALIZATION_SEED="$2"; shift 2 ;;
     --max-samples) MAX_SAMPLES="$2"; shift 2 ;;
     --sample-stride) SAMPLE_STRIDE="$2"; shift 2 ;;
     --mano-source) MANO_SOURCE="$2"; shift 2 ;;
@@ -57,7 +72,29 @@ done
 [[ -n "$EXPERIMENT" ]] || { usage >&2; exit 2; }
 [[ "$MAX_SAMPLES" =~ ^[0-9]+$ ]] || { echo "--max-samples must be non-negative" >&2; exit 2; }
 [[ "$SAMPLE_STRIDE" =~ ^[0-9]+$ ]] || { echo "--sample-stride must be a non-negative integer" >&2; exit 2; }
+[[ "$VIEW_FILTER" == "legacy" || "$VIEW_FILTER" == "complete21" ]] || {
+  echo "--view-filter must be legacy or complete21" >&2; exit 2;
+}
+[[ "$RENDER_VISUALIZATION" == "0" || "$RENDER_VISUALIZATION" == "1" ]] || {
+  echo "--render-visualization must be 0 or 1" >&2; exit 2;
+}
+[[ "$VISUALIZATION_SAMPLES" =~ ^[1-9][0-9]*$ ]] || {
+  echo "--visualization-samples must be a positive integer" >&2; exit 2;
+}
+[[ "$VISUALIZATION_SEED" =~ ^[0-9]+$ ]] || {
+  echo "--visualization-seed must be a non-negative integer" >&2; exit 2;
+}
 [[ "$LEFT_CAMERA" != "$RIGHT_CAMERA" ]] || { echo "left/right camera must differ" >&2; exit 2; }
+if ((${#EXPORT_CAMERAS[@]} == 0)); then
+  EXPORT_CAMERAS=("$LEFT_CAMERA" "$RIGHT_CAMERA")
+fi
+for camera in "${EXPORT_CAMERAS[@]}"; do
+  [[ "$camera" == "$LEFT_CAMERA" || "$camera" == "$RIGHT_CAMERA" ]] || {
+    echo "--export-camera must be $LEFT_CAMERA or $RIGHT_CAMERA for this rectification" >&2
+    exit 2
+  }
+done
+EXPORT_CAMERAS_TEXT="${EXPORT_CAMERAS[*]}"
 EXPERIMENT="$(cd "$EXPERIMENT" && pwd)"
 NORMALIZED="$EXPERIMENT/normalized_multiview"
 [[ -f "$NORMALIZED/manifest.json" ]] || { echo "Missing multiview dataset: $NORMALIZED" >&2; exit 2; }
@@ -96,13 +133,18 @@ run_python() {
 run_python - "$OUTPUT/run_config.json" "$NORMALIZED/manifest.json" \
   "$FUSION/accepted.jsonl" "$MANO_SOURCE/mano/model.py" \
   "$MANO_MODEL_DIR/MANO_RIGHT.pkl" \
-  "$LEFT_CAMERA" "$RIGHT_CAMERA" "$MAX_SAMPLES" "$SAMPLE_STRIDE" "$DEVICE" <<'PY'
+  "$LEFT_CAMERA" "$RIGHT_CAMERA" "$EXPORT_CAMERAS_TEXT" "$VIEW_FILTER" \
+  "$MAX_SAMPLES" "$SAMPLE_STRIDE" "$DEVICE" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 config_path, *values = sys.argv[1:]
-manifest, accepted, mano_source, mano_right, left_camera, right_camera, max_samples, sample_stride, device = values
+(
+    manifest, accepted, mano_source, mano_right,
+    left_camera, right_camera, export_cameras, view_filter,
+    max_samples, sample_stride, device,
+) = values
 
 def signature(value):
     path = Path(value).resolve()
@@ -118,6 +160,8 @@ config = {
     "mano_assets": [signature(mano_source), signature(mano_right)],
     "left_camera": left_camera,
     "right_camera": right_camera,
+    "export_cameras": export_cameras.split(),
+    "view_filter": view_filter,
     "max_samples": int(max_samples),
     "sampling": {
         "mode": "fixed_stride" if int(sample_stride) > 0 else "motion_adaptive",
@@ -192,7 +236,8 @@ if [[ ! -f "$TRAINING_DATASET/summary.json" ]]; then
   EXPORT_ARGS=(
     --fusion "$FUSION" --mano-fit "$MANO_FIT" --dataset "$NORMALIZED"
     --rectification "$RECTIFICATION" --output "$TRAINING_DATASET"
-    --cameras "$LEFT_CAMERA" "$RIGHT_CAMERA" --max-samples "$MAX_SAMPLES"
+    --cameras "${EXPORT_CAMERAS[@]}" --view-filter "$VIEW_FILTER"
+    --max-samples "$MAX_SAMPLES"
     --sample-stride "$SAMPLE_STRIDE"
   )
   run_python "$ROOT/scripts/export_multiview_wilor_training_dataset.py" "${EXPORT_ARGS[@]}"
@@ -207,4 +252,12 @@ CHECK_ARGS=(
 [[ -f "$REFERENCE_NPY" ]] && CHECK_ARGS+=(--reference "$REFERENCE_NPY")
 echo "[labels] validate image/NPY pairing, schema and exact mesh projection"
 run_python "${CHECK_ARGS[@]}"
+if [[ "$RENDER_VISUALIZATION" == "1" ]]; then
+  VISUALIZATION_DIR="$TRAINING_DATASET/visualization"
+  echo "[labels] render random complete 21-joint training-view images"
+  run_python "$ROOT/scripts/render_wilor_training_dataset.py" \
+    --dataset "$TRAINING_DATASET" --output "$VISUALIZATION_DIR" \
+    --cameras "${EXPORT_CAMERAS[@]}" \
+    --samples "$VISUALIZATION_SAMPLES" --seed "$VISUALIZATION_SEED"
+fi
 echo "[labels] finished: $TRAINING_DATASET"

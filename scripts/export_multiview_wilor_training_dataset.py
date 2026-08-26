@@ -33,6 +33,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rectification", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cameras", nargs="+", default=["camera2", "camera3"])
+    parser.add_argument(
+        "--view-filter", choices=("legacy", "complete21"), default="legacy",
+        help=(
+            "legacy accepts partially supported views; complete21 requires all "
+            "21 joints to be inliers and visible in the selected camera"
+        ),
+    )
     parser.add_argument("--min-camera-inlier-joints", type=int, default=12)
     parser.add_argument("--max-reprojection-median-px", type=float, default=25.0)
     parser.add_argument("--max-reprojection-p95-px", type=float, default=60.0)
@@ -98,6 +105,28 @@ def _mesh_bbox(
     if np.any(maximum - minimum < 2.0):
         return None
     return np.asarray([minimum[0], minimum[1], maximum[0], maximum[1]], dtype=np.float64)
+
+
+def _all_points_inside(points: Any, image_size: tuple[int, int]) -> bool:
+    """Return whether every 2D point is finite and inside the image."""
+    values = np.asarray(points, dtype=np.float64)
+    if values.shape != (21, 2) or not np.isfinite(values).all():
+        return False
+    width, height = image_size
+    return bool(
+        np.all(values[:, 0] >= 0.0) and np.all(values[:, 0] < width)
+        and np.all(values[:, 1] >= 0.0) and np.all(values[:, 1] < height)
+    )
+
+
+def _complete21_source_view(
+    view: dict[str, Any], image_size: tuple[int, int],
+) -> bool:
+    """Require 21 real RANSAC inliers that are inside this source camera."""
+    return (
+        int(view.get("inlier_joint_count", 0)) == 21
+        and _all_points_inside(view.get("joints_2d"), image_size)
+    )
 
 
 def _finite_error(values: np.ndarray) -> tuple[float, float]:
@@ -485,11 +514,23 @@ def main() -> int:
 
             for camera in cameras:
                 view = hand.get("views", {}).get(camera)
-                if view is None or int(view.get("inlier_joint_count", 0)) < args.min_camera_inlier_joints:
+                inlier_joint_count = (
+                    0 if view is None else int(view.get("inlier_joint_count", 0))
+                )
+                if view is None or inlier_joint_count < args.min_camera_inlier_joints:
                     rejected.append({
                         "sync_index": sync_index, "side": side, "camera": camera,
                         "reason": "too_few_camera_inlier_joints",
-                        "inlier_joint_count": 0 if view is None else int(view["inlier_joint_count"]),
+                        "inlier_joint_count": inlier_joint_count,
+                    })
+                    continue
+                if args.view_filter == "complete21" and not _complete21_source_view(
+                    view, tuple(manifest["image_size"])
+                ):
+                    rejected.append({
+                        "sync_index": sync_index, "side": side, "camera": camera,
+                        "reason": "camera_view_not_complete21",
+                        "inlier_joint_count": inlier_joint_count,
                     })
                     continue
                 error_key = (
@@ -514,10 +555,20 @@ def main() -> int:
                 sample_K = K.copy()
                 try:
                     projected = _project(physical_vertices, trans, sample_K)
+                    projected_joints = _project(physical_joints, trans, sample_K)
                 except ValueError as error:
                     rejected.append({
                         "sync_index": sync_index, "side": side, "camera": camera,
                         "reason": "mesh_projection_failed", "detail": str(error),
+                    })
+                    continue
+                if args.view_filter == "complete21" and not _all_points_inside(
+                    projected_joints, rectification["image_size"]
+                ):
+                    rejected.append({
+                        "sync_index": sync_index, "side": side, "camera": camera,
+                        "reason": "rectified_mano_joints_not_complete21",
+                        "inlier_joint_count": inlier_joint_count,
                     })
                     continue
                 bbox = _mesh_bbox(
@@ -562,7 +613,8 @@ def main() -> int:
                         "stored_image_space": "physical_rectified",
                         "stored_image_horizontally_flipped": False,
                         "mano_parameter_space": "right_canonical",
-                        "camera_inlier_joint_count": int(view["inlier_joint_count"]),
+                        "view_filter": args.view_filter,
+                        "camera_inlier_joint_count": inlier_joint_count,
                         "fit_reprojection_median_px": median_error,
                         "fit_reprojection_p95_px": p95_error,
                         "fusion_mode": hand.get("fusion_mode"),
@@ -697,6 +749,7 @@ def main() -> int:
             "image_size": list(rectification["image_size"]),
             "K": K.tolist(),
             "cameras": list(cameras),
+            "view_filter": args.view_filter,
             "source": "strict six-view WiLoR fusion + shared MANO sequence fit",
             "mano_model_by_side": {
                 "left": "MANO_RIGHT.pkl",
@@ -715,6 +768,7 @@ def main() -> int:
                 "max_reprojection_median_px": args.max_reprojection_median_px,
                 "max_reprojection_p95_px": args.max_reprojection_p95_px,
                 "min_visible_vertex_fraction": args.min_visible_vertex_fraction,
+                "require_complete_camera_joints": args.view_filter == "complete21",
             },
         }
         if summary["image_count"] != len(pending) or summary["label_count"] != len(pending):

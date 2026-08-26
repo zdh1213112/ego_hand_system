@@ -130,6 +130,36 @@ conda activate ego-hand
 这表示按 `sync_index` 每 3 个同步帧保留 1 帧，并额外保留最后一帧；camera2/3、左右手标签
 仍然按同一个同步帧成组导出。`--sample-stride 0` 或省略参数时使用运动自适应模式。
 
+只导出单个相机并严格要求该相机完整看到 21 点：
+
+```bash
+  --export-camera camera2 \
+  --view-filter complete21
+```
+
+视角筛选有两种模式：
+
+- `legacy`：默认兼容模式，目标相机达到原有最低内点数即可，3D 可以由其他相机补全；
+- `complete21`：目标相机自身必须有 21 个 RANSAC 内点，原始二维点全部位于该相机画面内，
+  且拟合后的 21 个 MANO 关节全部位于最终校正训练图内。
+
+`--export-camera` 可重复使用以导出多个视角；不指定时仍导出 camera2 和 camera3。该配置只改变
+样本是否导出，不改变 `.npy` 标签的字段、dtype、shape 或坐标约定。
+
+标签校验通过后，脚本默认生成：
+
+```text
+dataset/visualization/
+├── camera2_sync000012_complete21.jpg
+├── camera2_sync000087_complete21.jpg
+├── ...
+└── summary.json
+```
+
+默认随机抽取 12 个 `sync_index`，同一张图合并左右手，并绘制 MANO 网格点、21 关节骨架、
+关节编号、手框、左右手身份和目标相机内点数。使用 `--visualization-samples 20` 可调整数量，
+`--visualization-seed 42` 控制可复现的随机结果，`--render-visualization 0` 可关闭。可视化不会修改标签。
+
 该命令不会重新运行六路 WiLoR。它只执行：
 
 1. 六目 3D 转换为 MANO 拟合输入；
@@ -408,6 +438,7 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 - 更换 camera2/3；
 - 改变 `--max-samples`；
 - 改变 `--sample-stride` 或抽帧模式；
+- 改变 `--export-camera` 或 `--view-filter`；
 - 改变关键拟合或质量参数。
 
 如果某阶段只有目录但没有 `summary.json`，脚本会停止，不会自动删除中间结果。保留失败

@@ -278,6 +278,48 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 
 `--sample-stride 0`（默认）表示运动自适应；`--max-samples` 仍然只是最终数量上限。
 
+如果训练集只需要 `camera2`，并且要求该相机自身完整观测到 21 个关节，可使用：
+
+```bash
+  --export-camera camera2 \
+  --view-filter complete21
+```
+
+```bash
+./scripts/run_multiview_wilor_label_export.sh \
+  --experiment /home/zdh/ego_hand_system/output/gen4_new_run \
+  --fusion /home/zdh/ego_hand_system/output/gen4_new_run/fusion_multiview \
+  --output /home/zdh/ego_hand_system/output/gen4_new_run/wilor_labels_camera2_complete21 \
+  --conda-env ego-hand \
+  --device cuda \
+  --export-camera camera2 \
+  --view-filter complete21 \
+  --max-samples 0
+```
+
+`--view-filter legacy`（默认）保持原有规则，允许其他相机参与融合补全；`complete21` 则要求
+目标相机自身的 21 个关节全部为 RANSAC 内点，并且原始图和最终校正图中的 21 个关节都在
+画面范围内。该开关只筛选样本，不改变 `.npy` 标签字段或格式。
+
+导出完成后默认还会在 `dataset/visualization/` 随机抽取 12 个同步帧，生成带 21 关节骨架
+和手框的 JPG。每张图会将同一个 `sync_index` 的左右手画在一起；可用
+`--visualization-samples 20` 调整数量，或用 `--render-visualization 0` 关闭。
+
+```bash
+./scripts/run_multiview_wilor_label_export.sh \
+  --experiment /home/zdh/ego_hand_system/output/gen4_new_run \
+  --fusion /home/zdh/ego_hand_system/output/gen4_new_run/fusion_multiview \
+  --output /home/zdh/ego_hand_system/output/gen4_new_run/wilor_labels_camera2_complete21 \
+  --conda-env ego-hand \
+  --device cuda \
+  --export-camera camera2 \
+  --view-filter complete21 \
+  --sample-stride 3 \
+  --visualization-samples 20 \
+  --max-samples 0
+```
+
+
 导出结构：
 
 ```text
