@@ -14,12 +14,13 @@ FRAME_BATCH_SIZE=""
 PREPROCESS_WORKERS=""
 MAX_DETECTIONS_PER_CLASS=""
 COMPILE_BACKBONE=""
+FUSION_WORKERS=""
 GPU_PROFILE="compatible"
 NO_VIDEO=0
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
-  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--no-video]"
+  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--no-video]"
 }
 
 while (($#)); do
@@ -43,6 +44,7 @@ while (($#)); do
     --preprocess-workers) PREPROCESS_WORKERS="$2"; shift 2 ;;
     --max-detections-per-class) MAX_DETECTIONS_PER_CLASS="$2"; shift 2 ;;
     --compile-backbone) COMPILE_BACKBONE="$2"; shift 2 ;;
+    --fusion-workers) FUSION_WORKERS="$2"; shift 2 ;;
     --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -57,6 +59,7 @@ case "$GPU_PROFILE" in
     PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-1}"
     MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-0}"
     COMPILE_BACKBONE="${COMPILE_BACKBONE:-0}"
+    FUSION_WORKERS="${FUSION_WORKERS:-1}"
     ;;
   rtx5090d)
     BATCH_SIZE="${BATCH_SIZE:-16}"
@@ -64,6 +67,7 @@ case "$GPU_PROFILE" in
     PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-8}"
     MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-1}"
     COMPILE_BACKBONE="${COMPILE_BACKBONE:-1}"
+    FUSION_WORKERS="${FUSION_WORKERS:-8}"
     ;;
   *)
     echo "--gpu-profile must be compatible or rtx5090d: $GPU_PROFILE" >&2
@@ -104,7 +108,7 @@ if [[ ! -f "$MCAP" ]]; then
   echo "MCAP does not exist: $MCAP" >&2
   exit 2
 fi
-if ! [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$FRAME_BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$PREPROCESS_WORKERS" =~ ^[1-9][0-9]*$ && "$MAX_DETECTIONS_PER_CLASS" =~ ^[0-9]+$ && "$COMPILE_BACKBONE" =~ ^[01]$ ]]; then
+if ! [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$FRAME_BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$PREPROCESS_WORKERS" =~ ^[1-9][0-9]*$ && "$MAX_DETECTIONS_PER_CLASS" =~ ^[0-9]+$ && "$COMPILE_BACKBONE" =~ ^[01]$ && "$FUSION_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   echo "frames/detection limit must be non-negative; batch sizes/workers must be positive" >&2
   exit 2
 fi
@@ -132,12 +136,12 @@ run_python() {
     python "$@"
 }
 
-run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" <<'PY'
+run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$FUSION_WORKERS" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, camera_csv, reference_camera, anchor_cameras_text = sys.argv[1:]
+config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, fusion_workers, camera_csv, reference_camera, anchor_cameras_text = sys.argv[1:]
 source = Path(source_text).resolve()
 stat = source.stat()
 camera_ids = camera_csv.split(",")
@@ -154,6 +158,7 @@ config = {
     "preprocess_workers": int(preprocess_workers),
     "max_detections_per_class": int(max_detections_per_class),
     "compile_backbone": bool(int(compile_backbone)),
+    "fusion_workers": int(fusion_workers),
     "camera_confidences": {"camera0": 0.2, "camera1": 0.3, "camera2": 0.3,
                            "camera3": 0.3, "camera4": 0.1, "camera5": 0.1},
     "fusion_algorithm": "anchor_guided_dynamic_temporal_handedness_v3",
@@ -169,6 +174,15 @@ if path.exists():
     )
     previous.setdefault("max_detections_per_class", 0)
     previous.setdefault("compile_backbone", False)
+    previous.setdefault(
+        "fusion_workers", 8 if previous["gpu_profile"] == "rtx5090d" else 1
+    )
+    previous.setdefault(
+        "anchor_cameras",
+        ["camera2", "camera3"]
+        if {"camera2", "camera3"}.issubset(previous["cameras"])
+        else previous["cameras"][:2],
+    )
     if previous != config:
         changed = next(key for key in config if previous.get(key) != config[key])
         raise SystemExit(
@@ -222,7 +236,8 @@ if [[ ! -f "$FUSION/summary.json" ]]; then
   run_python "$ROOT/scripts/fuse_multiview_wilor_guided.py" \
     --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --output "$FUSION" \
     --cameras "${CAMERAS[@]}" \
-    --anchor-cameras "${ANCHOR_CAMERAS[@]}" --detector-handedness strict --max-frames "$MAX_FRAMES"
+    --anchor-cameras "${ANCHOR_CAMERAS[@]}" --detector-handedness strict \
+    --workers "$FUSION_WORKERS" --max-frames "$MAX_FRAMES"
 else
   echo "[multiview] reuse fused result"
 fi

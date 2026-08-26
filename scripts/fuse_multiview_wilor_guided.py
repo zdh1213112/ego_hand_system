@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 import itertools
 import json
+import multiprocessing
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -57,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal-recovery-gap", type=int, default=3)
     parser.add_argument("--temporal-association-threshold-px", type=float, default=90.0)
     parser.add_argument("--max-temporal-wrist-step-m", type=float, default=0.12)
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="independent frame-fusion worker processes",
+    )
+    parser.add_argument("--progress-interval", type=int, default=25)
     parser.add_argument("--max-frames", type=int, default=0)
     return parser.parse_args()
 
@@ -313,10 +321,180 @@ def _recover_from_reference(
         "active_camera_count": len(active),
         "hands": hands,
     }
+
+
+def _evaluate_anchor_pairs(
+    anchor_pairs: list[tuple[str, str]],
+    complete_by_camera: dict[str, list[int]],
+    groups: dict[str, dict[int, dict[int, dict[str, Any]]]],
+    calibrations: dict[str, CameraCalibration],
+    cameras: tuple[str, ...],
+    preferred_anchors: tuple[str, str],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    results = []
+    for anchor_pair in anchor_pairs:
+        pair_options = [
+            _ordered_hand_pairs(
+                complete_by_camera[camera], groups[camera], args.detector_handedness
+            )
+            for camera in anchor_pair
+        ]
+        for detection_pairs in itertools.product(*pair_options):
+            candidate = _evaluate_anchor_assignment(
+                anchor_pair, detection_pairs, groups, calibrations, cameras, args
+            )
+            if np.isfinite(candidate["cost"]):
+                missing_preferred = len(set(preferred_anchors) - set(anchor_pair))
+                candidate["cost"] += 5.0 * missing_preferred
+                results.append(candidate)
+    return results
+
+
+def _fuse_primary_frame(
+    sync_index: int,
+    prediction_rows: dict[str, dict[int, dict[str, Any]]],
+    calibrations: dict[str, CameraCalibration],
+    cameras: tuple[str, ...],
+    preferred_anchors: tuple[str, str],
+    args: argparse.Namespace,
+) -> tuple[bool, dict[str, Any]]:
+    groups = {
+        camera: _groups(prediction_rows[camera][sync_index]) for camera in cameras
+    }
+    complete_by_camera = {
+        camera: _complete_detections(groups[camera], args.max_anchor_detections)
+        for camera in cameras
+    }
+    preferred_available = all(
+        len(complete_by_camera[camera]) >= 2 for camera in preferred_anchors
+    )
+    fallback_pairs = [
+        pair for pair in itertools.combinations(cameras, 2)
+        if pair != preferred_anchors
+        and any(camera in preferred_anchors for camera in pair)
+        and all(len(complete_by_camera[camera]) >= 2 for camera in pair)
+    ]
+    if not preferred_available and not fallback_pairs:
+        return False, {
+            "sync_index": sync_index,
+            "reason": "no_two_camera_anchor_with_two_hands",
+        }
+
+    candidates = (
+        _evaluate_anchor_pairs(
+            [preferred_anchors], complete_by_camera, groups, calibrations,
+            cameras, preferred_anchors, args,
+        )
+        if preferred_available else []
+    )
+    usable = [
+        candidate for candidate in candidates
+        if not _quality_reasons(candidate["results"], args)
+    ]
+    if not usable and fallback_pairs:
+        fallback_candidates = _evaluate_anchor_pairs(
+            fallback_pairs, complete_by_camera, groups, calibrations,
+            cameras, preferred_anchors, args,
+        )
+        candidates.extend(fallback_candidates)
+        usable = [
+            candidate for candidate in fallback_candidates
+            if not _quality_reasons(candidate["results"], args)
+        ]
+    if not candidates:
+        return False, {"sync_index": sync_index, "reason": "no_valid_anchor_assignment"}
+
+    candidates.sort(key=lambda item: item["cost"])
+    usable.sort(key=lambda item: item["cost"])
+    best = usable[0] if usable else candidates[0]
+    chosen_anchors = tuple(best["anchor_cameras"])
+    quality_reasons = _quality_reasons(best["results"], args)
+    if quality_reasons:
+        return False, {
+            "sync_index": sync_index,
+            "reasons": sorted(set(quality_reasons)),
+        }
+    margin = usable[1]["cost"] - best["cost"] if len(usable) > 1 else None
+    hands = []
+    for side, result in enumerate(best["results"]):
+        hand = _serialize_hand(
+            result, best["selected"][side], calibrations, chosen_anchors
+        )
+        hand["association_error_px"] = best["association_errors"][side]
+        hand["fusion_mode"] = (
+            "multiview" if len(best["selected"][side]) >= 3 else "stereo_anchor"
+        )
+        hands.append(hand)
+    active_cameras = sorted(set().union(*(hand["camera_ids"] for hand in hands)))
+    return True, {
+        "sync_index": sync_index,
+        "anchor_cameras": list(chosen_anchors),
+        "assignment_cost": best["cost"],
+        "assignment_margin": margin,
+        "active_cameras": active_cameras,
+        "active_camera_count": len(active_cameras),
+        "hands": hands,
+    }
+
+
+_FUSION_WORKER_CONTEXT: tuple[Any, ...] | None = None
+
+
+def _initialize_fusion_worker(
+    prediction_rows: dict[str, dict[int, dict[str, Any]]],
+    calibrations: dict[str, CameraCalibration],
+    cameras: tuple[str, ...],
+    preferred_anchors: tuple[str, str],
+    args: argparse.Namespace,
+) -> None:
+    global _FUSION_WORKER_CONTEXT
+    _FUSION_WORKER_CONTEXT = (
+        prediction_rows, calibrations, cameras, preferred_anchors, args,
+    )
+
+
+def _fuse_primary_frame_worker(sync_index: int) -> tuple[bool, dict[str, Any]]:
+    if _FUSION_WORKER_CONTEXT is None:
+        raise RuntimeError("fusion worker was not initialized")
+    return _fuse_primary_frame(sync_index, *_FUSION_WORKER_CONTEXT)
+
+
+def _primary_results(
+    frame_ids: list[int],
+    prediction_rows: dict[str, dict[int, dict[str, Any]]],
+    calibrations: dict[str, CameraCalibration],
+    cameras: tuple[str, ...],
+    preferred_anchors: tuple[str, str],
+    args: argparse.Namespace,
+):
+    if args.workers == 1:
+        for sync_index in frame_ids:
+            yield _fuse_primary_frame(
+                sync_index, prediction_rows, calibrations, cameras,
+                preferred_anchors, args,
+            )
+        return
+    start_methods = multiprocessing.get_all_start_methods()
+    method = "fork" if "fork" in start_methods else start_methods[0]
+    with ProcessPoolExecutor(
+        max_workers=args.workers,
+        mp_context=multiprocessing.get_context(method),
+        initializer=_initialize_fusion_worker,
+        initargs=(prediction_rows, calibrations, cameras, preferred_anchors, args),
+    ) as executor:
+        yield from executor.map(_fuse_primary_frame_worker, frame_ids, chunksize=1)
+
+
 def main() -> int:
     args = parse_args()
     if args.output.exists():
         raise FileExistsError(f"output already exists: {args.output}")
+    if args.workers < 1 or args.progress_interval < 1 or args.max_frames < 0:
+        raise ValueError(
+            "workers/progress-interval must be positive; max-frames must be non-negative"
+        )
+    fusion_started = time.perf_counter()
     dataset = args.dataset.resolve()
     prediction_root = args.predictions.resolve()
     manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
@@ -342,88 +520,21 @@ def main() -> int:
     frame_ids = frame_ids[: args.max_frames or None]
     accepted = []
     rejected = []
-    reasons: Counter[str] = Counter()
-    for sync_index in frame_ids:
-        groups = {camera: _groups(prediction_rows[camera][sync_index]) for camera in cameras}
-        complete_by_camera = {
-            camera: _complete_detections(groups[camera], args.max_anchor_detections)
-            for camera in cameras
-        }
-        preferred_available = all(
-            len(complete_by_camera[camera]) >= 2 for camera in preferred_anchors
-        )
-        fallback_pairs = [
-            pair for pair in itertools.combinations(cameras, 2)
-            if pair != preferred_anchors
-            and any(camera in preferred_anchors for camera in pair)
-            and all(len(complete_by_camera[camera]) >= 2 for camera in pair)
-        ]
-        if not preferred_available and not fallback_pairs:
-            reason = "no_two_camera_anchor_with_two_hands"
-            rejected.append({"sync_index": sync_index, "reason": reason})
-            reasons[reason] += 1
-            continue
-        def evaluate_pairs(anchor_pairs: list[tuple[str, str]]) -> list[dict[str, Any]]:
-            result = []
-            for anchor_pair in anchor_pairs:
-                pair_options = [
-                    _ordered_hand_pairs(
-                        complete_by_camera[camera], groups[camera], args.detector_handedness
-                    )
-                    for camera in anchor_pair
-                ]
-                for detection_pairs in itertools.product(*pair_options):
-                    candidate = _evaluate_anchor_assignment(
-                        anchor_pair, detection_pairs, groups, calibrations, cameras, args
-                    )
-                    if np.isfinite(candidate["cost"]):
-                        missing_preferred = len(set(preferred_anchors) - set(anchor_pair))
-                        candidate["cost"] += 5.0 * missing_preferred
-                        result.append(candidate)
-            return result
-
-        candidates = evaluate_pairs([preferred_anchors]) if preferred_available else []
-        usable = [candidate for candidate in candidates if not _quality_reasons(candidate["results"], args)]
-        if not usable and fallback_pairs:
-            fallback_candidates = evaluate_pairs(fallback_pairs)
-            candidates.extend(fallback_candidates)
-            usable = [
-                candidate for candidate in fallback_candidates
-                if not _quality_reasons(candidate["results"], args)
-            ]
-        if not candidates:
-            reason = "no_valid_anchor_assignment"
-            rejected.append({"sync_index": sync_index, "reason": reason})
-            reasons[reason] += 1
-            continue
-        candidates.sort(key=lambda item: item["cost"])
-        usable.sort(key=lambda item: item["cost"])
-        best = usable[0] if usable else candidates[0]
-        chosen_anchors = tuple(best["anchor_cameras"])
-        quality_reasons = _quality_reasons(best["results"], args)
-        if quality_reasons:
-            quality_reasons = sorted(set(quality_reasons))
-            rejected.append({"sync_index": sync_index, "reasons": quality_reasons})
-            reasons.update(quality_reasons)
-            continue
-        margin = usable[1]["cost"] - best["cost"] if len(usable) > 1 else None
-        hands = []
-        for side, result in enumerate(best["results"]):
-            hand = _serialize_hand(
-                result, best["selected"][side], calibrations, chosen_anchors
+    primary_started = time.perf_counter()
+    results = _primary_results(
+        frame_ids, prediction_rows, calibrations, cameras, preferred_anchors, args
+    )
+    for completed, (is_accepted, row) in enumerate(results, start=1):
+        (accepted if is_accepted else rejected).append(row)
+        if completed % args.progress_interval == 0 or completed == len(frame_ids):
+            elapsed = time.perf_counter() - primary_started
+            print(
+                f"fusion: {completed}/{len(frame_ids)} | "
+                f"{completed / max(elapsed, 1e-9):.2f} frames/s | "
+                f"workers={args.workers}",
+                flush=True,
             )
-            hand["association_error_px"] = best["association_errors"][side]
-            hand["fusion_mode"] = "multiview" if len(best["selected"][side]) >= 3 else "stereo_anchor"
-            hands.append(hand)
-        accepted.append({
-            "sync_index": sync_index,
-            "anchor_cameras": list(chosen_anchors),
-            "assignment_cost": best["cost"],
-            "assignment_margin": margin,
-            "active_cameras": sorted(set().union(*(hand["camera_ids"] for hand in hands))),
-            "active_camera_count": len(set().union(*(hand["camera_ids"] for hand in hands))),
-            "hands": hands,
-        })
+    primary_seconds = time.perf_counter() - primary_started
     primary_accepted_count = len(accepted)
     temporal_recovered = []
     if args.temporal_recovery_gap > 0 and accepted:
@@ -504,6 +615,7 @@ def main() -> int:
     ]
     stereo_cross_median = float(np.median(stereo_cross_view)) if stereo_cross_view else None
     multiview_cross_median = float(np.median(multiview_cross_view)) if multiview_cross_view else None
+    fusion_seconds = time.perf_counter() - fusion_started
     summary = {
         "schema_version": 1,
         "stage": "wilor_anchor_guided_multiview_fusion",
@@ -535,6 +647,10 @@ def main() -> int:
             float(np.median([hand["quality"]["multiview_reprojection_median_px"] for hand in hands]))
             if hands else None
         ),
+        "fusion_workers": args.workers,
+        "primary_fusion_seconds": primary_seconds,
+        "fusion_seconds": fusion_seconds,
+        "fusion_frames_per_second": len(frame_ids) / max(fusion_seconds, 1e-9),
         "stereo_anchor_comparison": {
             "comparable_hand_count": len(stereo_cross_view),
             "stereo_cross_view_median_px": stereo_cross_median,
@@ -555,6 +671,7 @@ def main() -> int:
             "temporal_recovery_gap": args.temporal_recovery_gap,
             "temporal_association_threshold_px": args.temporal_association_threshold_px,
             "detector_handedness": args.detector_handedness,
+            "workers": args.workers,
         },
     }
     (output / "summary.json").write_text(
