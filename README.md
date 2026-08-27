@@ -265,6 +265,37 @@ gen6_batch_5090d/
 `run_config.json` 仍负责断点复用和参数一致性检查。可先加 `--dry-run` 只检查将要执行的
 文件和命令；需要递归搜索子目录时加 `--recursive`。
 
+### 多个实验批量生成训练标签
+
+上一步批量生成多个实验后，标签也可以批量导出。各实验分别保存：
+
+```bash
+./scripts/run_multiview_wilor_label_batch.sh \
+  --experiment-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
+  --layout separate \
+  --conda-env ego-hand --device cuda \
+  --export-camera camera2 --view-filter complete21 \
+  --max-samples 0
+```
+
+默认写入每个实验自己的 `wilor_labels_camera2_complete21/`。如果希望分别保存，但集中放到
+另一个根目录，再增加 `--output-root /path/to/separate_labels`。
+
+如果希望所有录制最终合并成同一个训练数据集：
+
+```bash
+./scripts/run_multiview_wilor_label_batch.sh \
+  --experiment-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
+  --output-root /home/p3/data_sda1/ego_hand_system/output/wilor_labels_merged \
+  --layout merged \
+  --conda-env ego-hand --device cuda \
+  --export-camera camera2 --view-filter complete21 \
+  --max-samples 0
+```
+
+合并模式在 `runs/<实验名>/` 保留每段录制的 MANO 拟合和断点缓存，最终训练集位于
+`dataset/`。图片和标签统一重新编号，`.npy` 内容不修改，`index.jsonl` 额外记录来源实验。
+
 ### GEN 四目子集测试
 
 已有六路标准化数据和 WiLoR 预测时，可以只选择部分相机重新融合，不需要重复运行模型。

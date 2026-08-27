@@ -462,6 +462,56 @@ MCAP 都会写入独立的 `<output-root>/<文件名去掉扩展名>/`，不会�
 `batch_status.jsonl`（逐文件状态）和 `batch_summary.json`（总汇总），每个文件另有同名
 `.log`。如果递归目录中存在相同输出名，脚本会在开始前报冲突并停止。
 
+### 11.1 标签批量导出：每段分别保存
+
+```bash
+./scripts/run_multiview_wilor_label_batch.sh \
+  --experiment-root /path/to/gen6_batch_5090d \
+  --layout separate \
+  --conda-env ego-hand --device cuda \
+  --export-camera camera2 --view-filter complete21 \
+  --max-samples 0
+```
+
+不指定 `--output-root` 时，每个实验写到自己的
+`<experiment>/wilor_labels_camera2_complete21/`。指定 `--output-root` 时，各自的数据改为
+集中写到 `<output-root>/<experiment-name>/`，但仍是相互独立的数据集。
+
+### 11.2 标签批量导出：合并为同一训练集
+
+```bash
+./scripts/run_multiview_wilor_label_batch.sh \
+  --experiment-root /path/to/gen6_batch_5090d \
+  --output-root /path/to/wilor_labels_merged \
+  --layout merged \
+  --conda-env ego-hand --device cuda \
+  --export-camera camera2 --view-filter complete21 \
+  --max-samples 0
+```
+
+输出结构：
+
+```text
+wilor_labels_merged/
+├── label_batch_status.jsonl
+├── label_batch_summary.json
+├── runs/
+│   ├── recording_A/       # MANO 拟合、单段标签及断点缓存
+│   └── recording_B/
+└── dataset/               # 最终统一训练集
+    ├── images/
+    ├── labels/
+    ├── index.jsonl
+    ├── rejected.jsonl
+    ├── merge_config.json
+    ├── summary.json
+    └── visualization/
+```
+
+合并阶段只复制并统一重命名 JPG/NPY；NPY 内的字段、dtype、shape 和数值不变。
+`index.jsonl` 增加 `source_dataset`、`source_experiment` 和 `source_index`，用于追溯原始录制。
+所有来源的 MANO 规范和模型资产必须一致，否则合并会停止。
+
 ## 12. 当前结果状态
 
 统一右手规范的正式输出目标目录：
@@ -539,6 +589,8 @@ camera2/3 是稳定主视角，并且可以构造共同针孔校正平面，使�
 |---|---|
 | `scripts/run_multiview_wilor_experiment.sh` | 从 MCAP 完成六目推理、融合和诊断视频 |
 | `scripts/run_multiview_wilor_batch.sh` | 批量逐个运行目录中的多个 MCAP |
+| `scripts/run_multiview_wilor_label_batch.sh` | 批量导出标签，支持分别保存或合并训练集 |
+| `scripts/merge_wilor_training_datasets.py` | 无损合并已校验的 WiLoR 图片/NPY 数据集 |
 | `scripts/run_multiview_wilor_label_export.sh` | 从六目结果一键导出训练数据 |
 | `scripts/prepare_multiview_mano_input.py` | 坐标转换、身份审计、MANO 输入准备 |
 | `scripts/fit_mano_sequence.py` | 左右手 MANO 时序拟合 |
