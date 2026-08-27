@@ -14,6 +14,9 @@ import numpy as np
 from render_wilor_predictions import HAND_CONNECTIONS, LEFT_COLOR, RIGHT_COLOR
 
 
+VISUALIZATION_SCHEMA_VERSION = 2
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path)
@@ -95,6 +98,39 @@ def _random_sync_indices(
     return sorted(int(value) for value in selected)
 
 
+def _frame_key(row: dict[str, Any]) -> tuple[int | None, int]:
+    source_dataset_id = row.get("source_dataset_id")
+    return (
+        None if source_dataset_id is None else int(source_dataset_id),
+        int(row["sync_index"]),
+    )
+
+
+def _group_frame_rows(
+    rows: list[dict[str, Any]],
+) -> dict[tuple[int | None, int], list[dict[str, Any]]]:
+    grouped: dict[tuple[int | None, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_frame_key(row), []).append(row)
+    return grouped
+
+
+def _random_frame_keys(
+    frame_keys: list[tuple[int | None, int]],
+    sample_count: int,
+    rng: np.random.Generator,
+) -> list[tuple[int | None, int]]:
+    if sample_count <= 0:
+        raise ValueError("samples must be positive")
+    if len(frame_keys) <= sample_count:
+        return list(frame_keys)
+    selected = sorted(
+        int(value)
+        for value in rng.choice(len(frame_keys), size=sample_count, replace=False)
+    )
+    return [frame_keys[index] for index in selected]
+
+
 def _reuse_complete(
     path: Path, dataset: Path, cameras: tuple[str, ...], samples: int, seed: int,
 ) -> bool:
@@ -105,7 +141,8 @@ def _reuse_complete(
     except (OSError, ValueError):
         return False
     if (
-        previous.get("dataset") != str(dataset)
+        int(previous.get("schema_version", -1)) != VISUALIZATION_SCHEMA_VERSION
+        or previous.get("dataset") != str(dataset)
         or int(previous.get("seed", -1)) != seed
         or int(previous.get("samples_per_camera", -1)) != samples
         or [result.get("camera") for result in previous.get("results", [])] != list(cameras)
@@ -159,21 +196,26 @@ def main() -> int:
     results = []
     for camera in cameras:
         camera_rows = [row for row in rows if row.get("camera") == camera]
-        grouped: dict[int, list[dict[str, Any]]] = {}
-        for row in camera_rows:
-            grouped.setdefault(int(row["sync_index"]), []).append(row)
-        available_sync_indices = sorted(grouped)
-        if not available_sync_indices:
+        grouped = _group_frame_rows(camera_rows)
+        available_frame_keys = sorted(
+            grouped,
+            key=lambda key: (-1 if key[0] is None else key[0], key[1]),
+        )
+        if not available_frame_keys:
             raise RuntimeError(f"no samples available for visualization camera {camera}")
-        sync_indices = _random_sync_indices(
-            available_sync_indices, args.samples, rng
+        frame_keys = _random_frame_keys(
+            available_frame_keys, args.samples, rng
         )
 
         view_filter = str(summary.get("view_filter", "legacy"))
         width, height = (int(value) for value in summary["image_size"])
         image_names = []
-        for sync_index in sync_indices:
-            group = sorted(grouped[sync_index], key=lambda row: int(row["side"]))
+        selected_frames = []
+        for source_dataset_id, sync_index in frame_keys:
+            group = sorted(
+                grouped[(source_dataset_id, sync_index)],
+                key=lambda row: int(row["side"]),
+            )
             frame = cv2.imread(str(dataset / group[0]["image"]), cv2.IMREAD_COLOR)
             if frame is None or frame.shape[1::-1] != (width, height):
                 raise RuntimeError(f"cannot read visualization image for sync {sync_index}")
@@ -183,30 +225,47 @@ def main() -> int:
             requirement = (
                 "21/21 required" if view_filter == "complete21" else "legacy view filter"
             )
-            status = (
-                f"{camera} | sync {sync_index} | {view_filter} | "
-                f"hands {len(group)} | {requirement}"
-            )
+            status_parts = [camera]
+            if source_dataset_id is not None:
+                status_parts.append(f"source {source_dataset_id}")
+            status_parts.extend((
+                f"sync {sync_index}", view_filter,
+                f"hands {len(group)}", requirement,
+            ))
+            status = " | ".join(status_parts)
             cv2.rectangle(frame, (0, 0), (width, 58), (16, 24, 32), -1)
             cv2.putText(
                 frame, status, (24, 39), cv2.FONT_HERSHEY_SIMPLEX,
                 0.92, (245, 245, 245), 2, cv2.LINE_AA,
             )
-            image_name = f"{camera}_sync{sync_index:06d}_{view_filter}.jpg"
+            source_token = (
+                "" if source_dataset_id is None else f"_source{source_dataset_id:04d}"
+            )
+            image_name = (
+                f"{camera}{source_token}_sync{sync_index:06d}_{view_filter}.jpg"
+            )
             if not cv2.imwrite(str(output / image_name), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
                 raise RuntimeError(f"cannot write visualization image: {image_name}")
             image_names.append(image_name)
+            selected_frames.append({
+                "source_dataset_id": source_dataset_id,
+                "source_experiment": group[0].get("source_experiment"),
+                "sync_index": sync_index,
+                "hand_count": len(group),
+            })
         results.append({
             "camera": camera,
             "view_filter": view_filter,
-            "available_sync_count": len(available_sync_indices),
-            "visualized_sync_count": len(sync_indices),
-            "selected_sync_indices": sync_indices,
+            "available_frame_count": len(available_frame_keys),
+            "visualized_frame_count": len(frame_keys),
+            "selected_frames": selected_frames,
+            "selected_sync_indices": [key[1] for key in frame_keys],
             "images": image_names,
         })
-        print(f"[visualization] {camera}: {len(sync_indices)} random frames -> {output}")
+        print(f"[visualization] {camera}: {len(frame_keys)} random frames -> {output}")
 
     visualization_summary = {
+        "schema_version": VISUALIZATION_SCHEMA_VERSION,
         "stage": "wilor_training_label_visualization",
         "dataset": str(dataset),
         "seed": args.seed,

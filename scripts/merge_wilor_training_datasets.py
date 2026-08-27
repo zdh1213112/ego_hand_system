@@ -40,6 +40,10 @@ def _common(summaries: list[dict[str, Any]], key: str) -> Any:
     return values[0] if all(value == values[0] for value in values) else None
 
 
+def _source_experiment_name(dataset: Path) -> str:
+    return dataset.parent.name
+
+
 def main() -> int:
     args = parse_args()
     inputs = tuple(dict.fromkeys(path.resolve() for path in args.inputs))
@@ -110,7 +114,7 @@ def main() -> int:
         index = 0
         for source_id, record in enumerate(source_records):
             dataset = record["dataset"]
-            source_name = dataset.parents[1].name
+            source_name = _source_experiment_name(dataset)
             for row in record["rows"]:
                 stem = f"{index:08d}"
                 shutil.copy2(dataset / row["image"], image_root / f"{stem}.jpg")

@@ -17,7 +17,10 @@ from export_multiview_wilor_training_dataset import (
     _select_sync_indices,
 )
 from prepare_multiview_mano_input import _project_rectified
-from render_wilor_training_dataset import _project_label_joints, _random_sync_indices
+from merge_wilor_training_datasets import _source_experiment_name
+from render_wilor_training_dataset import (
+    _group_frame_rows, _project_label_joints, _random_sync_indices,
+)
 from mano_conventions import (
     MIRROR_X,
     canonical_projection_rotation,
@@ -34,6 +37,30 @@ class MultiviewWilorTrainingExportTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 12)
         self.assertEqual(len(set(first)), 12)
+
+    def test_visualization_keeps_identical_sync_indices_from_sources_separate(self):
+        rows = [
+            {"source_dataset_id": 0, "sync_index": 50, "side": 0},
+            {"source_dataset_id": 0, "sync_index": 50, "side": 1},
+            {"source_dataset_id": 1, "sync_index": 50, "side": 0},
+        ]
+        grouped = _group_frame_rows(rows)
+        self.assertEqual(set(grouped), {(0, 50), (1, 50)})
+        self.assertEqual(len(grouped[(0, 50)]), 2)
+        self.assertEqual(len(grouped[(1, 50)]), 1)
+
+    def test_visualization_single_dataset_still_groups_both_hands(self):
+        rows = [
+            {"sync_index": 50, "side": 0},
+            {"sync_index": 50, "side": 1},
+        ]
+        grouped = _group_frame_rows(rows)
+        self.assertEqual(set(grouped), {(None, 50)})
+        self.assertEqual(len(grouped[(None, 50)]), 2)
+
+    def test_merged_source_experiment_uses_dataset_parent(self):
+        dataset = Path("/output/runs/experiment_123/dataset")
+        self.assertEqual(_source_experiment_name(dataset), "experiment_123")
 
     def test_visualization_projects_exported_21_joint_geometry(self):
         sample = {

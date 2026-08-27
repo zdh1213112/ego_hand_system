@@ -316,6 +316,9 @@ gen6_batch_5090d/
   --experiment-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
   --output-root /home/p3/data_sda1/ego_hand_system/output/wilor_labels_merged \
   --layout merged \
+  --visualization-samples 20 \
+  --view-filter complete21 \
+  --sample-stride 10 \
   --conda-env ego-hand --device cuda \
   --export-camera camera2 --view-filter complete21 \
   --max-samples 0
@@ -407,9 +410,10 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
   --output /home/zdh/ego_hand_system/output/gen4_new_run/wilor_labels_camera2_complete21 \
   --conda-env ego-hand \
   --device cuda \
+  --layout merged \
   --export-camera camera2 \
   --view-filter complete21 \
-  --sample-stride 3 \
+  --sample-stride 10 \
   --visualization-samples 20 \
   --max-samples 0
 ```
