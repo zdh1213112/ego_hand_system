@@ -231,6 +231,40 @@ RTX 5060 保持默认的
 `fusion_multiview/summary.json` 还会把六目结果和 `camera2+camera3` 双目结果投影到所有
 可用视角，给出跨视角一致性对比。
 
+如果一个目录中有多个 MCAP，可使用批处理入口逐个运行。默认串行执行（适合单张 5090D），
+每个 MCAP 使用文件名创建独立输出目录，某个文件失败后默认继续下一个：
+
+```bash
+./scripts/run_multiview_wilor_batch.sh \
+  --input-dir /home/p3/data_sda1/ego_hand_system/recordings/20260818 \
+  --output-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
+  --conda-env ego-hand \
+  --device cuda \
+  --gpu-profile rtx5090d \
+  --max-frames 0 \
+  --preprocess-workers 16 \
+  --fusion-workers 16
+```
+
+批量输出示例：
+
+```text
+gen6_batch_5090d/
+├── batch_summary.json
+├── batch_status.jsonl
+├── DAS-Ego_20260818164752_.../
+│   ├── run_config.json
+│   ├── normalized_multiview/
+│   ├── wilor_multiview/
+│   └── fusion_multiview/
+├── DAS-Ego_20260818164752_....log
+└── ...
+```
+
+`batch_summary.json` 汇总每个文件的成功/失败、耗时、输出目录和日志路径；单个目录内的
+`run_config.json` 仍负责断点复用和参数一致性检查。可先加 `--dry-run` 只检查将要执行的
+文件和命令；需要递归搜索子目录时加 `--recursive`。
+
 ### GEN 四目子集测试
 
 已有六路标准化数据和 WiLoR 预测时，可以只选择部分相机重新融合，不需要重复运行模型。

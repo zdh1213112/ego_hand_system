@@ -444,7 +444,25 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 如果某阶段只有目录但没有 `summary.json`，脚本会停止，不会自动删除中间结果。保留失败
 目录用于诊断，然后使用新的输出目录重新运行。
 
-## 11. 当前结果状态
+## 11. 多个 MCAP 批量运行
+
+多个录制文件建议通过 `scripts/run_multiview_wilor_batch.sh` 串行调用单文件流程。每个
+MCAP 都会写入独立的 `<output-root>/<文件名去掉扩展名>/`，不会共用中间结果：
+
+```bash
+./scripts/run_multiview_wilor_batch.sh \
+  --input-dir /home/p3/data_sda1/ego_hand_system/recordings/20260818 \
+  --output-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
+  --conda-env ego-hand --device cuda --gpu-profile rtx5090d \
+  --max-frames 0 --preprocess-workers 16 --fusion-workers 16
+```
+
+批处理默认顺序执行，单个文件失败后继续后续文件；`--continue-on-error 0` 可改为遇到首个
+失败立即停止。`--dry-run` 只打印命令，`--recursive` 搜索嵌套目录。批处理根目录生成
+`batch_status.jsonl`（逐文件状态）和 `batch_summary.json`（总汇总），每个文件另有同名
+`.log`。如果递归目录中存在相同输出名，脚本会在开始前报冲突并停止。
+
+## 12. 当前结果状态
 
 统一右手规范的正式输出目标目录：
 
@@ -474,7 +492,7 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 被拒绝的 95 个候选没有进入训练集：其中 83 个因为 MANO 重投影误差过大，12 个因为
 对应相机的有效内点关节不足。
 
-## 12. 常见问题
+## 13. 常见问题
 
 ### 12.1 `run configuration differs`
 
@@ -515,11 +533,12 @@ camera2/3 是稳定主视角，并且可以构造共同针孔校正平面，使�
 自动标注以质量优先。相机内点关节不足、MANO 重投影误差过大、网格超出图片或身份不
 一致的候选会被拒绝，原因保存在 `dataset/rejected.jsonl`。
 
-## 13. 关键脚本
+## 14. 关键脚本
 
 | 文件 | 作用 |
 |---|---|
 | `scripts/run_multiview_wilor_experiment.sh` | 从 MCAP 完成六目推理、融合和诊断视频 |
+| `scripts/run_multiview_wilor_batch.sh` | 批量逐个运行目录中的多个 MCAP |
 | `scripts/run_multiview_wilor_label_export.sh` | 从六目结果一键导出训练数据 |
 | `scripts/prepare_multiview_mano_input.py` | 坐标转换、身份审计、MANO 输入准备 |
 | `scripts/fit_mano_sequence.py` | 左右手 MANO 时序拟合 |
