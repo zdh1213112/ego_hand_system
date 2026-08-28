@@ -30,11 +30,16 @@ MARKER_SATURATION_MAX=""
 MARKER_VALUE_MIN=""
 MARKER_MIN_MATCHES=""
 MARKER_MIN_FINGER_GROUPS=""
+MARKER_GLOBAL_MIN_MATCHES=""
+MARKER_GLOBAL_MIN_FINGER_GROUPS=""
 MARKER_SEARCH_PADDING_PX=""
+MARKER_BBOX_PADDING_PX=""
 MARKER_SEED_DISTANCE_PX=""
 MARKER_MATCH_DISTANCE_PX=""
 MARKER_MAX_SHIFT_PX=""
+MARKER_MAX_APPLIED_SHIFT_PX=""
 MARKER_BLEND=""
+MARKER_MAX_LOCAL_ADJUSTMENT_PX=""
 CAMERAS=()
 
 usage() {
@@ -68,13 +73,18 @@ Options:
   --nokov-wilor-assist 0|1        Compatibility alias for glove-marker-assist
   --marker-saturation-max N       HSV saturation threshold (default 100)
   --marker-value-min N            HSV brightness threshold (default 160)
-  --marker-min-matches N          Minimum one-to-one matches (default 5)
-  --marker-min-finger-groups N    Minimum covered fingers (default 3)
+  --marker-min-matches N          Evidence threshold (default 3)
+  --marker-min-finger-groups N    Evidence finger threshold (default 2)
+  --marker-global-min-matches N   Whole-hand correction threshold (default 8)
+  --marker-global-min-finger-groups N (default 4)
   --marker-search-padding-px PX
+  --marker-bbox-padding-px PX
   --marker-seed-distance-px PX
   --marker-match-distance-px PX
   --marker-max-shift-px PX
-  --marker-blend VALUE            0 keeps shifted WiLoR, 1 uses marker centers
+  --marker-max-applied-shift-px PX
+  --marker-blend VALUE            Conservative local marker pull (default 0.15)
+  --marker-max-local-adjustment-px PX
   --detector-handedness strict|ignore|adaptive
   --no-video
 EOF
@@ -109,11 +119,16 @@ while (($#)); do
     --marker-value-min) MARKER_VALUE_MIN="$2"; shift 2 ;;
     --marker-min-matches) MARKER_MIN_MATCHES="$2"; shift 2 ;;
     --marker-min-finger-groups) MARKER_MIN_FINGER_GROUPS="$2"; shift 2 ;;
+    --marker-global-min-matches) MARKER_GLOBAL_MIN_MATCHES="$2"; shift 2 ;;
+    --marker-global-min-finger-groups) MARKER_GLOBAL_MIN_FINGER_GROUPS="$2"; shift 2 ;;
     --marker-search-padding-px) MARKER_SEARCH_PADDING_PX="$2"; shift 2 ;;
+    --marker-bbox-padding-px) MARKER_BBOX_PADDING_PX="$2"; shift 2 ;;
     --marker-seed-distance-px) MARKER_SEED_DISTANCE_PX="$2"; shift 2 ;;
     --marker-match-distance-px) MARKER_MATCH_DISTANCE_PX="$2"; shift 2 ;;
     --marker-max-shift-px) MARKER_MAX_SHIFT_PX="$2"; shift 2 ;;
+    --marker-max-applied-shift-px) MARKER_MAX_APPLIED_SHIFT_PX="$2"; shift 2 ;;
     --marker-blend) MARKER_BLEND="$2"; shift 2 ;;
+    --marker-max-local-adjustment-px) MARKER_MAX_LOCAL_ADJUSTMENT_PX="$2"; shift 2 ;;
     --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -216,11 +231,16 @@ for MCAP in "${MCAPS[@]}"; do
   [[ -n "$MARKER_VALUE_MIN" ]] && CMD+=(--marker-value-min "$MARKER_VALUE_MIN")
   [[ -n "$MARKER_MIN_MATCHES" ]] && CMD+=(--marker-min-matches "$MARKER_MIN_MATCHES")
   [[ -n "$MARKER_MIN_FINGER_GROUPS" ]] && CMD+=(--marker-min-finger-groups "$MARKER_MIN_FINGER_GROUPS")
+  [[ -n "$MARKER_GLOBAL_MIN_MATCHES" ]] && CMD+=(--marker-global-min-matches "$MARKER_GLOBAL_MIN_MATCHES")
+  [[ -n "$MARKER_GLOBAL_MIN_FINGER_GROUPS" ]] && CMD+=(--marker-global-min-finger-groups "$MARKER_GLOBAL_MIN_FINGER_GROUPS")
   [[ -n "$MARKER_SEARCH_PADDING_PX" ]] && CMD+=(--marker-search-padding-px "$MARKER_SEARCH_PADDING_PX")
+  [[ -n "$MARKER_BBOX_PADDING_PX" ]] && CMD+=(--marker-bbox-padding-px "$MARKER_BBOX_PADDING_PX")
   [[ -n "$MARKER_SEED_DISTANCE_PX" ]] && CMD+=(--marker-seed-distance-px "$MARKER_SEED_DISTANCE_PX")
   [[ -n "$MARKER_MATCH_DISTANCE_PX" ]] && CMD+=(--marker-match-distance-px "$MARKER_MATCH_DISTANCE_PX")
   [[ -n "$MARKER_MAX_SHIFT_PX" ]] && CMD+=(--marker-max-shift-px "$MARKER_MAX_SHIFT_PX")
+  [[ -n "$MARKER_MAX_APPLIED_SHIFT_PX" ]] && CMD+=(--marker-max-applied-shift-px "$MARKER_MAX_APPLIED_SHIFT_PX")
   [[ -n "$MARKER_BLEND" ]] && CMD+=(--marker-blend "$MARKER_BLEND")
+  [[ -n "$MARKER_MAX_LOCAL_ADJUSTMENT_PX" ]] && CMD+=(--marker-max-local-adjustment-px "$MARKER_MAX_LOCAL_ADJUSTMENT_PX")
   [[ -n "$DETECTOR_HANDEDNESS" ]] && CMD+=(--detector-handedness "$DETECTOR_HANDEDNESS")
   ((${#CAMERAS[@]})) && CMD+=(--cameras "${CAMERAS[@]}")
   ((NO_VIDEO)) && CMD+=(--no-video)

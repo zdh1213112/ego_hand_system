@@ -240,16 +240,19 @@ RTX 5060 保持默认的
 
 1. 原图转 HSV，保留低饱和度且亮度大于 `160` 的像素；
 2. 连通域筛选小而近似圆形的亮斑；
-3. 只在当前 WiLoR 手部投影附近保留候选；
-4. 从最近邻估计粗略二维偏移，再用匈牙利算法一对一匹配；
-5. 匹配至少覆盖 3 根手指、5 个 marker 时，平移 21 点并把对应手指关节柔性拉向亮斑。
+3. 先按 detector 框把亮斑分配给具体的手，再在当前 WiLoR 投影附近保留候选；
+4. 从最近邻估计粗略二维偏移，用带手指归属和同指顺序检查的匈牙利算法一对一匹配；
+5. 3 点/2 指以上只作为弱假设选择证据；至少 8 点/4 指且残差达标时才修正关节；
+6. 整手实际移动最多 `10 px`，单个关节局部拉动最多 `3 px`，骨长变化超限时取消局部拉动。
 
 默认参数可用 `--marker-value-min`、`--marker-saturation-max`、
-`--marker-min-matches`、`--marker-min-finger-groups` 和 `--marker-blend` 调整。启用后原始
+`--marker-min-matches`、`--marker-global-min-matches`、
+`--marker-global-min-finger-groups` 和 `--marker-blend` 调整。启用后原始
 `wilor_multiview/` 保持不变，新增 `wilor_multiview_glove_marker_assisted/` 和
 `fusion_multiview_glove_marker_assisted/`。每个相机目录中的
-`marker_assist_preview.jpg` 会同时画出原始 WiLoR、修正结果和匹配 marker，融合诊断视频
-也会显示 `MARKER N`。找不到足够亮点的手不会被强行修正，而是保留原始 WiLoR 关节。
+`marker_assist_preview.jpg` 保存位移/残差最大的已修正案例，
+`marker_evidence_preview.jpg` 保存接近修正门限但仅作为证据的案例。融合诊断视频也会显示
+`MARKER N`。找不到强支持的手不会被强行修正，而是保留原始 WiLoR 关节。
 
 戴手套时 detector 的左右类别可能同时判成同一侧，因此该开关默认采用逐帧
 `--detector-handedness adaptive`：先执行严格身份融合，只有严格结果拒绝该帧时，才用

@@ -21,17 +21,22 @@ DETECTOR_HANDEDNESS=""
 GLOVE_MARKER_ASSIST="${EGO_GLOVE_MARKER_ASSIST:-${EGO_NOKOV_WILOR_ASSIST:-0}}"
 MARKER_SATURATION_MAX="${EGO_MARKER_SATURATION_MAX:-100}"
 MARKER_VALUE_MIN="${EGO_MARKER_VALUE_MIN:-160}"
-MARKER_MIN_MATCHES="${EGO_MARKER_MIN_MATCHES:-5}"
-MARKER_MIN_FINGER_GROUPS="${EGO_MARKER_MIN_FINGER_GROUPS:-3}"
+MARKER_MIN_MATCHES="${EGO_MARKER_MIN_MATCHES:-3}"
+MARKER_MIN_FINGER_GROUPS="${EGO_MARKER_MIN_FINGER_GROUPS:-2}"
+MARKER_GLOBAL_MIN_MATCHES="${EGO_MARKER_GLOBAL_MIN_MATCHES:-8}"
+MARKER_GLOBAL_MIN_FINGER_GROUPS="${EGO_MARKER_GLOBAL_MIN_FINGER_GROUPS:-4}"
 MARKER_SEARCH_PADDING_PX="${EGO_MARKER_SEARCH_PADDING_PX:-45}"
+MARKER_BBOX_PADDING_PX="${EGO_MARKER_BBOX_PADDING_PX:-12}"
 MARKER_SEED_DISTANCE_PX="${EGO_MARKER_SEED_DISTANCE_PX:-35}"
 MARKER_MATCH_DISTANCE_PX="${EGO_MARKER_MATCH_DISTANCE_PX:-13}"
-MARKER_MAX_SHIFT_PX="${EGO_MARKER_MAX_SHIFT_PX:-30}"
-MARKER_BLEND="${EGO_MARKER_BLEND:-0.35}"
+MARKER_MAX_SHIFT_PX="${EGO_MARKER_MAX_SHIFT_PX:-20}"
+MARKER_MAX_APPLIED_SHIFT_PX="${EGO_MARKER_MAX_APPLIED_SHIFT_PX:-10}"
+MARKER_BLEND="${EGO_MARKER_BLEND:-0.15}"
+MARKER_MAX_LOCAL_ADJUSTMENT_PX="${EGO_MARKER_MAX_LOCAL_ADJUSTMENT_PX:-3}"
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
-  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 5] [--marker-blend 0.35] [--detector-handedness strict|ignore|adaptive] [--no-video]"
+  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--no-video]"
 }
 
 while (($#)); do
@@ -61,11 +66,16 @@ while (($#)); do
     --marker-value-min) MARKER_VALUE_MIN="$2"; shift 2 ;;
     --marker-min-matches) MARKER_MIN_MATCHES="$2"; shift 2 ;;
     --marker-min-finger-groups) MARKER_MIN_FINGER_GROUPS="$2"; shift 2 ;;
+    --marker-global-min-matches) MARKER_GLOBAL_MIN_MATCHES="$2"; shift 2 ;;
+    --marker-global-min-finger-groups) MARKER_GLOBAL_MIN_FINGER_GROUPS="$2"; shift 2 ;;
     --marker-search-padding-px) MARKER_SEARCH_PADDING_PX="$2"; shift 2 ;;
+    --marker-bbox-padding-px) MARKER_BBOX_PADDING_PX="$2"; shift 2 ;;
     --marker-seed-distance-px) MARKER_SEED_DISTANCE_PX="$2"; shift 2 ;;
     --marker-match-distance-px) MARKER_MATCH_DISTANCE_PX="$2"; shift 2 ;;
     --marker-max-shift-px) MARKER_MAX_SHIFT_PX="$2"; shift 2 ;;
+    --marker-max-applied-shift-px) MARKER_MAX_APPLIED_SHIFT_PX="$2"; shift 2 ;;
     --marker-blend) MARKER_BLEND="$2"; shift 2 ;;
+    --marker-max-local-adjustment-px) MARKER_MAX_LOCAL_ADJUSTMENT_PX="$2"; shift 2 ;;
     --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
     --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
@@ -148,11 +158,11 @@ case "$DETECTOR_HANDEDNESS" in
     exit 2
     ;;
 esac
-if ! [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$FRAME_BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$PREPROCESS_WORKERS" =~ ^[1-9][0-9]*$ && "$MAX_DETECTIONS_PER_CLASS" =~ ^[0-9]+$ && "$COMPILE_BACKBONE" =~ ^[01]$ && "$FUSION_WORKERS" =~ ^[1-9][0-9]*$ && "$MARKER_SATURATION_MAX" =~ ^[0-9]+$ && "$MARKER_VALUE_MIN" =~ ^[0-9]+$ && "$MARKER_MIN_MATCHES" =~ ^[1-9][0-9]*$ && "$MARKER_MIN_FINGER_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
+if ! [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$FRAME_BATCH_SIZE" =~ ^[1-9][0-9]*$ && "$PREPROCESS_WORKERS" =~ ^[1-9][0-9]*$ && "$MAX_DETECTIONS_PER_CLASS" =~ ^[0-9]+$ && "$COMPILE_BACKBONE" =~ ^[01]$ && "$FUSION_WORKERS" =~ ^[1-9][0-9]*$ && "$MARKER_SATURATION_MAX" =~ ^[0-9]+$ && "$MARKER_VALUE_MIN" =~ ^[0-9]+$ && "$MARKER_MIN_MATCHES" =~ ^[1-9][0-9]*$ && "$MARKER_MIN_FINGER_GROUPS" =~ ^[1-9][0-9]*$ && "$MARKER_GLOBAL_MIN_MATCHES" =~ ^[1-9][0-9]*$ && "$MARKER_GLOBAL_MIN_FINGER_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
   echo "frames/detection limit must be non-negative; batch sizes/workers must be positive" >&2
   exit 2
 fi
-for VALUE in "$MARKER_SEARCH_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_BLEND"; do
+for VALUE in "$MARKER_SEARCH_PADDING_PX" "$MARKER_BBOX_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_MAX_APPLIED_SHIFT_PX" "$MARKER_BLEND" "$MARKER_MAX_LOCAL_ADJUSTMENT_PX"; do
   [[ "$VALUE" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
     echo "marker distances/blend must be non-negative decimal numbers: $VALUE" >&2
     exit 2
@@ -189,14 +199,14 @@ run_python() {
     python "$@"
 }
 
-run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$FUSION_WORKERS" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" "$DETECTOR_HANDEDNESS" "$GLOVE_MARKER_ASSIST" "$MARKER_SATURATION_MAX" "$MARKER_VALUE_MIN" "$MARKER_MIN_MATCHES" "$MARKER_MIN_FINGER_GROUPS" "$MARKER_SEARCH_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_BLEND" <<'PY'
+run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$FUSION_WORKERS" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" "$DETECTOR_HANDEDNESS" "$GLOVE_MARKER_ASSIST" "$MARKER_SATURATION_MAX" "$MARKER_VALUE_MIN" "$MARKER_MIN_MATCHES" "$MARKER_MIN_FINGER_GROUPS" "$MARKER_GLOBAL_MIN_MATCHES" "$MARKER_GLOBAL_MIN_FINGER_GROUPS" "$MARKER_SEARCH_PADDING_PX" "$MARKER_BBOX_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_MAX_APPLIED_SHIFT_PX" "$MARKER_BLEND" "$MARKER_MAX_LOCAL_ADJUSTMENT_PX" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 from glove_marker_assist import MarkerAssistConfig
 
-config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, fusion_workers, camera_csv, reference_camera, anchor_cameras_text, detector_handedness, marker_enabled, marker_saturation_max, marker_value_min, marker_min_matches, marker_min_finger_groups, marker_search_padding_px, marker_seed_distance_px, marker_match_distance_px, marker_max_shift_px, marker_blend = sys.argv[1:]
+config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, fusion_workers, camera_csv, reference_camera, anchor_cameras_text, detector_handedness, marker_enabled, marker_saturation_max, marker_value_min, marker_min_matches, marker_min_finger_groups, marker_global_min_matches, marker_global_min_finger_groups, marker_search_padding_px, marker_bbox_padding_px, marker_seed_distance_px, marker_match_distance_px, marker_max_shift_px, marker_max_applied_shift_px, marker_blend, marker_max_local_adjustment_px = sys.argv[1:]
 source = Path(source_text).resolve()
 stat = source.stat()
 camera_ids = camera_csv.split(",")
@@ -205,11 +215,16 @@ marker_config = MarkerAssistConfig(
     value_min=int(marker_value_min),
     min_matches=int(marker_min_matches),
     min_finger_groups=int(marker_min_finger_groups),
+    global_min_matches=int(marker_global_min_matches),
+    global_min_finger_groups=int(marker_global_min_finger_groups),
     search_padding_px=float(marker_search_padding_px),
+    bbox_padding_px=float(marker_bbox_padding_px),
     seed_distance_px=float(marker_seed_distance_px),
     match_distance_px=float(marker_match_distance_px),
     max_shift_px=float(marker_max_shift_px),
+    max_applied_shift_px=float(marker_max_applied_shift_px),
     marker_blend=float(marker_blend),
+    max_local_adjustment_px=float(marker_max_local_adjustment_px),
 )
 marker_config.validate()
 config = {
@@ -318,10 +333,16 @@ if ((GLOVE_MARKER_ASSIST)) && [[ ! -f "$PREDICTIONS/summary.json" ]]; then
     --saturation-max "$MARKER_SATURATION_MAX" --value-min "$MARKER_VALUE_MIN" \
     --min-matches "$MARKER_MIN_MATCHES" \
     --min-finger-groups "$MARKER_MIN_FINGER_GROUPS" \
+    --global-min-matches "$MARKER_GLOBAL_MIN_MATCHES" \
+    --global-min-finger-groups "$MARKER_GLOBAL_MIN_FINGER_GROUPS" \
     --search-padding-px "$MARKER_SEARCH_PADDING_PX" \
+    --bbox-padding-px "$MARKER_BBOX_PADDING_PX" \
     --seed-distance-px "$MARKER_SEED_DISTANCE_PX" \
     --match-distance-px "$MARKER_MATCH_DISTANCE_PX" \
-    --max-shift-px "$MARKER_MAX_SHIFT_PX" --marker-blend "$MARKER_BLEND"
+    --max-shift-px "$MARKER_MAX_SHIFT_PX" \
+    --max-applied-shift-px "$MARKER_MAX_APPLIED_SHIFT_PX" \
+    --marker-blend "$MARKER_BLEND" \
+    --max-local-adjustment-px "$MARKER_MAX_LOCAL_ADJUSTMENT_PX"
 elif ((GLOVE_MARKER_ASSIST)); then
   echo "[multiview] reuse glove-marker-assisted WiLoR predictions"
 fi

@@ -102,7 +102,18 @@ class MultiviewWilorTests(unittest.TestCase):
             },
             1: {"camera0": {"marker_assist": {"applied": False}}},
         }
-        self.assertLess(_marker_assist_cost(selected), 0.0)
+        applied_cost = _marker_assist_cost(selected)
+        self.assertLess(applied_cost, 0.0)
+        selected[0]["camera0"]["marker_assist"] = {
+            "applied": False,
+            "evidence_only": True,
+            "matched_marker_count": 12,
+            "finger_group_count": 5,
+            "match_residual_median_px": 4.0,
+        }
+        evidence_only_cost = _marker_assist_cost(selected)
+        self.assertLess(evidence_only_cost, 0.0)
+        self.assertLess(abs(evidence_only_cost), abs(applied_cost))
         self.assertEqual(_marker_assist_cost({0: {}, 1: {}}), 0.0)
 
     def test_adaptive_handedness_retries_detector_rejected_frame(self):
