@@ -77,6 +77,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anatomy-max-reliable-adjustment-m", type=float, default=0.020)
     parser.add_argument("--anatomy-max-reprojection-regression-px", type=float, default=15.0)
     parser.add_argument("--anatomy-max-reprojection-shift-px", type=float, default=35.0)
+    parser.add_argument("--anatomy-temporal-radius", type=int, default=4)
+    parser.add_argument("--anatomy-temporal-palm-residual-m", type=float, default=0.070)
+    parser.add_argument("--anatomy-temporal-local-residual", type=float, default=0.90)
     parser.add_argument(
         "--workers", type=int, default=1,
         help="independent frame-fusion worker processes",
@@ -591,6 +594,9 @@ def main() -> int:
             args.anatomy_max_reprojection_regression_px
         ),
         max_reprojection_shift_px=args.anatomy_max_reprojection_shift_px,
+        temporal_radius=args.anatomy_temporal_radius,
+        temporal_palm_residual_m=args.anatomy_temporal_palm_residual_m,
+        temporal_local_residual=args.anatomy_temporal_local_residual,
     )
     anatomy_config.validate()
     fusion_started = time.perf_counter()

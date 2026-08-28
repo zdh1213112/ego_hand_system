@@ -17,6 +17,7 @@ from stabilize_hand_3d import (
     constrain_bones,
     displacement_metric,
     estimate_bone_lengths,
+    palm_normalized_3d_coordinates,
     palm_normalized_3d_step_metric,
     reject_bone_outliers,
     reject_observation_outliers,
@@ -25,7 +26,7 @@ from stabilize_hand_3d import (
 )
 
 
-ALGORITHM = "robust_temporal_fixed_bone_palm_preserving_v2"
+ALGORITHM = "robust_temporal_fixed_bone_continuity_guarded_v3"
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,17 @@ class FusionAnatomyConfig:
     max_reliable_adjustment_m: float = 0.020
     max_reprojection_regression_px: float = 15.0
     max_reprojection_shift_px: float = 35.0
+    large_reprojection_improvement_ratio: float = 0.70
+    temporal_radius: int = 4
+    temporal_min_neighbors_per_side: int = 2
+    temporal_palm_residual_m: float = 0.070
+    temporal_palm_strong_residual_m: float = 0.140
+    temporal_global_min_rejected_joints: int = 6
+    temporal_local_residual: float = 0.90
+    temporal_local_min_joints: int = 2
+    temporal_blend: float = 0.85
+    temporal_max_global_adjustment_m: float = 0.80
+    temporal_max_local_adjustment_m: float = 0.12
     correction_threshold_m: float = 0.002
 
     def validate(self) -> None:
@@ -55,6 +67,10 @@ class FusionAnatomyConfig:
             self.smoothing_radius,
             self.bone_iterations,
             self.final_bone_iterations,
+            self.temporal_radius,
+            self.temporal_min_neighbors_per_side,
+            self.temporal_global_min_rejected_joints,
+            self.temporal_local_min_joints,
         ) < 0:
             raise ValueError("anatomy windows and iterations must be non-negative")
         if min(
@@ -65,6 +81,11 @@ class FusionAnatomyConfig:
             self.max_reliable_adjustment_m,
             self.max_reprojection_regression_px,
             self.max_reprojection_shift_px,
+            self.temporal_palm_residual_m,
+            self.temporal_palm_strong_residual_m,
+            self.temporal_local_residual,
+            self.temporal_max_global_adjustment_m,
+            self.temporal_max_local_adjustment_m,
             self.correction_threshold_m,
         ) <= 0.0:
             raise ValueError("anatomy thresholds must be positive")
@@ -73,6 +94,8 @@ class FusionAnatomyConfig:
             ("bone-strength", self.bone_strength),
             ("final-bone-strength", self.final_bone_strength),
             ("reliable-adjustment-blend", self.reliable_adjustment_blend),
+            ("large-reprojection-improvement-ratio", self.large_reprojection_improvement_ratio),
+            ("temporal-blend", self.temporal_blend),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
@@ -252,6 +275,196 @@ def _affected_finger_scope(rejected: np.ndarray) -> np.ndarray:
     return affected
 
 
+def _theil_sen_zero_prediction(
+    times: np.ndarray, values: np.ndarray,
+) -> np.ndarray:
+    """Robustly predict a vector at time zero from surrounding samples."""
+    times = np.asarray(times, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    slopes = []
+    for first in range(len(times)):
+        for second in range(first + 1, len(times)):
+            delta = times[second] - times[first]
+            if abs(delta) > 1e-9:
+                slopes.append((values[second] - values[first]) / delta)
+    if not slopes:
+        return np.median(values, axis=0)
+    slope = np.median(np.asarray(slopes), axis=0)
+    time_shape = (-1,) + (1,) * (values.ndim - 1)
+    return np.median(values - times.reshape(time_shape) * slope, axis=0)
+
+
+def _temporal_neighbor_frames(
+    frame: int,
+    frame_valid: np.ndarray,
+    radius: int,
+    minimum_per_side: int,
+) -> np.ndarray:
+    lo = max(0, frame - radius)
+    hi = min(len(frame_valid), frame + radius + 1)
+    before = np.flatnonzero(frame_valid[lo:frame]) + lo
+    after = np.flatnonzero(frame_valid[frame + 1:hi]) + frame + 1
+    if len(before) < minimum_per_side or len(after) < minimum_per_side:
+        return np.empty(0, dtype=np.int32)
+    return np.concatenate((before, after)).astype(np.int32)
+
+
+def _cap_vector(delta: np.ndarray, maximum_m: float) -> np.ndarray:
+    length = float(np.linalg.norm(delta))
+    if length <= maximum_m or length <= 1e-12:
+        return delta
+    return delta * (maximum_m / length)
+
+
+def _apply_robust_temporal_refinement(
+    points: np.ndarray,
+    observed: np.ndarray,
+    rejected: np.ndarray,
+    confidence: np.ndarray,
+    bone_lengths: np.ndarray,
+    config: FusionAnatomyConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Repair whole-palm and local-pose spikes supported by both time directions."""
+    output = points.copy()
+    _local, _origins, _axes, _scales, frame_valid = (
+        palm_normalized_3d_coordinates(points, observed)
+    )
+    global_corrected = np.zeros(points.shape[:2], dtype=bool)
+    global_residual = np.full(points.shape[:2], np.nan, dtype=np.float64)
+    local_corrected = np.zeros(observed.shape, dtype=bool)
+    local_residual = np.full(points.shape[:2], np.nan, dtype=np.float64)
+    minimum = config.temporal_min_neighbors_per_side
+
+    # Repair rigid palm-pose spikes first. A line prediction tolerates a short
+    # run of bad frames and does not lag smooth, fast hand motion.
+    for side in range(points.shape[0]):
+        for frame in range(points.shape[1]):
+            if not frame_valid[side, frame]:
+                continue
+            neighbors = _temporal_neighbor_frames(
+                frame, frame_valid[side], config.temporal_radius, minimum
+            )
+            if not len(neighbors):
+                continue
+            times = neighbors.astype(np.float64) - frame
+            predicted_anchors = _theil_sen_zero_prediction(
+                times, points[side, neighbors][:, PALM_FRAME_JOINTS]
+            )
+            current_anchors = points[side, frame, PALM_FRAME_JOINTS]
+            residual = float(np.median(np.linalg.norm(
+                current_anchors - predicted_anchors, axis=1
+            )))
+            global_residual[side, frame] = residual
+            rejected_count = int(np.count_nonzero(rejected[side, frame]))
+            weak_evidence = (
+                residual > config.temporal_palm_residual_m
+                and rejected_count >= config.temporal_global_min_rejected_joints
+            )
+            strong_evidence = residual > config.temporal_palm_strong_residual_m
+            if not (weak_evidence or strong_evidence):
+                continue
+            rotation, translation = _weighted_rigid_alignment(
+                current_anchors,
+                predicted_anchors,
+                confidence[side, frame, PALM_FRAME_JOINTS],
+            )
+            current = output[side, frame]
+            rigid_target = (rotation @ current.T).T + translation
+            deltas = rigid_target - current
+            median_delta = np.median(deltas[observed[side, frame]], axis=0)
+            capped_translation = _cap_vector(
+                median_delta, config.temporal_max_global_adjustment_m
+            )
+            deltas += capped_translation - median_delta
+            output[side, frame, observed[side, frame]] += (
+                config.temporal_blend * deltas[observed[side, frame]]
+            )
+            global_corrected[side, frame] = True
+
+    # Repair articulation spikes in each frame's palm coordinates. Palm anchors
+    # are excluded so this pass cannot create global hand motion.
+    local_after, origins, axes, scales, frame_valid = (
+        palm_normalized_3d_coordinates(output, observed)
+    )
+    finger_joints = np.setdiff1d(np.arange(21), PALM_FRAME_JOINTS)
+    for side in range(points.shape[0]):
+        for frame in range(points.shape[1]):
+            if not frame_valid[side, frame]:
+                continue
+            neighbors = _temporal_neighbor_frames(
+                frame, frame_valid[side], config.temporal_radius, minimum
+            )
+            if not len(neighbors):
+                continue
+            times = neighbors.astype(np.float64) - frame
+            predicted = _theil_sen_zero_prediction(
+                times, local_after[side, neighbors]
+            )
+            distances = np.linalg.norm(
+                local_after[side, frame] - predicted, axis=1
+            )
+            local_residual[side, frame] = float(
+                np.nanmedian(distances[finger_joints])
+            )
+            outlier_joints = finger_joints[
+                observed[side, frame, finger_joints]
+                & np.isfinite(predicted[finger_joints]).all(axis=1)
+                & (distances[finger_joints] > config.temporal_local_residual)
+            ]
+            if len(outlier_joints) < config.temporal_local_min_joints:
+                continue
+            for joint in outlier_joints:
+                target = origins[side, frame] + scales[side, frame] * (
+                    predicted[joint] @ axes[side, frame]
+                )
+                delta = _cap_vector(
+                    target - output[side, frame, joint],
+                    config.temporal_max_local_adjustment_m,
+                )
+                output[side, frame, joint] += config.temporal_blend * delta
+                local_corrected[side, frame, joint] = True
+
+    if np.any(local_corrected):
+        temporal_confidence = np.maximum(confidence, 0.80)
+        temporal_confidence[local_corrected] = 0.05
+        constrained = constrain_bones(
+            output,
+            observed,
+            temporal_confidence,
+            bone_lengths,
+            config.final_bone_iterations,
+            config.final_bone_strength,
+        )
+        output[local_corrected] = constrained[local_corrected]
+    output[~observed] = np.nan
+    return output, global_corrected, local_corrected, global_residual, local_residual
+
+
+def _palm_step_metric(points: np.ndarray, valid: np.ndarray) -> dict[str, Any]:
+    centers = np.full(points.shape[:2] + (3,), np.nan, dtype=np.float64)
+    frame_valid = np.all(valid[:, :, PALM_FRAME_JOINTS], axis=2)
+    centers[frame_valid] = np.median(
+        points[:, :, PALM_FRAME_JOINTS][frame_valid], axis=1
+    )
+    samples = []
+    for side in range(points.shape[0]):
+        consecutive = frame_valid[side, 1:] & frame_valid[side, :-1]
+        if np.any(consecutive):
+            samples.extend((1000.0 * np.linalg.norm(
+                centers[side, 1:][consecutive]
+                - centers[side, :-1][consecutive],
+                axis=1,
+            )).tolist())
+    values = np.asarray(samples, dtype=np.float64)
+    return {
+        "sample_count": int(len(values)),
+        "median_mm": float(np.median(values)) if len(values) else None,
+        "p95_mm": float(np.percentile(values, 95)) if len(values) else None,
+        "p99_mm": float(np.percentile(values, 99)) if len(values) else None,
+        "max_mm": float(np.max(values)) if len(values) else None,
+    }
+
+
 def _project_base_point(camera: Any, point_base: np.ndarray) -> np.ndarray | None:
     rotation = camera.T_base_camera[:3, :3]
     center = camera.T_base_camera[:3, 3]
@@ -266,6 +479,7 @@ def _apply_reprojection_guard(
     hands: Mapping[tuple[int, int], dict[str, Any]],
     calibrations: Mapping[str, Any] | None,
     config: FusionAnatomyConfig,
+    trusted_temporal_hands: np.ndarray | None = None,
 ) -> tuple[np.ndarray, int, int, dict[str, Any] | None]:
     if not calibrations:
         return refined, 0, 0, None
@@ -273,6 +487,11 @@ def _apply_reprojection_guard(
     limited_count = 0
     reverted_count = 0
     for (frame, side), hand in hands.items():
+        if (
+            trusted_temporal_hands is not None
+            and trusted_temporal_hands[side, frame]
+        ):
+            continue
         views = [
             (calibrations[camera_id], np.asarray(view["joints_2d"], dtype=np.float64))
             for camera_id, view in hand.get("views", {}).items()
@@ -317,9 +536,14 @@ def _apply_reprojection_guard(
                         return False
                     shifts.append(float(np.linalg.norm(pixel - raw_pixel)))
                     residuals.append(float(np.linalg.norm(pixel - observation)))
+                residual_median = float(np.median(residuals))
+                strongly_supported = (
+                    residual_median
+                    <= config.large_reprojection_improvement_ratio * raw_residual
+                )
                 return (
-                    max(shifts) <= config.max_reprojection_shift_px
-                    and float(np.median(residuals))
+                    (max(shifts) <= config.max_reprojection_shift_px or strongly_supported)
+                    and residual_median
                     <= raw_residual + config.max_reprojection_regression_px
                 )
 
@@ -509,6 +733,50 @@ def refine_accepted_rows(
         reprojection_diagnostics,
     ) = _apply_reprojection_guard(refined, raw, hands, calibrations, config)
 
+    before_temporal = refined.copy()
+    (
+        temporal_candidate,
+        temporal_global_corrected,
+        temporal_local_corrected,
+        temporal_global_residual,
+        temporal_local_residual,
+    ) = _apply_robust_temporal_refinement(
+        refined,
+        observed,
+        rejected,
+        confidence,
+        bone_lengths,
+        config,
+    )
+    (
+        refined,
+        temporal_reprojection_limited,
+        temporal_reprojection_reverted,
+        temporal_reprojection_diagnostics,
+    ) = _apply_reprojection_guard(
+        temporal_candidate,
+        raw,
+        hands,
+        calibrations,
+        config,
+        trusted_temporal_hands=(
+            temporal_global_corrected
+            & (temporal_global_residual > config.temporal_palm_strong_residual_m)
+            & (
+                np.count_nonzero(rejected, axis=2)
+                >= config.temporal_global_min_rejected_joints
+            )
+        ),
+    )
+    trusted_temporal_hands = (
+        temporal_global_corrected
+        & (temporal_global_residual > config.temporal_palm_strong_residual_m)
+        & (
+            np.count_nonzero(rejected, axis=2)
+            >= config.temporal_global_min_rejected_joints
+        )
+    )
+
     displacements = np.linalg.norm(refined - raw, axis=-1)
     corrected = observed & (displacements > config.correction_threshold_m)
     repaired_outliers = reconstructable_outliers & corrected
@@ -541,6 +809,23 @@ def refine_accepted_rows(
                     rejected[side, frame] & ~repaired_outliers[side, frame]
                 )
             ),
+            "temporal_global_corrected": bool(
+                temporal_global_corrected[side, frame]
+            ),
+            "temporal_global_reprojection_override": bool(
+                trusted_temporal_hands[side, frame]
+            ),
+            "temporal_global_residual_mm": (
+                float(1000.0 * temporal_global_residual[side, frame])
+                if np.isfinite(temporal_global_residual[side, frame]) else None
+            ),
+            "temporal_local_corrected_joint_count": int(
+                np.count_nonzero(temporal_local_corrected[side, frame])
+            ),
+            "temporal_local_residual": (
+                float(temporal_local_residual[side, frame])
+                if np.isfinite(temporal_local_residual[side, frame]) else None
+            ),
             "displacement_median_mm": (
                 float(np.median(values) * 1000.0) if len(values) else None
             ),
@@ -568,6 +853,18 @@ def refine_accepted_rows(
         "reprojection_limited_joint_count": reprojection_limited,
         "reprojection_reverted_joint_count": reprojection_reverted,
         "reprojection_diagnostics": reprojection_diagnostics,
+        "temporal_reprojection_limited_joint_count": temporal_reprojection_limited,
+        "temporal_reprojection_reverted_joint_count": temporal_reprojection_reverted,
+        "temporal_reprojection_diagnostics": temporal_reprojection_diagnostics,
+        "temporal_global_corrected_hand_count": int(
+            np.count_nonzero(temporal_global_corrected)
+        ),
+        "temporal_global_reprojection_override_hand_count": int(
+            np.count_nonzero(trusted_temporal_hands)
+        ),
+        "temporal_local_corrected_joint_count": int(
+            np.count_nonzero(temporal_local_corrected)
+        ),
         "repaired_outlier_count": int(np.count_nonzero(repaired_outliers)),
         "unrepaired_outlier_count": int(
             np.count_nonzero(rejected & ~repaired_outliers)
@@ -585,6 +882,12 @@ def refine_accepted_rows(
         "palm_normalized_step_after": palm_normalized_3d_step_metric(
             refined, observed
         ),
+        "palm_normalized_step_before_temporal": palm_normalized_3d_step_metric(
+            before_temporal, observed
+        ),
+        "palm_step_before": _palm_step_metric(raw, observed),
+        "palm_step_before_temporal": _palm_step_metric(before_temporal, observed),
+        "palm_step_after": _palm_step_metric(refined, observed),
         "displacement": displacement_metric(refined, raw, observed),
         "reliable_adjustment_displacement": displacement_metric(
             refined, raw, reliable

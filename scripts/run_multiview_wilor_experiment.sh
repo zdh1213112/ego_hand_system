@@ -181,6 +181,7 @@ elif [[ "$DETECTOR_HANDEDNESS" != "strict" ]]; then
   FUSION="$OUTPUT/fusion_multiview_geometric"
 fi
 VIDEO="$FUSION/diagnostic_${#CAMERAS[@]}view.mp4"
+FINAL_VIDEO="$FUSION/final_only_${#CAMERAS[@]}view.mp4"
 CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
 CAMERA_CONFIDENCE_ARGS=()
 for CAMERA in "${CAMERAS[@]}"; do
@@ -370,6 +371,14 @@ if [[ "$NO_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
     --dataset "$NORMALIZED" --fusion "$FUSION" \
     --output "$VIDEO" --cameras "${CAMERAS[@]}" \
     --max-frames "$MAX_FRAMES"
+fi
+
+if [[ "$NO_VIDEO" == 0 && ! -f "$FINAL_VIDEO" ]]; then
+  echo "[multiview] render final stabilized skeletons only"
+  run_python "$ROOT/scripts/render_multiview_wilor.py" \
+    --dataset "$NORMALIZED" --fusion "$FUSION" \
+    --output "$FINAL_VIDEO" --cameras "${CAMERAS[@]}" \
+    --overlay-mode final-only --max-frames "$MAX_FRAMES"
 fi
 
 echo "[multiview] finished: $FUSION"

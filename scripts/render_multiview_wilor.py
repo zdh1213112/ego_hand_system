@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tile-width", type=int, default=480)
     parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument(
+        "--overlay-mode",
+        choices=("diagnostic", "final-only"),
+        default="diagnostic",
+        help=(
+            "diagnostic draws detector/marker/intermediate overlays; final-only "
+            "draws exactly one final fused 3D skeleton per physical hand"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -105,15 +114,39 @@ def _project_refined_hand(
     return pixels
 
 
+def _draw_final_detection(frame: np.ndarray, view: dict, side: int) -> None:
+    box = np.rint(view.get("bbox_xyxy", [])).astype(np.int32)
+    if box.shape != (4,):
+        return
+    color = (255, 210, 40) if side == 0 else (40, 220, 255)
+    cv2.rectangle(
+        frame, tuple(box[:2]), tuple(box[2:]), (20, 20, 20), 7, cv2.LINE_AA
+    )
+    cv2.rectangle(
+        frame, tuple(box[:2]), tuple(box[2:]), color, 3, cv2.LINE_AA
+    )
+    cv2.putText(
+        frame,
+        f"FINAL {'R' if side else 'L'}",
+        (int(box[0]), max(28, int(box[1]) - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.68,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
 def _draw_refined_hand(
     frame: np.ndarray,
     points: np.ndarray,
     side: int,
     corrected_joint_count: int,
+    final_only: bool = False,
 ) -> None:
     if points.shape != (21, 2):
         return
-    color = (40, 255, 255)
+    color = (255, 210, 40) if side == 0 else (40, 220, 255)
     finite = np.isfinite(points).all(axis=1)
     rounded = np.zeros((21, 2), dtype=np.int32)
     rounded[finite] = np.rint(points[finite]).astype(np.int32)
@@ -131,7 +164,7 @@ def _draw_refined_hand(
     for point in rounded[finite]:
         cv2.circle(frame, tuple(point), 6, (20, 20, 20), -1, cv2.LINE_AA)
         cv2.circle(frame, tuple(point), 4, color, -1, cv2.LINE_AA)
-    if finite[0]:
+    if finite[0] and not final_only:
         label_at = tuple((rounded[0] + np.asarray((10, -12))).tolist())
         label = f"ANATOMY {'R' if side else 'L'} {corrected_joint_count}"
         cv2.putText(
@@ -208,11 +241,21 @@ def main() -> int:
                 frame = readers[camera].read(int(row[f"{camera}_frame_index"]))
                 if result is not None:
                     for hand in result["hands"]:
-                        view = hand["views"].get(camera)
-                        if view is not None:
-                            _draw_hand(frame, view, int(hand["side"]))
                         anatomy = hand.get("anatomy_refinement", {})
-                        if anatomy.get("applied"):
+                        if args.overlay_mode == "diagnostic":
+                            view = hand["views"].get(camera)
+                            if view is not None:
+                                _draw_hand(frame, view, int(hand["side"]))
+                        else:
+                            view = hand["views"].get(camera)
+                            if view is not None:
+                                _draw_final_detection(
+                                    frame, view, int(hand["side"])
+                                )
+                        if (
+                            args.overlay_mode == "final-only"
+                            or anatomy.get("applied")
+                        ):
                             refined_pixels = _project_refined_hand(
                                 calibrations[camera],
                                 np.asarray(hand["joints_base_m"], dtype=np.float64),
@@ -222,6 +265,7 @@ def main() -> int:
                                 refined_pixels,
                                 int(hand["side"]),
                                 int(anatomy.get("corrected_joint_count", 0)),
+                                final_only=args.overlay_mode == "final-only",
                             )
                 camera_views = [
                     hand["views"][camera] for hand in result["hands"]
@@ -230,6 +274,8 @@ def main() -> int:
                 inlier_joints = sum(int(view.get("inlier_joint_count", 21)) for view in camera_views)
                 if result is None:
                     status, status_color = "REJECTED", (40, 80, 255)
+                elif args.overlay_mode == "final-only":
+                    status, status_color = "FINAL FUSED", (70, 220, 70)
                 elif not camera_views:
                     status, status_color = "INACTIVE", (180, 180, 180)
                 elif inlier_joints == 0:
@@ -260,7 +306,11 @@ def main() -> int:
         for reader in readers.values():
             reader.close()
         writer.release()
-    print(f"Multiview diagnostic video: {args.output} ({len(rows)} frames at {fps:.3f} fps)")
+    video_kind = "final-only" if args.overlay_mode == "final-only" else "diagnostic"
+    print(
+        f"Multiview {video_kind} video: {args.output} "
+        f"({len(rows)} frames at {fps:.3f} fps)"
+    )
     return 0
 
 

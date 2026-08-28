@@ -94,6 +94,35 @@ class FusionAnatomyRefinementTests(unittest.TestCase):
         self.assertTrue(summary["enabled"])
         self.assertEqual(summary["corrected_joint_count"], 0)
 
+    def test_whole_hand_depth_spike_is_repaired_by_bidirectional_context(self):
+        rows = []
+        for frame in range(9):
+            points = _hand_pose(frame)
+            if frame == 4:
+                points += np.asarray((0.05, -0.03, 0.42))
+            rows.append({
+                "sync_index": frame,
+                "hands": [{
+                    "side": 0,
+                    "joints_base_m": points.tolist(),
+                    "inlier_view_counts": [4] * 21,
+                }],
+            })
+        raw_error = np.linalg.norm(
+            np.asarray(rows[4]["hands"][0]["joints_base_m"])[0]
+            - _hand_pose(4)[0]
+        )
+        summary = refine_accepted_rows(rows, 6, FusionAnatomyConfig())
+        refined_error = np.linalg.norm(
+            np.asarray(rows[4]["hands"][0]["joints_base_m"])[0]
+            - _hand_pose(4)[0]
+        )
+        self.assertLess(refined_error, 0.35 * raw_error)
+        self.assertGreaterEqual(summary["temporal_global_corrected_hand_count"], 1)
+        self.assertTrue(
+            rows[4]["hands"][0]["anatomy_refinement"]["temporal_global_corrected"]
+        )
+
     def test_configuration_rejects_invalid_adjustment_strength(self):
         with self.assertRaises(ValueError):
             FusionAnatomyConfig(reliable_adjustment_blend=1.1).validate()

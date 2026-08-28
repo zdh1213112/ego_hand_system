@@ -33,11 +33,15 @@ marker 数和残差只作为较弱的假设选择代价；多视角重投影与 
    异常的关节；
 2. 不超过 3 帧的内部空洞由前后可靠帧插值；普通插值无法覆盖时，必须有至少两个邻近姿态
    且当前帧至少 3 个可靠掌部锚点，才可用刚体对齐补点；
-3. 只对含异常点的手指应用掌坐标时序平滑和定骨长约束；没有异常的手实例逐点保持原始融合
-   结果；
-4. 可靠关节只允许最多 `0.35` 权重、`20 mm` 的弱调整，异常关节可由可靠时序候选替换；
-5. 每个修正关节重新投影到所有参与相机。任何相机中的位移不超过 `35 px`，多视角残差中位数
-   最多恶化 `15 px`；否则自动缩小或撤销该关节修正。
+3. 用前后各至少 2 帧、半径 4 帧的 Theil–Sen 稳健直线预测检查掌部刚体轨迹；预测残差超过
+   `70 mm` 且当前帧至少 6 个关节已被拒绝时，才修正整手瞬时位置/深度尖峰；
+4. 在每帧自己的掌坐标系内检查手指形状。至少 2 个非掌部关节的归一化残差超过 `0.90` 时，
+   只修这些关节并重新施加骨长约束；没有异常的手实例保持原始融合结果；
+5. 可靠关节只允许最多 `0.35` 权重、`20 mm` 的弱调整；局部时序修正最多 `120 mm`，整手
+   刚体修正最多 `800 mm`，并统一使用 `0.85` 的保守混合；
+6. 每个修正关节重新投影到所有参与相机。通常任何相机中的位移不超过 `35 px`，多视角残差
+   中位数最多恶化 `15 px`；否则自动缩小或撤销修正。只有掌部预测残差超过 `140 mm`、且
+   至少 6 个关节已被拒绝的极端整手尖峰，才允许用双向时序强证据覆盖当前帧错误观测。
 
 这一步可以用 `--anatomy-refinement 0` 关闭。主要可调项为：
 
@@ -51,6 +55,9 @@ marker 数和残差只作为较弱的假设选择代价；多视角重投影与 
 --anatomy-max-reliable-adjustment-m 0.020
 --anatomy-max-reprojection-regression-px 15
 --anatomy-max-reprojection-shift-px 35
+--anatomy-temporal-radius 4
+--anatomy-temporal-palm-residual-m 0.070
+--anatomy-temporal-local-residual 0.90
 ```
 
 ## 运行
@@ -114,7 +121,8 @@ glove_marker_run/
     ├── accepted.jsonl
     ├── rejected.jsonl
     ├── summary.json
-    └── diagnostic_6view.mp4
+    ├── diagnostic_6view.mp4
+    └── final_only_6view.mp4
 ```
 
 预览图中橙色是原始 WiLoR，青/绿色是通过严格门控后的保守修正，洋红圆圈是已经分配给
@@ -125,9 +133,23 @@ glove_marker_run/
 融合诊断视频中彩色细骨架仍是相机内的 WiLoR/marker 观测，黄色 `ANATOMY L/R N` 是三维
 修复后重新投影的骨架，`N` 为该手移动超过 2 mm 的关节数。`accepted.jsonl` 中
 `unrefined_joints_base_m` 保留修复前坐标，`anatomy_refinement` 记录逐手修正、拒绝、插值和
-位移统计；融合 `summary.json` 记录骨长误差、掌坐标形状跳变、三维加速度，以及修复前后
-多视角重投影分位数。无法通过时序和重投影双重支持的异常点会保留原结果，并计入
-`unrepaired_outlier_count`。
+位移统计；其中 `temporal_global_corrected`、`temporal_global_reprojection_override` 和
+`temporal_local_corrected_joint_count` 可定位强时序修复。融合 `summary.json` 记录骨长误差、
+掌坐标形状跳变、掌心步长、三维加速度，以及修复前后多视角重投影分位数。无法通过时序和
+重投影双重支持的异常点会保留原结果，并计入 `unrepaired_outlier_count`。
+
+`final_only_6view.mp4` 是交付检查用的简洁版本：每只物理手只画一个最终 detector 框和一次
+最终 `joints_base_m`，左手为青色 `FINAL L`，右手为黄色 `FINAL R`；不画原始 WiLoR、
+marker 匹配或任何中间骨架。拒绝帧保持无检测结果。主运行脚本默认同时生成诊断版和该
+最终版，也可以单独执行：
+
+```bash
+python scripts/render_multiview_wilor.py \
+  --dataset /path/to/normalized_multiview \
+  --fusion /path/to/fusion_multiview_glove_marker_assisted \
+  --output /path/to/final_only_6view.mp4 \
+  --overlay-mode final-only
+```
 
 建议先运行 `--max-frames 60`，检查：
 
