@@ -62,6 +62,21 @@ def _draw_hand(frame: np.ndarray, hand: dict, side: int) -> None:
         )
         return
     cv2.rectangle(frame, tuple(box[:2]), tuple(box[2:]), color, 4, cv2.LINE_AA)
+    marker = hand.get("marker_assist", {})
+    original = np.asarray(hand.get("wilor_joints_2d", []), dtype=np.float64)
+    if marker.get("applied") and original.shape == (21, 2):
+        raw_points = np.rint(original).astype(np.int32)
+        for start, end in HAND_CONNECTIONS:
+            cv2.line(
+                frame, tuple(raw_points[start]), tuple(raw_points[end]),
+                (0, 180, 255), 2, cv2.LINE_AA,
+            )
+        for center in np.rint(marker.get("matched_blob_centers", [])).astype(np.int32):
+            cv2.circle(frame, tuple(center), 8, (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.drawMarker(
+                frame, tuple(center), (255, 255, 255), cv2.MARKER_CROSS,
+                11, 1, cv2.LINE_AA,
+            )
     points = np.rint(hand["joints_2d"]).astype(np.int32)
     if points.shape != (21, 2):
         return
@@ -69,6 +84,12 @@ def _draw_hand(frame: np.ndarray, hand: dict, side: int) -> None:
         cv2.line(frame, tuple(points[start]), tuple(points[end]), color, 4, cv2.LINE_AA)
     for point in points:
         cv2.circle(frame, tuple(point), 5, color, -1, cv2.LINE_AA)
+    if marker.get("applied"):
+        label = f"MARKER {int(marker.get('matched_marker_count', 0))}"
+        cv2.putText(
+            frame, label, (int(box[0]), min(frame.shape[0] - 12, int(box[3]) + 28)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 0, 255), 2, cv2.LINE_AA,
+        )
 
 
 def main() -> int:

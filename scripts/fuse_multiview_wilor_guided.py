@@ -48,8 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-anchor-detections", type=int, default=3)
     parser.add_argument("--max-side-detections", type=int, default=4)
     parser.add_argument(
-        "--detector-handedness", choices=("strict", "ignore"), default="strict",
-        help="strict keeps detector.pt left/right identity through all fusion stages",
+        "--detector-handedness", choices=("strict", "ignore", "adaptive"), default="strict",
+        help=(
+            "strict keeps detector.pt identity; ignore lets geometry choose; "
+            "adaptive tries strict first and falls back to ignore for a rejected frame"
+        ),
     )
     parser.add_argument("--association-threshold-px", type=float, default=55.0)
     parser.add_argument("--anchor-threshold-px", type=float, default=60.0)
@@ -174,6 +177,35 @@ def _anatomy_penalty(points: np.ndarray) -> float:
     )
 
 
+def _marker_assist_cost(
+    selected_by_side: dict[int, dict[str, dict[str, Any]]],
+) -> float:
+    """Use marker evidence as a mild hypothesis-selection term.
+
+    Multiview geometry remains dominant. Strong marker corrections get the
+    original mild preference; topology-valid partial evidence gets only one
+    quarter of that weight and can therefore break close choices without
+    moving image joints.
+    """
+    cost = 0.0
+    for selected in selected_by_side.values():
+        for hand in selected.values():
+            marker = hand.get("marker_assist", {})
+            if marker.get("applied"):
+                weight = 1.0
+            elif marker.get("evidence_only"):
+                weight = 0.25
+            else:
+                continue
+            matches = float(marker.get("matched_marker_count", 0))
+            groups = float(marker.get("finger_group_count", 0))
+            residual = float(marker.get("match_residual_median_px", 0.0))
+            cost += weight * (
+                0.15 * residual - 0.30 * matches - 0.20 * groups
+            )
+    return cost
+
+
 def _evaluate_anchor_assignment(
     anchor_cameras: tuple[str, str],
     anchor_pairs: tuple[tuple[int, int], tuple[int, int]],
@@ -224,6 +256,7 @@ def _evaluate_anchor_assignment(
         100.0 * missing
         + sum(result["median_px"] + 0.2 * result["p95_px"] for result in final_results)
         + sum(_anatomy_penalty(result["points"]) for result in final_results)
+        + _marker_assist_cost(selected_by_side)
         - 1.5 * extra_joint_support
         - 4.0 * matched_side_views
     )
@@ -351,7 +384,7 @@ def _evaluate_anchor_pairs(
     return results
 
 
-def _fuse_primary_frame(
+def _fuse_primary_frame_mode(
     sync_index: int,
     prediction_rows: dict[str, dict[int, dict[str, Any]]],
     calibrations: dict[str, CameraCalibration],
@@ -436,6 +469,44 @@ def _fuse_primary_frame(
         "active_camera_count": len(active_cameras),
         "hands": hands,
     }
+
+
+def _fuse_primary_frame(
+    sync_index: int,
+    prediction_rows: dict[str, dict[int, dict[str, Any]]],
+    calibrations: dict[str, CameraCalibration],
+    cameras: tuple[str, ...],
+    preferred_anchors: tuple[str, str],
+    args: argparse.Namespace,
+) -> tuple[bool, dict[str, Any]]:
+    """Fuse one frame, retrying only rejected strict frames when adaptive."""
+    if args.detector_handedness != "adaptive":
+        return _fuse_primary_frame_mode(
+            sync_index, prediction_rows, calibrations, cameras,
+            preferred_anchors, args,
+        )
+    strict_args = argparse.Namespace(**vars(args))
+    strict_args.detector_handedness = "strict"
+    accepted, strict_row = _fuse_primary_frame_mode(
+        sync_index, prediction_rows, calibrations, cameras,
+        preferred_anchors, strict_args,
+    )
+    if accepted:
+        strict_row["handedness_mode"] = "strict"
+        return True, strict_row
+    ignore_args = argparse.Namespace(**vars(args))
+    ignore_args.detector_handedness = "ignore"
+    rescued, rescued_row = _fuse_primary_frame_mode(
+        sync_index, prediction_rows, calibrations, cameras,
+        preferred_anchors, ignore_args,
+    )
+    if rescued:
+        rescued_row["handedness_mode"] = "ignore_fallback"
+        rescued_row["strict_rejection"] = strict_row
+        return True, rescued_row
+    strict_row["handedness_mode"] = "adaptive_rejected"
+    strict_row["fallback_attempted"] = True
+    return False, strict_row
 
 
 _FUSION_WORKER_CONTEXT: tuple[Any, ...] | None = None
@@ -598,6 +669,29 @@ def main() -> int:
         and view.get("detector_is_right") is not None
         and int(view["detector_is_right"]) != int(hand["side"])
     )
+    handedness_fallback_count = sum(
+        row.get("handedness_mode") == "ignore_fallback" for row in accepted
+    )
+    marker_assisted_views = [
+        view
+        for hand in hands for view in hand["views"].values()
+        if view.get("marker_assist", {}).get("applied")
+    ]
+    marker_match_counts = [
+        int(view["marker_assist"]["matched_marker_count"])
+        for view in marker_assisted_views
+    ]
+    marker_evidence_views = [
+        view
+        for hand in hands for view in hand["views"].values()
+        if view.get("marker_assist", {}).get("applied")
+        or view.get("marker_assist", {}).get("evidence_only")
+    ]
+    marker_evidence_only_views = [
+        view
+        for view in marker_evidence_views
+        if view.get("marker_assist", {}).get("evidence_only")
+    ]
     stereo_cross_view = [
         hand["stereo_baseline_comparison"]["cross_view_reprojection_median_px"]
         for hand in hands
@@ -618,7 +712,11 @@ def main() -> int:
     fusion_seconds = time.perf_counter() - fusion_started
     summary = {
         "schema_version": 1,
-        "stage": "wilor_anchor_guided_multiview_fusion",
+        "stage": (
+            "wilor_anchor_guided_multiview_fusion_with_glove_marker_assist"
+            if marker_assisted_views
+            else "wilor_anchor_guided_multiview_fusion"
+        ),
         "camera_ids": list(cameras),
         "preferred_anchor_cameras": list(preferred_anchors),
         "selected_anchor_pair_counts": dict(anchor_pair_counts),
@@ -626,6 +724,12 @@ def main() -> int:
             camera: camera_contribution_counts.get(camera, 0) for camera in cameras
         },
         "detector_handedness_mismatch_observation_count": detector_handedness_mismatches,
+        "marker_assisted_view_count": len(marker_assisted_views),
+        "marker_evidence_view_count": len(marker_evidence_views),
+        "marker_evidence_only_view_count": len(marker_evidence_only_views),
+        "marker_matched_count_median": (
+            float(np.median(marker_match_counts)) if marker_match_counts else None
+        ),
         "processed_frame_count": len(frame_ids),
         "accepted_frame_count": len(accepted),
         "primary_accepted_frame_count": primary_accepted_count,
@@ -674,6 +778,8 @@ def main() -> int:
             "workers": args.workers,
         },
     }
+    if args.detector_handedness == "adaptive":
+        summary["handedness_fallback_frame_count"] = handedness_fallback_count
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"
     )

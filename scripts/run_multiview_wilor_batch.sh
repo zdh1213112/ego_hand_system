@@ -24,6 +24,17 @@ MAX_DETECTIONS_PER_CLASS=""
 COMPILE_BACKBONE=""
 FUSION_WORKERS=""
 NO_VIDEO=0
+DETECTOR_HANDEDNESS=""
+GLOVE_MARKER_ASSIST=""
+MARKER_SATURATION_MAX=""
+MARKER_VALUE_MIN=""
+MARKER_MIN_MATCHES=""
+MARKER_MIN_FINGER_GROUPS=""
+MARKER_SEARCH_PADDING_PX=""
+MARKER_SEED_DISTANCE_PX=""
+MARKER_MATCH_DISTANCE_PX=""
+MARKER_MAX_SHIFT_PX=""
+MARKER_BLEND=""
 CAMERAS=()
 
 usage() {
@@ -53,6 +64,18 @@ Options:
   --max-detections-per-class N
   --compile-backbone 0|1
   --fusion-workers N
+  --glove-marker-assist 0|1       Detect reflective glove balls in RGB frames
+  --nokov-wilor-assist 0|1        Compatibility alias for glove-marker-assist
+  --marker-saturation-max N       HSV saturation threshold (default 100)
+  --marker-value-min N            HSV brightness threshold (default 160)
+  --marker-min-matches N          Minimum one-to-one matches (default 5)
+  --marker-min-finger-groups N    Minimum covered fingers (default 3)
+  --marker-search-padding-px PX
+  --marker-seed-distance-px PX
+  --marker-match-distance-px PX
+  --marker-max-shift-px PX
+  --marker-blend VALUE            0 keeps shifted WiLoR, 1 uses marker centers
+  --detector-handedness strict|ignore|adaptive
   --no-video
 EOF
 }
@@ -81,6 +104,17 @@ while (($#)); do
     --max-detections-per-class) MAX_DETECTIONS_PER_CLASS="$2"; shift 2 ;;
     --compile-backbone) COMPILE_BACKBONE="$2"; shift 2 ;;
     --fusion-workers) FUSION_WORKERS="$2"; shift 2 ;;
+    --glove-marker-assist|--nokov-wilor-assist) GLOVE_MARKER_ASSIST="$2"; shift 2 ;;
+    --marker-saturation-max) MARKER_SATURATION_MAX="$2"; shift 2 ;;
+    --marker-value-min) MARKER_VALUE_MIN="$2"; shift 2 ;;
+    --marker-min-matches) MARKER_MIN_MATCHES="$2"; shift 2 ;;
+    --marker-min-finger-groups) MARKER_MIN_FINGER_GROUPS="$2"; shift 2 ;;
+    --marker-search-padding-px) MARKER_SEARCH_PADDING_PX="$2"; shift 2 ;;
+    --marker-seed-distance-px) MARKER_SEED_DISTANCE_PX="$2"; shift 2 ;;
+    --marker-match-distance-px) MARKER_MATCH_DISTANCE_PX="$2"; shift 2 ;;
+    --marker-max-shift-px) MARKER_MAX_SHIFT_PX="$2"; shift 2 ;;
+    --marker-blend) MARKER_BLEND="$2"; shift 2 ;;
+    --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -93,6 +127,14 @@ done
   echo "recursive/continue-on-error/dry-run must be 0 or 1" >&2; exit 2;
 }
 [[ -x "$SINGLE" ]] || { echo "Single-recording script is not executable: $SINGLE" >&2; exit 2; }
+case "$DETECTOR_HANDEDNESS" in
+  ""|strict|ignore|adaptive) ;;
+  *) echo "--detector-handedness must be strict, ignore, or adaptive: $DETECTOR_HANDEDNESS" >&2; exit 2 ;;
+esac
+case "$GLOVE_MARKER_ASSIST" in
+  ""|0|1) ;;
+  *) echo "--glove-marker-assist must be 0 or 1: $GLOVE_MARKER_ASSIST" >&2; exit 2 ;;
+esac
 
 INPUT_DIR="$(cd "$INPUT_DIR" && pwd)"
 mkdir -p "$OUTPUT_ROOT"
@@ -169,6 +211,17 @@ for MCAP in "${MCAPS[@]}"; do
   [[ -n "$MAX_DETECTIONS_PER_CLASS" ]] && CMD+=(--max-detections-per-class "$MAX_DETECTIONS_PER_CLASS")
   [[ -n "$COMPILE_BACKBONE" ]] && CMD+=(--compile-backbone "$COMPILE_BACKBONE")
   [[ -n "$FUSION_WORKERS" ]] && CMD+=(--fusion-workers "$FUSION_WORKERS")
+  [[ -n "$GLOVE_MARKER_ASSIST" ]] && CMD+=(--glove-marker-assist "$GLOVE_MARKER_ASSIST")
+  [[ -n "$MARKER_SATURATION_MAX" ]] && CMD+=(--marker-saturation-max "$MARKER_SATURATION_MAX")
+  [[ -n "$MARKER_VALUE_MIN" ]] && CMD+=(--marker-value-min "$MARKER_VALUE_MIN")
+  [[ -n "$MARKER_MIN_MATCHES" ]] && CMD+=(--marker-min-matches "$MARKER_MIN_MATCHES")
+  [[ -n "$MARKER_MIN_FINGER_GROUPS" ]] && CMD+=(--marker-min-finger-groups "$MARKER_MIN_FINGER_GROUPS")
+  [[ -n "$MARKER_SEARCH_PADDING_PX" ]] && CMD+=(--marker-search-padding-px "$MARKER_SEARCH_PADDING_PX")
+  [[ -n "$MARKER_SEED_DISTANCE_PX" ]] && CMD+=(--marker-seed-distance-px "$MARKER_SEED_DISTANCE_PX")
+  [[ -n "$MARKER_MATCH_DISTANCE_PX" ]] && CMD+=(--marker-match-distance-px "$MARKER_MATCH_DISTANCE_PX")
+  [[ -n "$MARKER_MAX_SHIFT_PX" ]] && CMD+=(--marker-max-shift-px "$MARKER_MAX_SHIFT_PX")
+  [[ -n "$MARKER_BLEND" ]] && CMD+=(--marker-blend "$MARKER_BLEND")
+  [[ -n "$DETECTOR_HANDEDNESS" ]] && CMD+=(--detector-handedness "$DETECTOR_HANDEDNESS")
   ((${#CAMERAS[@]})) && CMD+=(--cameras "${CAMERAS[@]}")
   ((NO_VIDEO)) && CMD+=(--no-video)
 

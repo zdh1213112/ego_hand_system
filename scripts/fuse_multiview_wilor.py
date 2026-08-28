@@ -237,6 +237,23 @@ def _serialize_hand(
     result: dict[str, Any], selected: dict[str, dict[str, Any]],
     calibrations: dict[str, CameraCalibration], baseline_cameras: tuple[str, str],
 ) -> dict[str, Any]:
+    def serialize_view(camera: str, hand: dict[str, Any]) -> dict[str, Any]:
+        view = {
+            "detection_index": int(hand["detection_index"]),
+            "bbox_xyxy": hand["bbox_xyxy"],
+            "confidence": hand["confidence"],
+            "detector_is_right": hand.get("detector_is_right"),
+            "joints_2d": hand["joints_2d"],
+            "inlier_joint_count": int(
+                result["inlier_mask"][:, result["cameras"].index(camera)].sum()
+            ),
+        }
+        if "wilor_joints_2d" in hand:
+            view["wilor_joints_2d"] = hand["wilor_joints_2d"]
+        if "marker_assist" in hand:
+            view["marker_assist"] = hand["marker_assist"]
+        return view
+
     return {
         "side": result["side"],
         "camera_ids": result["cameras"],
@@ -253,16 +270,7 @@ def _serialize_hand(
             result, selected, calibrations, baseline_cameras
         ),
         "views": {
-            camera: {
-                "detection_index": int(hand["detection_index"]),
-                "bbox_xyxy": hand["bbox_xyxy"],
-                "confidence": hand["confidence"],
-                "detector_is_right": hand.get("detector_is_right"),
-                "joints_2d": hand["joints_2d"],
-                "inlier_joint_count": int(
-                    result["inlier_mask"][:, result["cameras"].index(camera)].sum()
-                ),
-            }
+            camera: serialize_view(camera, hand)
             for camera, hand in selected.items()
         },
     }

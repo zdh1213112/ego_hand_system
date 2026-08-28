@@ -32,6 +32,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--left-camera", default="camera2")
     parser.add_argument("--right-camera", default="camera3")
     parser.add_argument("--focal-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--handedness-policy", choices=("auto", "strict", "geometric"), default="auto",
+        help=(
+            "auto permits geometric identity only for a fusion result configured "
+            "with ignore/adaptive; strict preserves the legacy validation"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -90,6 +97,17 @@ def main() -> int:
     pair_count = int(manifest["synchronization"]["frame_count"])
     left = CameraCalibration.load(dataset / "calibration" / f"{args.left_camera}.json")
     right = CameraCalibration.load(dataset / "calibration" / f"{args.right_camera}.json")
+    fusion_summary = json.loads((fusion / "summary.json").read_text(encoding="utf-8"))
+    fusion_handedness = fusion_summary.get("parameters", {}).get(
+        "detector_handedness", "strict"
+    )
+    allow_geometric_handedness = (
+        args.handedness_policy == "geometric"
+        or (
+            args.handedness_policy == "auto"
+            and fusion_handedness in ("ignore", "adaptive")
+        )
+    )
     stereo = StereoCalibration.from_cameras(left, right)
     rectification = create_stereo_rectification(
         stereo, RectificationOptions(focal_scale=args.focal_scale), "auto"
@@ -105,6 +123,7 @@ def main() -> int:
     right_px_valid = np.zeros_like(valid)
     populated: set[tuple[int, int]] = set()
     identity_observations = 0
+    identity_mismatches = 0
 
     rows = _load_rows(fusion / "accepted.jsonl")
     rotation_base_left = left.T_base_camera[:3, :3]
@@ -126,12 +145,18 @@ def main() -> int:
                 if int(view.get("inlier_joint_count", 0)) <= 0:
                     continue
                 detector_side = view.get("detector_is_right")
-                if detector_side is None or int(detector_side) != side:
+                identity_match = (
+                    detector_side is not None and int(detector_side) == side
+                )
+                if not identity_match and not allow_geometric_handedness:
                     raise ValueError(
                         f"fusion is not strict-handedness clean: sync={pair}, side={side}, "
                         f"camera={camera}, detector_is_right={detector_side!r}"
                     )
-                identity_observations += 1
+                if identity_match:
+                    identity_observations += 1
+                else:
+                    identity_mismatches += 1
 
             points_base = np.asarray(hand["joints_base_m"], dtype=np.float64)
             support = np.asarray(hand["inlier_view_counts"], dtype=np.int32)
@@ -231,7 +256,9 @@ def main() -> int:
         "accepted_hand_count": len(populated),
         "valid_joint_count": int(valid.sum()),
         "strict_identity_observation_count": identity_observations,
-        "strict_identity_mismatch_count": 0,
+        "strict_identity_mismatch_count": identity_mismatches,
+        "handedness_policy": args.handedness_policy,
+        "geometric_handedness_allowed": allow_geometric_handedness,
         "left_camera": args.left_camera,
         "right_camera": args.right_camera,
         "rectified_image_size": list(rectification.image_size),

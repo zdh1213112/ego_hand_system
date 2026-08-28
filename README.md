@@ -160,6 +160,9 @@ camera2/3 锚点选择、DS 射线、外围相机关联和逐关节 RANSAC 的�
 [`docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md`](docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md)。
 如果使用 NOKOV/XINGYING 光学动捕的 24 点手部模型生成 WiLoR 标签，见
 [`docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md`](docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md)。
+戴有反光 marker 球的黑色手套可以直接用原始 RGB 图像辅助 WiLoR，见
+[`docs/GEN6_GLOVE_MARKER_WILOR_ASSIST.md`](docs/GEN6_GLOVE_MARKER_WILOR_ASSIST.md)。该功能默认
+关闭；启用后逐帧检测亮点并修正 WiLoR 的二维投影，不读取 NOKOV CSV，也不修改相机标定。
 
 主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
 `camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
@@ -178,7 +181,8 @@ conda activate ego-hand
   --output <新的六目实验输出目录> \
   --device cuda \
   --max-frames 60 \
-  --batch-size 4
+  --batch-size 4 \
+  --glove-marker-assist 1
 ```
 ```bash
 ./scripts/run_multiview_wilor_experiment.sh \
@@ -188,7 +192,8 @@ conda activate ego-hand
     --device     cuda \
     --gpu-profile rtx5090d \
     --max-frames 0 \
-    --batch-size 16
+    --batch-size 16 \
+    --glove-marker-assist 1
 ```
 
 `--gpu-profile rtx5090d` 会使用 4 帧检测批次、16 个 WiLoR 假设批次、8 个并行
@@ -230,6 +235,26 @@ RTX 5060 保持默认的
 观测通过 RANSAC，不直接使用关节插值代替识别。
 `fusion_multiview/summary.json` 还会把六目结果和 `camera2+camera3` 双目结果投影到所有
 可用视角，给出跨视角一致性对比。
+
+`--glove-marker-assist 1`（兼容旧别名 `--nokov-wilor-assist 1`）执行真正的逐帧视觉辅助：
+
+1. 原图转 HSV，保留低饱和度且亮度大于 `160` 的像素；
+2. 连通域筛选小而近似圆形的亮斑；
+3. 只在当前 WiLoR 手部投影附近保留候选；
+4. 从最近邻估计粗略二维偏移，再用匈牙利算法一对一匹配；
+5. 匹配至少覆盖 3 根手指、5 个 marker 时，平移 21 点并把对应手指关节柔性拉向亮斑。
+
+默认参数可用 `--marker-value-min`、`--marker-saturation-max`、
+`--marker-min-matches`、`--marker-min-finger-groups` 和 `--marker-blend` 调整。启用后原始
+`wilor_multiview/` 保持不变，新增 `wilor_multiview_glove_marker_assisted/` 和
+`fusion_multiview_glove_marker_assisted/`。每个相机目录中的
+`marker_assist_preview.jpg` 会同时画出原始 WiLoR、修正结果和匹配 marker，融合诊断视频
+也会显示 `MARKER N`。找不到足够亮点的手不会被强行修正，而是保留原始 WiLoR 关节。
+
+戴手套时 detector 的左右类别可能同时判成同一侧，因此该开关默认采用逐帧
+`--detector-handedness adaptive`：先执行严格身份融合，只有严格结果拒绝该帧时，才用
+多视角几何与 marker 证据重试。可显式传入 `strict` 强制旧规则，或传入 `ignore` 始终由
+几何选择身份；后两种模式都应单独检查左右手稳定性。
 
 如果一个目录中有多个 MCAP，可使用批处理入口逐个运行。默认串行执行（适合单张 5090D），
 每个 MCAP 使用文件名创建独立输出目录，某个文件失败后默认继续下一个：
