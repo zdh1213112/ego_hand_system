@@ -17,6 +17,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from ego_data.dataset import SequentialVideoReader  # noqa: E402
+from camera_models import project_points  # noqa: E402
+from ego_data.calibration import CameraCalibration  # noqa: E402
 from render_wilor_predictions import HAND_CONNECTIONS, LEFT_COLOR, RIGHT_COLOR  # noqa: E402
 
 
@@ -92,6 +94,52 @@ def _draw_hand(frame: np.ndarray, hand: dict, side: int) -> None:
         )
 
 
+def _project_refined_hand(
+    camera: CameraCalibration, points_base: np.ndarray,
+) -> np.ndarray:
+    rotation = camera.T_base_camera[:3, :3]
+    center = camera.T_base_camera[:3, 3]
+    points_camera = (rotation.T @ (points_base - center).T).T
+    pixels, valid = project_points(camera, points_camera)
+    pixels[~valid] = np.nan
+    return pixels
+
+
+def _draw_refined_hand(
+    frame: np.ndarray,
+    points: np.ndarray,
+    side: int,
+    corrected_joint_count: int,
+) -> None:
+    if points.shape != (21, 2):
+        return
+    color = (40, 255, 255)
+    finite = np.isfinite(points).all(axis=1)
+    rounded = np.zeros((21, 2), dtype=np.int32)
+    rounded[finite] = np.rint(points[finite]).astype(np.int32)
+    for start, end in HAND_CONNECTIONS:
+        if not (finite[start] and finite[end]):
+            continue
+        cv2.line(
+            frame, tuple(rounded[start]), tuple(rounded[end]),
+            (20, 20, 20), 8, cv2.LINE_AA,
+        )
+        cv2.line(
+            frame, tuple(rounded[start]), tuple(rounded[end]),
+            color, 4, cv2.LINE_AA,
+        )
+    for point in rounded[finite]:
+        cv2.circle(frame, tuple(point), 6, (20, 20, 20), -1, cv2.LINE_AA)
+        cv2.circle(frame, tuple(point), 4, color, -1, cv2.LINE_AA)
+    if finite[0]:
+        label_at = tuple((rounded[0] + np.asarray((10, -12))).tolist())
+        label = f"ANATOMY {'R' if side else 'L'} {corrected_joint_count}"
+        cv2.putText(
+            frame, label, label_at, cv2.FONT_HERSHEY_SIMPLEX,
+            0.58, color, 2, cv2.LINE_AA,
+        )
+
+
 def main() -> int:
     args = parse_args()
     dataset = args.dataset.resolve()
@@ -145,6 +193,12 @@ def main() -> int:
         )
         for camera in cameras
     }
+    calibrations = {
+        camera: CameraCalibration.load(
+            dataset / "calibration" / f"{camera}.json"
+        )
+        for camera in cameras
+    }
     try:
         for ordinal, row in enumerate(rows):
             sync_index = int(row["sync_index"])
@@ -157,6 +211,18 @@ def main() -> int:
                         view = hand["views"].get(camera)
                         if view is not None:
                             _draw_hand(frame, view, int(hand["side"]))
+                        anatomy = hand.get("anatomy_refinement", {})
+                        if anatomy.get("applied"):
+                            refined_pixels = _project_refined_hand(
+                                calibrations[camera],
+                                np.asarray(hand["joints_base_m"], dtype=np.float64),
+                            )
+                            _draw_refined_hand(
+                                frame,
+                                refined_pixels,
+                                int(hand["side"]),
+                                int(anatomy.get("corrected_joint_count", 0)),
+                            )
                 camera_views = [
                     hand["views"][camera] for hand in result["hands"]
                     if camera in hand["views"]

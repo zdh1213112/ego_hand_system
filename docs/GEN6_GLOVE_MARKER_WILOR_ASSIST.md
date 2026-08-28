@@ -24,6 +24,35 @@ WiLoR 索引 `1..20` 是五根手指各 4 点，和手套每根手指的 4 个�
 手腕，没有直接 marker，只有强支持通过全部门控后才对它应用有上限的整体二维平移。
 marker 数和残差只作为较弱的假设选择代价；多视角重投影与 RANSAC 仍是主约束。
 
+## 融合后三维解剖与时序修复
+
+融合默认再执行一次离线的零相位三维修复，专门处理侧视、遮挡造成的深度尖峰、骨长突变
+和短时错误手型，不再增加二维 marker 吸附强度：
+
+1. 按每个物理手的完整时间序列估计稳定骨长，拒绝离手中心过远、相对邻帧跳变或骨长严重
+   异常的关节；
+2. 不超过 3 帧的内部空洞由前后可靠帧插值；普通插值无法覆盖时，必须有至少两个邻近姿态
+   且当前帧至少 3 个可靠掌部锚点，才可用刚体对齐补点；
+3. 只对含异常点的手指应用掌坐标时序平滑和定骨长约束；没有异常的手实例逐点保持原始融合
+   结果；
+4. 可靠关节只允许最多 `0.35` 权重、`20 mm` 的弱调整，异常关节可由可靠时序候选替换；
+5. 每个修正关节重新投影到所有参与相机。任何相机中的位移不超过 `35 px`，多视角残差中位数
+   最多恶化 `15 px`；否则自动缩小或撤销该关节修正。
+
+这一步可以用 `--anatomy-refinement 0` 关闭。主要可调项为：
+
+```text
+--anatomy-outlier-window 4
+--anatomy-outlier-distance-m 0.10
+--anatomy-bone-relative 0.45
+--anatomy-smoothing-radius 2
+--anatomy-shape-strength 0.55
+--anatomy-reliable-adjustment-blend 0.35
+--anatomy-max-reliable-adjustment-m 0.020
+--anatomy-max-reprojection-regression-px 15
+--anatomy-max-reprojection-shift-px 35
+```
+
 ## 运行
 
 在现有六目命令后增加：
@@ -92,6 +121,13 @@ glove_marker_run/
 该 detector 的 marker。`marker_assist_preview.jpg` 优先保存风险最大的修正案例，
 `marker_evidence_preview.jpg` 保存最接近强修正门限的只读证据案例。`summary.json` 还记录
 稳定的拒绝原因码、估计/实际偏移和骨长变化。
+
+融合诊断视频中彩色细骨架仍是相机内的 WiLoR/marker 观测，黄色 `ANATOMY L/R N` 是三维
+修复后重新投影的骨架，`N` 为该手移动超过 2 mm 的关节数。`accepted.jsonl` 中
+`unrefined_joints_base_m` 保留修复前坐标，`anatomy_refinement` 记录逐手修正、拒绝、插值和
+位移统计；融合 `summary.json` 记录骨长误差、掌坐标形状跳变、三维加速度，以及修复前后
+多视角重投影分位数。无法通过时序和重投影双重支持的异常点会保留原结果，并计入
+`unrepaired_outlier_count`。
 
 建议先运行 `--max-frames 60`，检查：
 

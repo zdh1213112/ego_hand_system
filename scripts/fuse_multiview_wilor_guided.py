@@ -24,6 +24,10 @@ from ego_data.calibration import CameraCalibration  # noqa: E402
 from fuse_multiview_wilor import (  # noqa: E402
     _groups, _load_jsonl, _serialize_hand, _triangulate_hand,
 )
+from fusion_anatomy_refinement import (  # noqa: E402
+    FusionAnatomyConfig,
+    refine_accepted_rows,
+)
 
 
 HAND_EDGES = (
@@ -63,6 +67,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal-recovery-gap", type=int, default=3)
     parser.add_argument("--temporal-association-threshold-px", type=float, default=90.0)
     parser.add_argument("--max-temporal-wrist-step-m", type=float, default=0.12)
+    parser.add_argument("--anatomy-refinement", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--anatomy-outlier-window", type=int, default=4)
+    parser.add_argument("--anatomy-outlier-distance-m", type=float, default=0.10)
+    parser.add_argument("--anatomy-bone-relative", type=float, default=0.45)
+    parser.add_argument("--anatomy-smoothing-radius", type=int, default=2)
+    parser.add_argument("--anatomy-shape-strength", type=float, default=0.55)
+    parser.add_argument("--anatomy-reliable-adjustment-blend", type=float, default=0.35)
+    parser.add_argument("--anatomy-max-reliable-adjustment-m", type=float, default=0.020)
+    parser.add_argument("--anatomy-max-reprojection-regression-px", type=float, default=15.0)
+    parser.add_argument("--anatomy-max-reprojection-shift-px", type=float, default=35.0)
     parser.add_argument(
         "--workers", type=int, default=1,
         help="independent frame-fusion worker processes",
@@ -565,6 +579,20 @@ def main() -> int:
         raise ValueError(
             "workers/progress-interval must be positive; max-frames must be non-negative"
         )
+    anatomy_config = FusionAnatomyConfig(
+        outlier_window=args.anatomy_outlier_window,
+        outlier_distance_m=args.anatomy_outlier_distance_m,
+        bone_outlier_relative=args.anatomy_bone_relative,
+        smoothing_radius=args.anatomy_smoothing_radius,
+        local_shape_strength=args.anatomy_shape_strength,
+        reliable_adjustment_blend=args.anatomy_reliable_adjustment_blend,
+        max_reliable_adjustment_m=args.anatomy_max_reliable_adjustment_m,
+        max_reprojection_regression_px=(
+            args.anatomy_max_reprojection_regression_px
+        ),
+        max_reprojection_shift_px=args.anatomy_max_reprojection_shift_px,
+    )
+    anatomy_config.validate()
     fusion_started = time.perf_counter()
     dataset = args.dataset.resolve()
     prediction_root = args.predictions.resolve()
@@ -632,6 +660,11 @@ def main() -> int:
         accepted.extend(temporal_recovered)
         accepted.sort(key=lambda row: int(row["sync_index"]))
         rejected = remaining_rejected
+    anatomy_summary = None
+    if args.anatomy_refinement:
+        anatomy_summary = refine_accepted_rows(
+            accepted, len(cameras), anatomy_config, calibrations
+        )
     reasons = Counter()
     for rejection in rejected:
         if "reason" in rejection:
@@ -776,6 +809,10 @@ def main() -> int:
             "temporal_association_threshold_px": args.temporal_association_threshold_px,
             "detector_handedness": args.detector_handedness,
             "workers": args.workers,
+        },
+        "anatomy_refinement": anatomy_summary or {
+            "enabled": False,
+            "parameters": anatomy_config.to_dict(),
         },
     }
     if args.detector_handedness == "adaptive":

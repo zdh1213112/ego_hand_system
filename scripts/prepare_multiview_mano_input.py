@@ -8,10 +8,26 @@ import csv
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from camera_models import RectificationOptions, create_stereo_rectification
+from camera_models.double_sphere import unproject as unproject_double_sphere
 from ego_data.calibration import CameraCalibration, StereoCalibration
+from stabilize_hand_3d import (
+    acceleration_metric,
+    active_ranges,
+    bone_error_metric,
+    detect_temporal_pixel_outliers,
+    displacement_metric,
+    estimate_bone_lengths,
+    palm_normalized_3d_step_metric,
+    reject_bone_outliers,
+    reject_observation_outliers,
+    smooth_3d_landmarks_in_palm_frame,
+    smooth_pixel_landmarks_in_palm_frame,
+    stabilize_once,
+)
 
 
 HAND_EDGES = (
@@ -32,6 +48,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--left-camera", default="camera2")
     parser.add_argument("--right-camera", default="camera3")
     parser.add_argument("--focal-scale", type=float, default=1.0)
+    parser.add_argument("--anatomy-refine", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--outlier-window", type=int, default=4)
+    parser.add_argument("--outlier-distance-m", type=float, default=0.10)
+    parser.add_argument("--max-hand-radius-m", type=float, default=0.20)
+    parser.add_argument("--bone-outlier-absolute-m", type=float, default=0.025)
+    parser.add_argument("--bone-outlier-relative", type=float, default=0.45)
+    parser.add_argument("--max-gap", type=int, default=3)
+    parser.add_argument("--smoothing-radius", type=int, default=2)
+    parser.add_argument("--local-shape-strength", type=float, default=0.60)
+    parser.add_argument("--bone-iterations", type=int, default=12)
+    parser.add_argument("--bone-strength", type=float, default=0.80)
     parser.add_argument(
         "--handedness-policy", choices=("auto", "strict", "geometric"), default="auto",
         help=(
@@ -54,6 +81,38 @@ def _project_rectified(
     pixels = np.full((len(points_left), 2), np.nan, dtype=np.float64)
     pixels[valid] = projected[valid, :2] / projected[valid, 2:3]
     return pixels, valid
+
+
+def _rectify_view_pixels(
+    camera: CameraCalibration,
+    pixels: np.ndarray,
+    rectification_rotation: np.ndarray,
+    projection: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map native fisheye/DS pixels to their pinhole rectified ray pixels."""
+    pixels = np.asarray(pixels, dtype=np.float64)
+    if pixels.shape != (21, 2):
+        raise ValueError(f"expected 21x2 image joints, got {pixels.shape}")
+    if camera.model == "DS":
+        rays, valid = unproject_double_sphere(camera, pixels)
+        rectified = (rectification_rotation @ rays.T).T
+        valid &= np.isfinite(rectified).all(axis=1) & (rectified[:, 2] > 1e-8)
+        output = np.full((21, 2), np.nan, dtype=np.float64)
+        projected = (projection[:, :3] @ rectified.T).T
+        output[valid] = projected[valid, :2] / projected[valid, 2:3]
+        return output, valid
+    if camera.model == "KB":
+        output = cv2.fisheye.undistortPoints(
+            pixels.reshape(-1, 1, 2),
+            camera.K,
+            camera.distortion,
+            R=rectification_rotation,
+            P=projection[:, :3],
+        )[:, 0]
+        valid = np.isfinite(output).all(axis=1)
+        output[~valid] = np.nan
+        return output, valid
+    raise ValueError(f"unsupported camera model for rectification: {camera.model}")
 
 
 def _load_rows(path: Path) -> list[dict]:
@@ -87,6 +146,24 @@ def main() -> int:
         raise ValueError("left/right cameras must differ")
     if args.focal_scale <= 0:
         raise ValueError("focal-scale must be positive")
+    if min(
+        args.outlier_window,
+        args.max_gap,
+        args.smoothing_radius,
+        args.bone_iterations,
+    ) < 0:
+        raise ValueError("anatomy refinement windows/iterations must be non-negative")
+    if min(
+        args.outlier_distance_m,
+        args.max_hand_radius_m,
+        args.bone_outlier_absolute_m,
+        args.bone_outlier_relative,
+    ) <= 0:
+        raise ValueError("anatomy refinement thresholds must be positive")
+    if not 0.0 <= args.local_shape_strength <= 1.0:
+        raise ValueError("local-shape-strength must be in [0, 1]")
+    if not 0.0 <= args.bone_strength <= 1.0:
+        raise ValueError("bone-strength must be in [0, 1]")
 
     manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("dataset_type") != "normalized_multiview":
@@ -164,12 +241,28 @@ def main() -> int:
                 raise ValueError(f"invalid fused hand shape at sync_index {pair}")
             points_left = (rotation_base_left.T @ (points_base - center_base_left).T).T
             finite = np.isfinite(points_left).all(axis=1) & (support >= 2)
-            pixels_left, projectable_left = _project_rectified(
-                points_left, rectification.R1, rectification.P1
-            )
-            pixels_right, projectable_right = _project_rectified(
-                points_left, rectification.R1, rectification.P2
-            )
+            left_view = hand.get("views", {}).get(args.left_camera)
+            right_view = hand.get("views", {}).get(args.right_camera)
+            if left_view is not None and int(left_view.get("inlier_joint_count", 0)) > 0:
+                pixels_left, projectable_left = _rectify_view_pixels(
+                    left,
+                    np.asarray(left_view["joints_2d"], dtype=np.float64),
+                    rectification.R1,
+                    rectification.P1,
+                )
+            else:
+                pixels_left = np.full((21, 2), np.nan, dtype=np.float64)
+                projectable_left = np.zeros(21, dtype=bool)
+            if right_view is not None and int(right_view.get("inlier_joint_count", 0)) > 0:
+                pixels_right, projectable_right = _rectify_view_pixels(
+                    right,
+                    np.asarray(right_view["joints_2d"], dtype=np.float64),
+                    rectification.R2,
+                    rectification.P2,
+                )
+            else:
+                pixels_right = np.full((21, 2), np.nan, dtype=np.float64)
+                projectable_right = np.zeros(21, dtype=bool)
             in_left = (
                 projectable_left
                 & (pixels_left[:, 0] >= 0) & (pixels_left[:, 0] < width)
@@ -188,19 +281,98 @@ def main() -> int:
             ).astype(np.float32)
             left_px[side, pair] = pixels_left.astype(np.float32)
             right_px[side, pair] = pixels_right.astype(np.float32)
-            left_px_valid[side, pair] = finite & in_left
-            right_px_valid[side, pair] = finite & in_right
+            left_px_valid[side, pair] = in_left
+            right_px_valid[side, pair] = in_right
 
-    bone_lengths = np.full((2, len(HAND_EDGES)), 0.03, dtype=np.float32)
-    for side in (0, 1):
-        for edge_index, (parent, child) in enumerate(HAND_EDGES):
-            edge_valid = valid[side, :, parent] & valid[side, :, child]
-            lengths = np.linalg.norm(
-                positions[side, edge_valid, child] - positions[side, edge_valid, parent], axis=1
-            )
-            lengths = lengths[(lengths > 0.008) & (lengths < 0.18)]
-            if len(lengths):
-                bone_lengths[side, edge_index] = float(np.median(lengths))
+    input_positions = positions.copy()
+    input_observed = observed.copy()
+    base_confidence = confidence.copy()
+    rejected = np.zeros_like(valid)
+    interpolated = np.zeros_like(valid)
+    left_px_filtered = left_px.copy()
+    right_px_filtered = right_px.copy()
+    if args.anatomy_refine:
+        ranges = active_ranges(observed)
+        accepted, rejected = reject_observation_outliers(
+            positions,
+            observed,
+            ranges,
+            args.outlier_window,
+            args.outlier_distance_m,
+            args.max_hand_radius_m,
+        )
+        left_outliers = detect_temporal_pixel_outliers(
+            left_px,
+            args.outlier_window,
+            0.45,
+            1.8,
+        )
+        right_outliers = detect_temporal_pixel_outliers(
+            right_px,
+            args.outlier_window,
+            0.45,
+            1.8,
+        )
+        left_px_valid &= ~left_outliers
+        right_px_valid &= ~right_outliers
+        pixel_geometry_rejected = observed & left_outliers & right_outliers
+        accepted[pixel_geometry_rejected] = False
+        rejected |= pixel_geometry_rejected
+        left_px_filtered = smooth_pixel_landmarks_in_palm_frame(
+            left_px,
+            left_px_valid,
+            args.smoothing_radius,
+            args.local_shape_strength,
+        )
+        right_px_filtered = smooth_pixel_landmarks_in_palm_frame(
+            right_px,
+            right_px_valid,
+            args.smoothing_radius,
+            args.local_shape_strength,
+        )
+        preliminary = positions.copy()
+        preliminary[~accepted] = np.nan
+        preliminary_confidence = confidence.copy()
+        preliminary_confidence[~accepted] = 0.0
+        bone_lengths = estimate_bone_lengths(
+            preliminary, accepted, preliminary_confidence
+        )
+        accepted, bone_rejected = reject_bone_outliers(
+            positions,
+            accepted,
+            preliminary_confidence,
+            bone_lengths,
+            args.bone_outlier_absolute_m,
+            args.bone_outlier_relative,
+        )
+        rejected |= bone_rejected
+        prepared = stabilize_once(
+            positions,
+            accepted,
+            confidence,
+            args.max_gap,
+            args.smoothing_radius,
+            args.bone_iterations,
+            args.bone_strength,
+        )
+        positions = smooth_3d_landmarks_in_palm_frame(
+            prepared["stabilized"],
+            prepared["valid"],
+            args.smoothing_radius,
+            args.local_shape_strength,
+        ).astype(np.float32)
+        valid = prepared["valid"]
+        observed = accepted
+        interpolated = prepared["interpolated"]
+        fit_confidence = prepared["confidence"]
+        pixel_confidence = np.where(
+            left_px_valid | right_px_valid,
+            0.25 * base_confidence,
+            0.0,
+        )
+        confidence = np.maximum(fit_confidence, pixel_confidence).astype(np.float32)
+    else:
+        bone_lengths = estimate_bone_lengths(positions, observed, confidence)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -208,15 +380,15 @@ def main() -> int:
         positions_left_camera_m=positions,
         valid=valid,
         observed=observed,
-        input_observed=observed.copy(),
-        outlier_rejected=np.zeros_like(valid),
-        interpolated=np.zeros_like(valid),
+        input_observed=input_observed,
+        outlier_rejected=rejected,
+        interpolated=interpolated,
         confidence=confidence,
-        raw_positions_left_camera_m=positions.copy(),
+        raw_positions_left_camera_m=input_positions,
         left_rectified_px=left_px,
         right_rectified_px=right_px,
-        left_rectified_px_filtered=left_px.copy(),
-        right_rectified_px_filtered=right_px.copy(),
+        left_rectified_px_filtered=left_px_filtered,
+        right_rectified_px_filtered=right_px_filtered,
         left_rectified_valid=left_px_valid,
         right_rectified_valid=right_px_valid,
         track_ids=np.asarray([0, 1], dtype=np.int32),
@@ -254,7 +426,11 @@ def main() -> int:
         "pair_count": pair_count,
         "accepted_frame_count": len(rows),
         "accepted_hand_count": len(populated),
+        "input_valid_joint_count": int(input_observed.sum()),
         "valid_joint_count": int(valid.sum()),
+        "accepted_observation_count": int(observed.sum()),
+        "outlier_rejected_count": int(rejected.sum()),
+        "interpolated_joint_count": int(interpolated.sum()),
         "strict_identity_observation_count": identity_observations,
         "strict_identity_mismatch_count": identity_mismatches,
         "handedness_policy": args.handedness_policy,
@@ -264,6 +440,36 @@ def main() -> int:
         "rectified_image_size": list(rectification.image_size),
         "rectified_focal_px": float(rectification.P1[0, 0]),
         "coordinate_conversion": "X_left = R_base_left.T @ (X_base - t_base_left)",
+        "anatomy_refinement": {
+            "enabled": bool(args.anatomy_refine),
+            "outlier_window": args.outlier_window,
+            "outlier_distance_m": args.outlier_distance_m,
+            "max_hand_radius_m": args.max_hand_radius_m,
+            "bone_outlier_absolute_m": args.bone_outlier_absolute_m,
+            "bone_outlier_relative": args.bone_outlier_relative,
+            "max_gap": args.max_gap,
+            "smoothing_radius": args.smoothing_radius,
+            "local_shape_strength": args.local_shape_strength,
+            "bone_iterations": args.bone_iterations,
+            "bone_strength": args.bone_strength,
+            "bone_error_before": bone_error_metric(
+                input_positions, input_observed, bone_lengths
+            ),
+            "bone_error_after": bone_error_metric(positions, valid, bone_lengths),
+            "acceleration_median_before_mm": acceleration_metric(
+                input_positions, input_observed
+            ),
+            "acceleration_median_after_mm": acceleration_metric(positions, valid),
+            "palm_normalized_step_before": palm_normalized_3d_step_metric(
+                input_positions, input_observed
+            ),
+            "palm_normalized_step_after": palm_normalized_3d_step_metric(
+                positions, valid
+            ),
+            "accepted_observation_displacement": displacement_metric(
+                positions, input_positions, observed
+            ),
+        },
     }
     output.with_suffix(".json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
