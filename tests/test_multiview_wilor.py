@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 from pathlib import Path
 import sys
 import unittest
@@ -13,9 +14,12 @@ sys.path.insert(0, str(SCRIPTS))
 
 from camera_models import project_points
 from ego_data.calibration import CameraCalibration
-from fuse_multiview_wilor import triangulate_ransac
+from fuse_multiview_wilor import (
+    _intersect_rays, _ray_in_base, triangulate_ransac,
+)
 from fuse_multiview_wilor_guided import (
-    _fuse_primary_frame, _marker_assist_cost, _match_camera, _ordered_hand_pairs,
+    _fuse_primary_frame, _marker_assist_cost, _match_camera,
+    _nearest_reference_row, _ordered_hand_pairs,
 )
 from normalize_multiview_recording import synchronize_rows
 
@@ -32,6 +36,19 @@ def ds_camera(camera_id: str, center_x: float) -> CameraCalibration:
 
 
 class MultiviewWilorTests(unittest.TestCase):
+    def test_nearest_reference_uses_binary_neighbors_and_earlier_tie(self):
+        references = [{"sync_index": value} for value in (2, 100, 205, 900)]
+        reference, distance = _nearest_reference_row(
+            references, [2, 100, 205, 900], 150
+        )
+        self.assertEqual(reference["sync_index"], 100)
+        self.assertEqual(distance, 50)
+        reference, distance = _nearest_reference_row(
+            references, [2, 100, 205, 900], 207
+        )
+        self.assertEqual(reference["sync_index"], 205)
+        self.assertEqual(distance, 2)
+
     def test_synchronization_uses_each_frame_at_most_once(self):
         rows = {
             "camera0": [{"timestamp_ns": value} for value in (1000, 2000, 3000)],
@@ -56,6 +73,72 @@ class MultiviewWilorTests(unittest.TestCase):
         np.testing.assert_allclose(recovered, expected, atol=1e-10)
         self.assertTrue(inliers.all())
         self.assertLess(float(errors.max()), 1e-9)
+
+    def test_vectorized_ransac_matches_scalar_candidate_search(self):
+        cameras = [
+            ds_camera(f"camera{index}", center)
+            for index, center in enumerate(np.linspace(-0.12, 0.12, 6))
+        ]
+        expected = np.asarray([0.035, -0.018, 0.73])
+        rng = np.random.default_rng(17)
+        observations = []
+        for camera in cameras:
+            point_camera = expected - camera.T_base_camera[:3, 3]
+            pixel, _ = project_points(camera, point_camera[None])
+            observations.append((
+                camera.camera_id, camera, pixel[0] + rng.normal(0.0, 1.5, 2)
+            ))
+        observations[-1] = (
+            observations[-1][0], observations[-1][1],
+            observations[-1][2] + np.asarray([90.0, -60.0]),
+        )
+
+        rays = [
+            _ray_in_base(camera, pixel)
+            for _, camera, pixel in observations
+        ]
+        best = None
+        for first, second in itertools.combinations(range(len(observations)), 2):
+            point = _intersect_rays([rays[first], rays[second]])
+            if point is None:
+                continue
+            errors = np.full(len(observations), np.inf)
+            for index, (_, camera, pixel) in enumerate(observations):
+                center = camera.T_base_camera[:3, 3]
+                if np.dot(point - center, rays[index][1]) <= 0:
+                    continue
+                point_camera = camera.T_base_camera[:3, :3].T @ (point - center)
+                projected, valid = project_points(camera, point_camera[None])
+                if bool(valid[0]):
+                    errors[index] = np.linalg.norm(projected[0] - pixel)
+            inliers = np.isfinite(errors) & (errors <= 20.0)
+            count = int(inliers.sum())
+            score = float(np.median(errors[inliers])) if count else np.inf
+            candidate = (count, -score, point, inliers)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+        reference_point = _intersect_rays([
+            rays[index] for index in np.flatnonzero(best[3])
+        ])
+        reference_errors = np.full(len(observations), np.inf)
+        for index, (_, camera, pixel) in enumerate(observations):
+            center = camera.T_base_camera[:3, 3]
+            point_camera = camera.T_base_camera[:3, :3].T @ (
+                reference_point - center
+            )
+            projected, valid = project_points(camera, point_camera[None])
+            if bool(valid[0]) and np.dot(
+                reference_point - center, rays[index][1]
+            ) > 0:
+                reference_errors[index] = np.linalg.norm(projected[0] - pixel)
+        reference_inliers = np.isfinite(reference_errors) & (
+            reference_errors <= 20.0
+        )
+
+        point, errors, inliers = triangulate_ransac(observations, 20.0)
+        np.testing.assert_allclose(point, reference_point, atol=1e-12)
+        np.testing.assert_allclose(errors, reference_errors, atol=1e-12)
+        np.testing.assert_array_equal(inliers, reference_inliers)
 
     def test_guided_matching_rejects_background_candidate(self):
         camera = ds_camera("camera0", -0.09)

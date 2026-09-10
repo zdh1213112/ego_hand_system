@@ -210,17 +210,19 @@ def _top_detections_per_class(
     return np.asarray(sorted(selected), dtype=np.int64)
 
 
-def infer_dual_batched(
-    frames, detector, model, model_cfg, device, confidence: float,
-    iou: float, rescale_factor: float, batch_size: int, preprocess_workers: int,
+def _prepare_dual_batched(
+    frames, detector, model_cfg, confidence: float,
+    iou: float, rescale_factor: float, preprocess_workers: int,
     max_detections_per_class: int,
-) -> list[list[dict[str, Any]]]:
-    """Run one detector batch and one cross-frame WiLoR hypothesis stream."""
+    preprocess_executor: ThreadPoolExecutor | None = None,
+) -> dict[str, Any]:
+    """Run detection and CPU crop preparation for one frame chunk."""
     import torch
 
-    detections = detector(
-        frames, conf=confidence, iou=iou, verbose=False, half=True,
-    )
+    with torch.inference_mode():
+        detections = detector(
+            frames, conf=confidence, iou=iou, verbose=False, half=True,
+        )
     states: list[dict[str, Any]] = []
     datasets = []
     for frame_batch_index, (frame, detection) in enumerate(zip(frames, detections)):
@@ -254,36 +256,91 @@ def infer_dual_batched(
         })
         datasets.append(_FrameHypothesisDataset(crop_dataset, frame_batch_index))
 
-    if not datasets:
-        return [[] for _ in frames]
+    if datasets:
+        combined = torch.utils.data.ConcatDataset(datasets)
+        if preprocess_executor is None:
+            with ThreadPoolExecutor(max_workers=preprocess_workers) as executor:
+                samples = list(
+                    executor.map(combined.__getitem__, range(len(combined)))
+                )
+        else:
+            samples = list(preprocess_executor.map(
+                combined.__getitem__, range(len(combined))
+            ))
+    else:
+        samples = []
+    return {"states": states, "samples": samples}
 
-    combined = torch.utils.data.ConcatDataset(datasets)
-    with ThreadPoolExecutor(max_workers=preprocess_workers) as executor:
-        samples = list(executor.map(combined.__getitem__, range(len(combined))))
-    for batch_start in range(0, len(samples), batch_size):
+
+def _infer_prepared_batched(
+    prepared: dict[str, Any], model, model_cfg, device, batch_size: int,
+    runtime_stats: dict[str, int] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Run WiLoR on crops that may have been prepared beside a prior batch."""
+    import torch
+
+    states = prepared["states"]
+    samples = prepared["samples"]
+    if not samples:
+        return [[] for _ in states]
+    effective_batch_size = (
+        int(runtime_stats.get("effective_hypothesis_batch_size", batch_size))
+        if runtime_stats is not None else batch_size
+    )
+    batch_start = 0
+    while batch_start < len(samples):
+        batch_end = min(batch_start + effective_batch_size, len(samples))
         batch = torch.utils.data.default_collate(
-            samples[batch_start : batch_start + batch_size]
+            samples[batch_start:batch_end]
         )
         frame_indices = batch.pop("frame_batch_index").numpy()
         hypothesis_indices = batch["personid"].numpy()
-        batch = base.recursive_to(batch, device)
-        with torch.inference_mode(), torch.autocast(
-            device_type="cuda", dtype=torch.float16,
-        ):
-            result = model(batch)
-            multiplier = 2 * batch["right"] - 1
-            pred_cam = result["pred_cam"].clone()
-            pred_cam[:, 1] = multiplier * pred_cam[:, 1]
-            image_size = batch["img_size"].float()
-            focal_length = (
-                model_cfg.EXTRA.FOCAL_LENGTH
-                / model_cfg.MODEL.IMAGE_SIZE
-                * image_size.max()
-            ).item()
-            camera_full = base.cam_crop_to_full(
-                pred_cam, batch["box_center"].float(), batch["box_size"].float(),
-                image_size, focal_length,
+        try:
+            # Pinned host tensors let CUDA use its asynchronous copy engine.
+            batch = {
+                key: (
+                    value.pin_memory().to(device, non_blocking=True)
+                    if isinstance(value, torch.Tensor) else value
+                )
+                for key, value in batch.items()
+            }
+            with torch.inference_mode(), torch.autocast(
+                device_type="cuda", dtype=torch.float16,
+            ):
+                result = model(batch)
+                multiplier = 2 * batch["right"] - 1
+                pred_cam = result["pred_cam"].clone()
+                pred_cam[:, 1] = multiplier * pred_cam[:, 1]
+                image_size = batch["img_size"].float()
+                focal_length = (
+                    model_cfg.EXTRA.FOCAL_LENGTH
+                    / model_cfg.MODEL.IMAGE_SIZE
+                    * image_size.max()
+                ).item()
+                camera_full = base.cam_crop_to_full(
+                    pred_cam, batch["box_center"].float(),
+                    batch["box_size"].float(), image_size, focal_length,
+                )
+        except torch.cuda.OutOfMemoryError:
+            if effective_batch_size <= 1:
+                raise
+            effective_batch_size = max(1, effective_batch_size // 2)
+            if runtime_stats is not None:
+                runtime_stats["effective_hypothesis_batch_size"] = (
+                    effective_batch_size
+                )
+                runtime_stats["cuda_oom_retries"] = (
+                    int(runtime_stats.get("cuda_oom_retries", 0)) + 1
+                )
+            del batch
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(
+                "CUDA memory pressure: retrying WiLoR with hypothesis batch "
+                f"{effective_batch_size}",
+                flush=True,
             )
+            continue
 
         rights = batch["right"].detach().float().cpu().numpy()
         image_sizes = image_size.detach().cpu().numpy()
@@ -309,11 +366,57 @@ def infer_dual_batched(
                 "camera_translation": cameras[index].astype(np.float32).tolist(),
                 "joints_2d": joints2d.tolist(),
             }
+        batch_start = batch_end
 
     return [
         [record for record in state["records"] if record is not None]
         for state in states
     ]
+
+
+def infer_dual_batched(
+    frames, detector, model, model_cfg, device, confidence: float,
+    iou: float, rescale_factor: float, batch_size: int, preprocess_workers: int,
+    max_detections_per_class: int,
+    preprocess_executor: ThreadPoolExecutor | None = None,
+    runtime_stats: dict[str, int] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Run a complete detector/crop/WiLoR batch without pipeline scheduling."""
+    prepared = _prepare_dual_batched(
+        frames, detector, model_cfg, confidence, iou, rescale_factor,
+        preprocess_workers, max_detections_per_class, preprocess_executor,
+    )
+    return _infer_prepared_batched(
+        prepared, model, model_cfg, device, batch_size, runtime_stats
+    )
+
+
+def _prefetched_frame_chunks(
+    reader: SequentialVideoReader,
+    rows: list[dict[str, str]],
+    camera: str,
+    frame_batch_size: int,
+):
+    """Decode the next H.264 chunk while CUDA processes the current chunk."""
+    def load(chunk_start: int):
+        chunk = rows[chunk_start:chunk_start + frame_batch_size]
+        frames = [
+            reader.read(int(row[f"{camera}_frame_index"])) for row in chunk
+        ]
+        return chunk_start, chunk, frames
+
+    with ThreadPoolExecutor(max_workers=1) as decode_executor:
+        next_start = 0
+        pending = decode_executor.submit(load, next_start)
+        next_start += frame_batch_size
+        while pending is not None:
+            chunk_start, chunk, frames = pending.result()
+            pending = (
+                decode_executor.submit(load, next_start)
+                if next_start < len(rows) else None
+            )
+            next_start += frame_batch_size
+            yield chunk_start, chunk, frames
 
 
 def main() -> int:
@@ -364,6 +467,7 @@ def main() -> int:
     preprocess_workers = args.preprocess_workers or (8 if accelerated else 1)
     if accelerated:
         import torch
+        cv2.setNumThreads(1)
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -393,88 +497,120 @@ def main() -> int:
             )
     detector = base.load_detector(args.detector, device)
     camera_summaries = {}
+    runtime_stats = {
+        "effective_hypothesis_batch_size": args.batch_size,
+        "cuda_oom_retries": 0,
+    }
     inference_started = time.perf_counter()
-    for camera in cameras:
-        camera_root = output / camera
-        camera_root.mkdir()
-        prediction_path = camera_root / "predictions.jsonl"
-        reader = SequentialVideoReader(
-            dataset / "cameras" / camera / manifest["storage"]["video_filename"],
-            image_size,
-        )
-        physical_boxes = 0
-        detected_frames = 0
-        camera_started = time.perf_counter()
-        try:
-            with prediction_path.open("w", encoding="utf-8") as stream:
-                for chunk_start in range(0, len(rows), frame_batch_size):
-                    chunk = rows[chunk_start : chunk_start + frame_batch_size]
-                    frames = [
-                        reader.read(int(row[f"{camera}_frame_index"])) for row in chunk
-                    ]
+    with ThreadPoolExecutor(max_workers=preprocess_workers) as preprocess_executor:
+        for camera in cameras:
+            camera_root = output / camera
+            camera_root.mkdir()
+            prediction_path = camera_root / "predictions.jsonl"
+            reader = SequentialVideoReader(
+                dataset / "cameras" / camera
+                / manifest["storage"]["video_filename"],
+                image_size,
+            )
+            physical_boxes = 0
+            detected_frames = 0
+            camera_started = time.perf_counter()
+            try:
+                with prediction_path.open("w", encoding="utf-8") as stream:
                     if accelerated:
-                        hands_by_frame = infer_dual_batched(
-                            frames, detector, model, model_cfg, device,
-                            camera_confidences[camera], args.iou,
-                            args.rescale_factor, args.batch_size,
-                            preprocess_workers, args.max_detections_per_class,
+                        result_batches = (
+                            (
+                                chunk_start,
+                                chunk,
+                                infer_dual_batched(
+                                    frames, detector, model, model_cfg, device,
+                                    camera_confidences[camera], args.iou,
+                                    args.rescale_factor, args.batch_size,
+                                    preprocess_workers,
+                                    args.max_detections_per_class,
+                                    preprocess_executor, runtime_stats,
+                                ),
+                            )
+                            for chunk_start, chunk, frames
+                            in _prefetched_frame_chunks(
+                                reader, rows, camera, frame_batch_size
+                            )
                         )
                     else:
-                        hands_by_frame = [
-                            infer_dual(
-                                frame, detector, model, model_cfg, device,
-                                camera_confidences[camera], args.iou,
-                                args.rescale_factor, args.batch_size,
+                        result_batches = (
+                            (
+                                chunk_start,
+                                chunk,
+                                [
+                                    infer_dual(
+                                        frame, detector, model, model_cfg,
+                                        device, camera_confidences[camera],
+                                        args.iou, args.rescale_factor,
+                                        args.batch_size,
+                                    )
+                                    for frame in frames
+                                ],
                             )
-                            for frame in frames
-                        ]
-                    for offset, (row, hands) in enumerate(zip(chunk, hands_by_frame)):
-                        ordinal = chunk_start + offset
-                        frame_index = int(row[f"{camera}_frame_index"])
-                        detection_ids = {
-                            int(hand["detection_index"]) for hand in hands
-                        }
-                        physical_boxes += len(detection_ids)
-                        detected_frames += bool(detection_ids)
-                        record = {
-                            "sync_index": int(row["sync_index"]),
-                            "source_frame_index": frame_index,
-                            "timestamp_ns": int(row[f"{camera}_timestamp_ns"]),
-                            "hands": hands,
-                        }
-                        stream.write(
-                            json.dumps(record, separators=(",", ":")) + "\n"
+                            for chunk_start, chunk, frames
+                            in _prefetched_frame_chunks(
+                                reader, rows, camera, frame_batch_size
+                            )
                         )
-                        if not accelerated:
-                            gc.collect()
-                            if device.type == "cuda":
-                                torch = __import__("torch")
-                                torch.cuda.empty_cache()
-                        if (ordinal + 1) % 10 == 0:
-                            elapsed = time.perf_counter() - camera_started
-                            print(
-                                f"{camera}: {ordinal + 1}/{len(rows)} | "
-                                f"{(ordinal + 1) / elapsed:.2f} frames/s",
-                                flush=True,
+                    for chunk_start, chunk, hands_by_frame in result_batches:
+                        for offset, (row, hands) in enumerate(
+                            zip(chunk, hands_by_frame)
+                        ):
+                            ordinal = chunk_start + offset
+                            frame_index = int(row[f"{camera}_frame_index"])
+                            detection_ids = {
+                                int(hand["detection_index"]) for hand in hands
+                            }
+                            physical_boxes += len(detection_ids)
+                            detected_frames += bool(detection_ids)
+                            record = {
+                                "sync_index": int(row["sync_index"]),
+                                "source_frame_index": frame_index,
+                                "timestamp_ns": int(
+                                    row[f"{camera}_timestamp_ns"]
+                                ),
+                                "hands": hands,
+                            }
+                            stream.write(
+                                json.dumps(record, separators=(",", ":"))
+                                + "\n"
                             )
-                    del hands_by_frame, frames
-        finally:
-            reader.close()
-        if accelerated:
-            gc.collect()
-            torch = __import__("torch")
-            torch.cuda.empty_cache()
-        camera_seconds = time.perf_counter() - camera_started
-        camera_summaries[camera] = {
-            "frame_count": len(rows), "detected_frame_count": detected_frames,
-            "physical_box_count": physical_boxes,
-            "detector_confidence": camera_confidences[camera],
-            "inference_seconds": camera_seconds,
-            "camera_frames_per_second": len(rows) / camera_seconds,
-        }
-        (camera_root / "summary.json").write_text(
-            json.dumps(camera_summaries[camera], indent=2) + "\n", encoding="utf-8"
-        )
+                            if not accelerated:
+                                gc.collect()
+                                if device.type == "cuda":
+                                    torch = __import__("torch")
+                                    torch.cuda.empty_cache()
+                            if (ordinal + 1) % 10 == 0:
+                                elapsed = time.perf_counter() - camera_started
+                                print(
+                                    f"{camera}: {ordinal + 1}/{len(rows)} | "
+                                    f"{(ordinal + 1) / elapsed:.2f} frames/s",
+                                    flush=True,
+                                )
+                        del hands_by_frame
+            finally:
+                reader.close()
+            if accelerated:
+                gc.collect()
+                torch = __import__("torch")
+                torch.cuda.empty_cache()
+            camera_seconds = time.perf_counter() - camera_started
+            camera_summaries[camera] = {
+                "frame_count": len(rows),
+                "detected_frame_count": detected_frames,
+                "physical_box_count": physical_boxes,
+                "detector_confidence": camera_confidences[camera],
+                "inference_seconds": camera_seconds,
+                "camera_frames_per_second": len(rows) / camera_seconds,
+            }
+            (camera_root / "summary.json").write_text(
+                json.dumps(camera_summaries[camera], indent=2) + "\n",
+                encoding="utf-8",
+            )
     inference_seconds = time.perf_counter() - inference_started
     processed_camera_frames = len(rows) * len(cameras)
     summary = {
@@ -487,6 +623,11 @@ def main() -> int:
         "gpu_profile": args.gpu_profile,
         "frame_batch_size": frame_batch_size,
         "hypothesis_batch_size": args.batch_size,
+        "effective_hypothesis_batch_size": runtime_stats[
+            "effective_hypothesis_batch_size"
+        ],
+        "cuda_oom_retries": runtime_stats["cuda_oom_retries"],
+        "prefetched_video_decode": accelerated,
         "preprocess_workers": preprocess_workers,
         "max_detections_per_class": args.max_detections_per_class,
         "compiled_backbone": bool(args.compile_backbone),

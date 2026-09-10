@@ -55,9 +55,14 @@ class FusionAnatomyConfig:
     temporal_global_min_rejected_joints: int = 6
     temporal_local_residual: float = 0.90
     temporal_local_min_joints: int = 2
-    temporal_blend: float = 0.85
-    temporal_max_global_adjustment_m: float = 0.80
-    temporal_max_local_adjustment_m: float = 0.12
+    # Conservative defaults are shared by direct library callers and the CLI.
+    # Large temporal moves are a common source of implausible 3D jumps.
+    temporal_blend: float = 0.50
+    temporal_max_global_adjustment_m: float = 0.10
+    temporal_max_local_adjustment_m: float = 0.05
+    temporal_spike_joint_step_m: float = 0.12
+    temporal_spike_palm_step_m: float = 0.20
+    temporal_spike_max_spread_m: float = 0.08
     correction_threshold_m: float = 0.002
 
     def validate(self) -> None:
@@ -86,6 +91,9 @@ class FusionAnatomyConfig:
             self.temporal_local_residual,
             self.temporal_max_global_adjustment_m,
             self.temporal_max_local_adjustment_m,
+            self.temporal_spike_joint_step_m,
+            self.temporal_spike_palm_step_m,
+            self.temporal_spike_max_spread_m,
             self.correction_threshold_m,
         ) <= 0.0:
             raise ValueError("anatomy thresholds must be positive")
@@ -440,6 +448,267 @@ def _apply_robust_temporal_refinement(
     return output, global_corrected, local_corrected, global_residual, local_residual
 
 
+def _repair_gross_points_temporally(
+    points: np.ndarray,
+    observed: np.ndarray,
+    max_hand_radius_m: float,
+    radius: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Repair finite but physically impossible points after all other passes.
+
+    Reprojection is intentionally not the only safety check: a ray
+    intersection can be many metres away and therefore fail projection in all
+    cameras.  Use a rigidly aligned median of at least two frames on each side
+    to fill such a point.  If no trustworthy temporal support exists, leave it
+    missing rather than exporting a visibly wrong skeleton.
+    """
+    output = points.copy()
+    repaired = np.zeros(observed.shape, dtype=bool)
+    unresolved = np.zeros(observed.shape, dtype=bool)
+    if radius <= 0:
+        unresolved = observed & np.stack([
+            _gross_joint_mask(output[side, frame], max_hand_radius_m)
+            for side in range(output.shape[0])
+            for frame in range(output.shape[1])
+        ]).reshape(output.shape[:3])
+        output[unresolved] = np.nan
+        return output, repaired, unresolved
+
+    for _iteration in range(2):
+        changed = False
+        for side in range(output.shape[0]):
+            for frame in range(output.shape[1]):
+                palm = PALM_FRAME_JOINTS[
+                    observed[side, frame, PALM_FRAME_JOINTS]
+                    & np.isfinite(output[side, frame, PALM_FRAME_JOINTS]).all(axis=1)
+                ]
+                if len(palm) < 3:
+                    continue
+                centre = np.median(output[side, frame, palm], axis=0)
+                gross = _gross_joint_mask(output[side, frame], max_hand_radius_m)
+                for joint in np.flatnonzero(gross & observed[side, frame]):
+                    estimates = []
+                    lo = max(0, frame - radius)
+                    hi = min(output.shape[1], frame + radius + 1)
+                    for neighbor in range(lo, hi):
+                        if neighbor == frame:
+                            continue
+                        neighbor_palm = PALM_FRAME_JOINTS[
+                            observed[side, neighbor, PALM_FRAME_JOINTS]
+                            & np.isfinite(output[side, neighbor, PALM_FRAME_JOINTS]).all(axis=1)
+                        ]
+                        if len(neighbor_palm) < 3:
+                            continue
+                        if not (
+                            observed[side, neighbor, joint]
+                            and np.isfinite(output[side, neighbor, joint]).all()
+                        ):
+                            continue
+                        if _gross_joint_mask(
+                            output[side, neighbor], max_hand_radius_m
+                        )[joint]:
+                            continue
+                        common = np.intersect1d(palm, neighbor_palm)
+                        if len(common) < 3:
+                            continue
+                        rotation, translation = _weighted_rigid_alignment(
+                            output[side, neighbor, common],
+                            output[side, frame, common],
+                            np.ones(len(common), dtype=np.float64),
+                        )
+                        estimate = (
+                            rotation @ output[side, neighbor, joint]
+                            + translation
+                        )
+                        if (
+                            np.isfinite(estimate).all()
+                            and np.linalg.norm(estimate - centre)
+                            <= 2.0 * max_hand_radius_m
+                            and np.linalg.norm(estimate) <= 2.0
+                        ):
+                            estimates.append(estimate)
+                    if len(estimates) < 2:
+                        unresolved[side, frame, joint] = True
+                        continue
+                    output[side, frame, joint] = np.median(
+                        np.asarray(estimates, dtype=np.float64), axis=0
+                    )
+                    repaired[side, frame, joint] = True
+                    unresolved[side, frame, joint] = False
+                    changed = True
+        if not changed:
+            break
+
+    remaining = np.zeros_like(unresolved)
+    for side in range(output.shape[0]):
+        for frame in range(output.shape[1]):
+            remaining[side, frame] = _gross_joint_mask(
+                output[side, frame], max_hand_radius_m
+            )
+    unresolved |= observed & remaining
+    output[unresolved] = np.nan
+    return output, repaired, unresolved
+
+
+def _repair_temporal_spikes(
+    points: np.ndarray,
+    observed: np.ndarray,
+    radius: int,
+    joint_step_m: float,
+    palm_step_m: float,
+    max_spread_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace isolated 3D joint spikes using bidirectional aligned support."""
+    output = points.copy()
+    repaired = np.zeros(observed.shape, dtype=bool)
+    if radius <= 0:
+        return output, repaired
+
+    for _iteration in range(2):
+        changed = False
+        for side in range(output.shape[0]):
+            for frame in range(output.shape[1]):
+                current_palm = PALM_FRAME_JOINTS[
+                    observed[side, frame, PALM_FRAME_JOINTS]
+                    & np.isfinite(output[side, frame, PALM_FRAME_JOINTS]).all(axis=1)
+                ]
+                if len(current_palm) < 3:
+                    continue
+                before = [
+                    index for index in range(max(0, frame - radius), frame)
+                    if np.all(observed[side, index, PALM_FRAME_JOINTS])
+                    and np.isfinite(output[side, index, PALM_FRAME_JOINTS]).all()
+                ]
+                after = [
+                    index for index in range(frame + 1, min(output.shape[1], frame + radius + 1))
+                    if np.all(observed[side, index, PALM_FRAME_JOINTS])
+                    and np.isfinite(output[side, index, PALM_FRAME_JOINTS]).all()
+                ]
+                if len(before) < 2 or len(after) < 2:
+                    continue
+                current_palm_points = output[side, frame, current_palm]
+                for joint in np.flatnonzero(
+                    observed[side, frame]
+                    & np.isfinite(output[side, frame]).all(axis=1)
+                ):
+                    estimates = []
+                    for neighbor in before + after:
+                        if not (
+                            observed[side, neighbor, joint]
+                            and np.isfinite(output[side, neighbor, joint]).all()
+                        ):
+                            continue
+                        neighbor_palm = PALM_FRAME_JOINTS[
+                            observed[side, neighbor, PALM_FRAME_JOINTS]
+                            & np.isfinite(output[side, neighbor, PALM_FRAME_JOINTS]).all(axis=1)
+                        ]
+                        common = np.intersect1d(current_palm, neighbor_palm)
+                        if len(common) < 3:
+                            continue
+                        rotation, translation = _weighted_rigid_alignment(
+                            output[side, neighbor, common],
+                            output[side, frame, common],
+                            np.ones(len(common), dtype=np.float64),
+                        )
+                        estimates.append(
+                            rotation @ output[side, neighbor, joint] + translation
+                        )
+                    if len(estimates) < 4:
+                        continue
+                    estimates_array = np.asarray(estimates, dtype=np.float64)
+                    prediction = np.median(estimates_array, axis=0)
+                    spread = float(np.median(
+                        np.linalg.norm(estimates_array - prediction, axis=1)
+                    ))
+                    if spread > max_spread_m:
+                        continue
+                    residual = float(np.linalg.norm(
+                        output[side, frame, joint] - prediction
+                    ))
+                    limit = (
+                        palm_step_m if joint in PALM_FRAME_JOINTS
+                        else joint_step_m
+                    )
+                    if residual <= limit:
+                        continue
+                    output[side, frame, joint] = prediction
+                    repaired[side, frame, joint] = True
+                    changed = True
+        if not changed:
+            break
+    return output, repaired
+
+
+def _repair_short_temporal_gaps(
+    points: np.ndarray,
+    observed: np.ndarray,
+    radius: int,
+    joint_step_m: float,
+    palm_step_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fill one- or two-frame excursions between two consistent poses."""
+    output = points.copy()
+    repaired = np.zeros(observed.shape, dtype=bool)
+    filled = np.zeros(observed.shape, dtype=bool)
+    if radius < 2:
+        return output, repaired, filled
+
+    for side in range(output.shape[0]):
+        frame_present = np.any(observed[side], axis=1)
+        for joint in range(output.shape[2]):
+            finite = observed[side, :, joint] & np.isfinite(
+                output[side, :, joint]
+            ).all(axis=1)
+            valid_indices = np.flatnonzero(finite)
+            for left_position, left in enumerate(valid_indices):
+                right_candidates = valid_indices[left_position + 1:]
+                right_candidates = right_candidates[
+                    (right_candidates - left >= 2)
+                    & (right_candidates - left <= radius)
+                ]
+                if not len(right_candidates):
+                    continue
+                right = int(right_candidates[0])
+                gap = right - int(left)
+                endpoint_step = float(
+                    np.linalg.norm(
+                        output[side, right, joint]
+                        - output[side, left, joint]
+                    ) / gap
+                )
+                limit = (
+                    palm_step_m if joint in PALM_FRAME_JOINTS
+                    else joint_step_m
+                )
+                # A short run can be repaired only when the endpoints are
+                # themselves a plausible motion.  This protects real fast
+                # gestures while catching the large 3757–3758-style excursions.
+                if endpoint_step > 1.25 * limit:
+                    continue
+                for frame in range(int(left) + 1, right):
+                    if not frame_present[frame]:
+                        continue
+                    alpha = (frame - left) / gap
+                    prediction = (
+                        (1.0 - alpha) * output[side, left, joint]
+                        + alpha * output[side, right, joint]
+                    )
+                    current_valid = finite[frame]
+                    residual = (
+                        float(np.linalg.norm(
+                            output[side, frame, joint] - prediction
+                        ))
+                        if current_valid else float("inf")
+                    )
+                    if residual <= 1.5 * limit:
+                        continue
+                    output[side, frame, joint] = prediction
+                    repaired[side, frame, joint] = current_valid
+                    filled[side, frame, joint] = not current_valid
+                    finite[frame] = True
+    return output, repaired, filled
+
+
 def _palm_step_metric(points: np.ndarray, valid: np.ndarray) -> dict[str, Any]:
     centers = np.full(points.shape[:2] + (3,), np.nan, dtype=np.float64)
     frame_valid = np.all(valid[:, :, PALM_FRAME_JOINTS], axis=2)
@@ -465,12 +734,69 @@ def _palm_step_metric(points: np.ndarray, valid: np.ndarray) -> dict[str, Any]:
     }
 
 
-def _project_base_point(camera: Any, point_base: np.ndarray) -> np.ndarray | None:
+def _finite_displacement_metric(
+    stabilized: np.ndarray, raw: np.ndarray, accepted: np.ndarray,
+) -> dict[str, float | None]:
+    """Return JSON-safe displacement statistics for a possibly empty mask."""
+    values = np.linalg.norm(
+        np.asarray(stabilized[accepted], dtype=np.float64)
+        - np.asarray(raw[accepted], dtype=np.float64),
+        axis=1,
+    ) * 1000.0
+    values = values[np.isfinite(values)]
+    return {
+        "median_mm": float(np.median(values)) if len(values) else None,
+        "p95_mm": float(np.percentile(values, 95)) if len(values) else None,
+        "max_mm": float(np.max(values)) if len(values) else None,
+    }
+
+
+def _project_base_points(
+    camera: Any, points_base: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project a batch of base-frame points with one camera-model call."""
+    points_base = np.asarray(points_base, dtype=np.float64)
+    pixels = np.full((len(points_base), 2), np.nan, dtype=np.float64)
+    valid = np.zeros(len(points_base), dtype=bool)
+    finite = np.isfinite(points_base).all(axis=1)
+    if not np.any(finite):
+        return pixels, valid
     rotation = camera.T_base_camera[:3, :3]
     center = camera.T_base_camera[:3, 3]
-    point_camera = rotation.T @ (point_base - center)
-    pixels, valid = project_points(camera, point_camera[None])
-    return pixels[0] if bool(valid[0]) else None
+    points_camera = (points_base[finite] - center) @ rotation
+    projected, projected_valid = project_points(camera, points_camera)
+    pixels[finite] = projected
+    valid[finite] = (
+        np.asarray(projected_valid, dtype=bool)
+        & np.isfinite(projected).all(axis=1)
+    )
+    return pixels, valid
+
+
+def _gross_joint_mask(points: np.ndarray, max_hand_radius_m: float) -> np.ndarray:
+    """Find physically impossible joints before projecting them.
+
+    A triangulation from nearly parallel or mismatched rays can produce a
+    finite point tens of metres away.  Such a point often has no valid image
+    projection, so a reprojection-only guard cannot repair it.  Use the robust
+    palm centre as a camera-independent sanity check first.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    gross = np.zeros(len(points), dtype=bool)
+    finite = np.isfinite(points).all(axis=1)
+    if not np.any(finite):
+        return gross
+    palm = PALM_FRAME_JOINTS[
+        finite[PALM_FRAME_JOINTS]
+    ]
+    if len(palm) >= 3:
+        centre = np.median(points[palm], axis=0)
+        distances = np.linalg.norm(points - centre, axis=1)
+        gross |= finite & (distances > 2.0 * max_hand_radius_m)
+    # Base-frame hand positions in this dataset are sub-metre.  This second
+    # check also catches a corrupted palm where the relative test is masked.
+    gross |= finite & (np.linalg.norm(points, axis=1) > 2.0)
+    return gross
 
 
 def _apply_reprojection_guard(
@@ -487,11 +813,6 @@ def _apply_reprojection_guard(
     limited_count = 0
     reverted_count = 0
     for (frame, side), hand in hands.items():
-        if (
-            trusted_temporal_hands is not None
-            and trusted_temporal_hands[side, frame]
-        ):
-            continue
         views = [
             (calibrations[camera_id], np.asarray(view["joints_2d"], dtype=np.float64))
             for camera_id, view in hand.get("views", {}).items()
@@ -501,64 +822,126 @@ def _apply_reprojection_guard(
         ]
         if not views:
             continue
-        for joint in range(21):
-            start = raw[side, frame, joint]
-            target = refined[side, frame, joint]
-            if not (np.all(np.isfinite(start)) and np.all(np.isfinite(target))):
-                continue
-            delta = target - start
-            if float(np.linalg.norm(delta)) <= config.correction_threshold_m:
-                continue
-            evidence = []
-            for camera, observations in views:
-                observation = observations[joint]
-                raw_pixel = _project_base_point(camera, start)
-                if raw_pixel is None or not np.all(np.isfinite(observation)):
+        start = raw[side, frame]
+        target = refined[side, frame]
+        delta = target - start
+        correction = (
+            np.isfinite(start).all(axis=1)
+            & np.isfinite(target).all(axis=1)
+            & (
+                np.linalg.norm(
+                    np.where(np.isfinite(delta), delta, 0.0), axis=1
+                ) > config.correction_threshold_m
+            )
+        )
+        if not np.any(correction):
+            continue
+
+        # Repair gross 3D ray-intersection failures before applying the pixel
+        # guard.  A point tens of metres away has no usable projection, so the
+        # old evidence-count rule would incorrectly revert a valid temporal
+        # replacement back to the impossible raw point.
+        gross_raw = _gross_joint_mask(start, config.max_hand_radius_m)
+        gross_target = _gross_joint_mask(target, config.max_hand_radius_m)
+        gross_repair = correction & gross_raw & ~gross_target
+        if np.any(gross_repair):
+            output[side, frame, gross_repair] = target[gross_repair]
+            correction[gross_repair] = False
+
+        view_count = len(views)
+        raw_pixels = np.full((view_count, 21, 2), np.nan, dtype=np.float64)
+        raw_valid = np.zeros((view_count, 21), dtype=bool)
+        observations = np.stack([view[1] for view in views])
+        observation_valid = np.isfinite(observations).all(axis=2)
+        for view_index, (camera, _observations) in enumerate(views):
+            raw_pixels[view_index], raw_valid[view_index] = (
+                _project_base_points(camera, start)
+            )
+        evidence = raw_valid & observation_valid
+        evidence_count = np.count_nonzero(evidence, axis=0)
+        insufficient = correction & (evidence_count < 2)
+        if np.any(insufficient):
+            output[side, frame, insufficient] = start[insufficient]
+            count = int(np.count_nonzero(insufficient))
+            limited_count += count
+            reverted_count += count
+
+        guarded = correction & (evidence_count >= 2)
+        if not np.any(guarded):
+            continue
+        guarded_indices = np.flatnonzero(guarded)
+        raw_residuals = np.linalg.norm(raw_pixels - observations, axis=2)
+        raw_residuals[~evidence] = np.nan
+        raw_residual_median = np.full(21, np.nan, dtype=np.float64)
+        raw_residual_median[guarded_indices] = np.nanmedian(
+            raw_residuals[:, guarded_indices], axis=0
+        )
+
+        def allowed(
+            joint_indices: np.ndarray, alphas: np.ndarray,
+        ) -> np.ndarray:
+            points = (
+                start[joint_indices]
+                + alphas[:, None] * delta[joint_indices]
+            )
+            shifts = np.full(
+                (view_count, len(joint_indices)), np.nan, dtype=np.float64
+            )
+            residuals = np.full_like(shifts, np.nan)
+            complete = np.ones(len(joint_indices), dtype=bool)
+            for view_index, (camera, _observations) in enumerate(views):
+                active = evidence[view_index, joint_indices]
+                if not np.any(active):
                     continue
-                evidence.append((camera, observation, raw_pixel))
-            if len(evidence) < 2:
-                output[side, frame, joint] = start
-                limited_count += 1
-                reverted_count += 1
-                continue
-            raw_residual = float(np.median([
-                np.linalg.norm(raw_pixel - observation)
-                for _camera, observation, raw_pixel in evidence
-            ]))
-
-            def allowed(alpha: float) -> bool:
-                point = start + alpha * delta
-                shifts = []
-                residuals = []
-                for camera, observation, raw_pixel in evidence:
-                    pixel = _project_base_point(camera, point)
-                    if pixel is None:
-                        return False
-                    shifts.append(float(np.linalg.norm(pixel - raw_pixel)))
-                    residuals.append(float(np.linalg.norm(pixel - observation)))
-                residual_median = float(np.median(residuals))
-                strongly_supported = (
+                pixels, valid = _project_base_points(camera, points)
+                complete &= ~active | valid
+                shifts[view_index, active] = np.linalg.norm(
+                    pixels[active] - raw_pixels[view_index, joint_indices[active]],
+                    axis=1,
+                )
+                residuals[view_index, active] = np.linalg.norm(
+                    pixels[active] - observations[view_index, joint_indices[active]],
+                    axis=1,
+                )
+            shift_max = np.nanmax(shifts, axis=0)
+            residual_median = np.nanmedian(residuals, axis=0)
+            strongly_supported = (
+                residual_median
+                <= config.large_reprojection_improvement_ratio
+                * raw_residual_median[joint_indices]
+            )
+            return (
+                complete
+                & (
+                    (shift_max <= config.max_reprojection_shift_px)
+                    | strongly_supported
+                )
+                & (
                     residual_median
-                    <= config.large_reprojection_improvement_ratio * raw_residual
+                    <= raw_residual_median[joint_indices]
+                    + config.max_reprojection_regression_px
                 )
-                return (
-                    (max(shifts) <= config.max_reprojection_shift_px or strongly_supported)
-                    and residual_median
-                    <= raw_residual + config.max_reprojection_regression_px
-                )
+            )
 
-            if allowed(1.0):
-                continue
-            low, high = 0.0, 1.0
-            for _ in range(10):
-                middle = 0.5 * (low + high)
-                if allowed(middle):
-                    low = middle
-                else:
-                    high = middle
-            output[side, frame, joint] = start + low * delta
-            limited_count += 1
-            reverted_count += int(low < 0.05)
+        target_allowed = allowed(
+            guarded_indices, np.ones(len(guarded_indices), dtype=np.float64)
+        )
+        limited_indices = guarded_indices[~target_allowed]
+        if not len(limited_indices):
+            continue
+        low = np.zeros(len(limited_indices), dtype=np.float64)
+        high = np.ones(len(limited_indices), dtype=np.float64)
+        for _ in range(10):
+            middle = 0.5 * (low + high)
+            middle_allowed = allowed(limited_indices, middle)
+            low[middle_allowed] = middle[middle_allowed]
+            high[~middle_allowed] = middle[~middle_allowed]
+        output[side, frame, limited_indices] = (
+            start[limited_indices]
+            + low[:, None] * delta[limited_indices]
+        )
+        limited_count += len(limited_indices)
+        reverted_count += int(np.count_nonzero(low < 0.05))
 
     residual_before = []
     residual_after = []
@@ -573,26 +956,26 @@ def _apply_reprojection_guard(
             observations = np.asarray(view.get("joints_2d", []), dtype=np.float64)
             if observations.shape != (21, 2):
                 continue
-            for joint in range(21):
-                before = _project_base_point(
-                    calibrations[camera_id], raw[side, frame, joint]
-                )
-                after = _project_base_point(
-                    calibrations[camera_id], output[side, frame, joint]
-                )
-                if (
-                    before is None
-                    or after is None
-                    or not np.all(np.isfinite(observations[joint]))
-                ):
-                    continue
-                residual_before.append(float(np.linalg.norm(
-                    before - observations[joint]
-                )))
-                residual_after.append(float(np.linalg.norm(
-                    after - observations[joint]
-                )))
-                projected_shift.append(float(np.linalg.norm(after - before)))
+            before, before_valid = _project_base_points(
+                calibrations[camera_id], raw[side, frame]
+            )
+            after, after_valid = _project_base_points(
+                calibrations[camera_id], output[side, frame]
+            )
+            valid = (
+                before_valid
+                & after_valid
+                & np.isfinite(observations).all(axis=1)
+            )
+            residual_before.extend(np.linalg.norm(
+                before[valid] - observations[valid], axis=1
+            ).tolist())
+            residual_after.extend(np.linalg.norm(
+                after[valid] - observations[valid], axis=1
+            ).tolist())
+            projected_shift.extend(np.linalg.norm(
+                after[valid] - before[valid], axis=1
+            ).tolist())
 
     def summarize(values: list[float]) -> dict[str, float | int | None]:
         array = np.asarray(values, dtype=np.float64)
@@ -628,6 +1011,7 @@ def refine_accepted_rows(
             "corrected_hand_count": 0,
         }
     raw, observed, confidence, hands = _arrays_from_rows(rows, camera_count)
+    input_observed = observed.copy()
     ranges = active_ranges(observed)
     accepted, rejected = reject_observation_outliers(
         raw,
@@ -759,30 +1143,53 @@ def refine_accepted_rows(
         hands,
         calibrations,
         config,
-        trusted_temporal_hands=(
-            temporal_global_corrected
-            & (temporal_global_residual > config.temporal_palm_strong_residual_m)
-            & (
-                np.count_nonzero(rejected, axis=2)
-                >= config.temporal_global_min_rejected_joints
-            )
-        ),
+        # Even strong bidirectional temporal evidence must pass the same
+        # multi-view reprojection guard.  Previously this argument bypassed
+        # the guard and allowed an erroneous hand to move by 0.8 m.
+        trusted_temporal_hands=None,
     )
-    trusted_temporal_hands = (
-        temporal_global_corrected
-        & (temporal_global_residual > config.temporal_palm_strong_residual_m)
-        & (
-            np.count_nonzero(rejected, axis=2)
-            >= config.temporal_global_min_rejected_joints
-        )
+    trusted_temporal_hands = np.zeros_like(temporal_global_corrected)
+
+    refined, gross_repaired, gross_unresolved = _repair_gross_points_temporally(
+        refined,
+        observed,
+        config.max_hand_radius_m,
+        max(config.outlier_window, config.max_gap),
     )
+    refined, temporal_spike_repaired = _repair_temporal_spikes(
+        refined,
+        observed,
+        max(config.outlier_window, config.max_gap),
+        config.temporal_spike_joint_step_m,
+        config.temporal_spike_palm_step_m,
+        config.temporal_spike_max_spread_m,
+    )
+    refined, gap_repaired, gap_filled = _repair_short_temporal_gaps(
+        refined,
+        observed,
+        max(config.outlier_window, config.max_gap),
+        config.temporal_spike_joint_step_m,
+        config.temporal_spike_palm_step_m,
+    )
+    observed |= gap_filled
+    # A gross point without bidirectional support is intentionally represented
+    # as missing.  Keep all downstream metrics and temporal passes finite.
+    observed &= np.isfinite(refined).all(axis=-1)
+    refined[~observed] = np.nan
 
     displacements = np.linalg.norm(refined - raw, axis=-1)
     corrected = observed & (displacements > config.correction_threshold_m)
-    repaired_outliers = reconstructable_outliers & corrected
+    repaired_outliers = (
+        reconstructable_outliers
+        | gross_repaired
+        | temporal_spike_repaired
+        | gap_repaired
+        | gap_filled
+    ) & corrected
     corrected_hands = 0
     for (frame, side), hand in hands.items():
         values = displacements[side, frame, observed[side, frame]]
+        values = values[np.isfinite(values)]
         frame_corrected = corrected[side, frame]
         corrected_count = int(np.count_nonzero(frame_corrected))
         corrected_hands += int(corrected_count > 0)
@@ -821,6 +1228,11 @@ def refine_accepted_rows(
             ),
             "temporal_local_corrected_joint_count": int(
                 np.count_nonzero(temporal_local_corrected[side, frame])
+            ),
+            "temporal_spike_repaired_joint_count": int(
+                np.count_nonzero(
+                    (temporal_spike_repaired | gap_repaired | gap_filled)[side, frame]
+                )
             ),
             "temporal_local_residual": (
                 float(temporal_local_residual[side, frame])
@@ -862,6 +1274,12 @@ def refine_accepted_rows(
         "temporal_global_reprojection_override_hand_count": int(
             np.count_nonzero(trusted_temporal_hands)
         ),
+        "gross_repaired_joint_count": int(np.count_nonzero(gross_repaired)),
+        "gross_unresolved_joint_count": int(np.count_nonzero(gross_unresolved)),
+        "temporal_spike_repaired_joint_count": int(
+            np.count_nonzero(temporal_spike_repaired | gap_repaired | gap_filled)
+        ),
+        "temporal_gap_filled_joint_count": int(np.count_nonzero(gap_filled)),
         "temporal_local_corrected_joint_count": int(
             np.count_nonzero(temporal_local_corrected)
         ),
@@ -872,27 +1290,44 @@ def refine_accepted_rows(
         "corrected_joint_count": int(np.count_nonzero(corrected)),
         "corrected_hand_count": corrected_hands,
         "bone_lengths_mm": (bone_lengths * 1000.0).tolist(),
-        "bone_error_before": bone_error_metric(raw, observed, bone_lengths),
+        "bone_error_before": bone_error_metric(
+            raw,
+            input_observed & np.isfinite(raw).all(axis=-1),
+            bone_lengths,
+        ),
         "bone_error_after": bone_error_metric(refined, observed, bone_lengths),
-        "acceleration_median_before_mm": acceleration_metric(raw, observed),
+        "acceleration_median_before_mm": acceleration_metric(
+            raw, input_observed & np.isfinite(raw).all(axis=-1)
+        ),
         "acceleration_median_after_mm": acceleration_metric(refined, observed),
         "palm_normalized_step_before": palm_normalized_3d_step_metric(
-            raw, observed
+            raw, input_observed & np.isfinite(raw).all(axis=-1)
         ),
         "palm_normalized_step_after": palm_normalized_3d_step_metric(
             refined, observed
         ),
         "palm_normalized_step_before_temporal": palm_normalized_3d_step_metric(
-            before_temporal, observed
+            before_temporal, input_observed & np.isfinite(before_temporal).all(axis=-1)
         ),
-        "palm_step_before": _palm_step_metric(raw, observed),
-        "palm_step_before_temporal": _palm_step_metric(before_temporal, observed),
+        "palm_step_before": _palm_step_metric(
+            raw, input_observed & np.isfinite(raw).all(axis=-1)
+        ),
+        "palm_step_before_temporal": _palm_step_metric(
+            before_temporal,
+            input_observed & np.isfinite(before_temporal).all(axis=-1),
+        ),
         "palm_step_after": _palm_step_metric(refined, observed),
-        "displacement": displacement_metric(refined, raw, observed),
-        "reliable_adjustment_displacement": displacement_metric(
+        "displacement": _finite_displacement_metric(
+            refined,
+            raw,
+            input_observed
+            & np.isfinite(raw).all(axis=-1)
+            & np.isfinite(refined).all(axis=-1),
+        ),
+        "reliable_adjustment_displacement": _finite_displacement_metric(
             refined, raw, reliable
         ),
-        "repaired_outlier_displacement": displacement_metric(
+        "repaired_outlier_displacement": _finite_displacement_metric(
             refined, raw, repaired_outliers
         ),
     }

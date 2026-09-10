@@ -12,6 +12,7 @@ PATTERN="*.mcap"
 RECURSIVE=0
 CONTINUE_ON_ERROR=1
 DRY_RUN=0
+PIPELINE=""
 CONDA_ENV=""
 DEVICE=""
 GPU_PROFILE=""
@@ -40,6 +41,22 @@ MARKER_MAX_SHIFT_PX=""
 MARKER_MAX_APPLIED_SHIFT_PX=""
 MARKER_BLEND=""
 MARKER_MAX_LOCAL_ADJUSTMENT_PX=""
+SAM3_GLOVE_ASSIST=""
+SAM3_CONDA_ENV=""
+SAM3_TOOL_ROOT=""
+SAM3_MODEL=""
+SAM3_PROMPT=""
+SAM3_DEVICE=""
+SAM3_CONF=""
+SAM3_MIN_SCORE=""
+SAM3_MIN_BOX_IOU=""
+SAM3_MIN_JOINT_SUPPORT=""
+SAM3_HARD_JOINT_SUPPORT=""
+SAM3_TEXT_ONLY=""
+SAM3_REFINE_2D=""
+SAM3_MAX_2D_CORRECTION_PX=""
+SAM3_2D_CORRECTION_BLEND=""
+SAM3_MAX_2D_BONE_CHANGE_RATIO=""
 CAMERAS=()
 
 usage() {
@@ -57,6 +74,7 @@ Options:
   --recursive                     Search input-dir recursively
   --continue-on-error 0|1         Continue after a failed MCAP (default 1)
   --dry-run                       Print commands without running them
+  --pipeline 0|1                 Overlap next GPU inference with prior CPU postprocess
   --conda-env NAME                Forward to single-recording script
   --device cuda|cpu|auto          Forward to single-recording script
   --gpu-profile compatible|rtx5090d
@@ -85,6 +103,22 @@ Options:
   --marker-max-applied-shift-px PX
   --marker-blend VALUE            Conservative local marker pull (default 0.15)
   --marker-max-local-adjustment-px PX
+  --sam3-glove-assist 0|1         Refine 2D joints with SAM3 and gate fusion views
+  --sam3-conda-env NAME           SAM3 environment (default annotator)
+  --sam3-tool-root DIR
+  --sam3-model FILE
+  --sam3-prompt TEXT
+  --sam3-device cuda|cpu
+  --sam3-conf VALUE
+  --sam3-min-score VALUE
+  --sam3-min-box-iou VALUE
+  --sam3-min-joint-support VALUE
+  --sam3-hard-joint-support VALUE
+  --sam3-text-only 0|1
+  --sam3-refine-2d 0|1
+  --sam3-max-2d-correction-px PX
+  --sam3-2d-correction-blend VALUE
+  --sam3-max-2d-bone-change-ratio VALUE
   --detector-handedness strict|ignore|adaptive
   --no-video
 EOF
@@ -98,6 +132,7 @@ while (($#)); do
     --recursive) RECURSIVE=1; shift ;;
     --continue-on-error) CONTINUE_ON_ERROR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --pipeline) PIPELINE="$2"; shift 2 ;;
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
     --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
@@ -129,6 +164,22 @@ while (($#)); do
     --marker-max-applied-shift-px) MARKER_MAX_APPLIED_SHIFT_PX="$2"; shift 2 ;;
     --marker-blend) MARKER_BLEND="$2"; shift 2 ;;
     --marker-max-local-adjustment-px) MARKER_MAX_LOCAL_ADJUSTMENT_PX="$2"; shift 2 ;;
+    --sam3-glove-assist|--sam3-assist) SAM3_GLOVE_ASSIST="$2"; shift 2 ;;
+    --sam3-conda-env) SAM3_CONDA_ENV="$2"; shift 2 ;;
+    --sam3-tool-root) SAM3_TOOL_ROOT="$2"; shift 2 ;;
+    --sam3-model) SAM3_MODEL="$2"; shift 2 ;;
+    --sam3-prompt) SAM3_PROMPT="$2"; shift 2 ;;
+    --sam3-device) SAM3_DEVICE="$2"; shift 2 ;;
+    --sam3-conf) SAM3_CONF="$2"; shift 2 ;;
+    --sam3-min-score) SAM3_MIN_SCORE="$2"; shift 2 ;;
+    --sam3-min-box-iou) SAM3_MIN_BOX_IOU="$2"; shift 2 ;;
+    --sam3-min-joint-support) SAM3_MIN_JOINT_SUPPORT="$2"; shift 2 ;;
+    --sam3-hard-joint-support) SAM3_HARD_JOINT_SUPPORT="$2"; shift 2 ;;
+    --sam3-text-only) SAM3_TEXT_ONLY="$2"; shift 2 ;;
+    --sam3-refine-2d) SAM3_REFINE_2D="$2"; shift 2 ;;
+    --sam3-max-2d-correction-px) SAM3_MAX_2D_CORRECTION_PX="$2"; shift 2 ;;
+    --sam3-2d-correction-blend) SAM3_2D_CORRECTION_BLEND="$2"; shift 2 ;;
+    --sam3-max-2d-bone-change-ratio) SAM3_MAX_2D_BONE_CHANGE_RATIO="$2"; shift 2 ;;
     --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -136,10 +187,18 @@ while (($#)); do
   esac
 done
 
+if [[ -z "$PIPELINE" ]]; then
+  [[ "$GPU_PROFILE" == "rtx5090d" && "$SAM3_GLOVE_ASSIST" != "1" ]] && PIPELINE=1 || PIPELINE=0
+fi
+if [[ "$SAM3_GLOVE_ASSIST" == "1" && "$PIPELINE" == "1" ]]; then
+  echo "[batch] SAM3 uses the GPU during postprocess; disabling --pipeline 1 to avoid GPU contention"
+  PIPELINE=0
+fi
+
 [[ -n "$INPUT_DIR" && -d "$INPUT_DIR" ]] || { echo "Missing --input-dir: $INPUT_DIR" >&2; exit 2; }
 [[ -n "$OUTPUT_ROOT" ]] || { usage >&2; exit 2; }
-[[ "$RECURSIVE" =~ ^[01]$ && "$CONTINUE_ON_ERROR" =~ ^[01]$ && "$DRY_RUN" =~ ^[01]$ ]] || {
-  echo "recursive/continue-on-error/dry-run must be 0 or 1" >&2; exit 2;
+[[ "$RECURSIVE" =~ ^[01]$ && "$CONTINUE_ON_ERROR" =~ ^[01]$ && "$DRY_RUN" =~ ^[01]$ && "$PIPELINE" =~ ^[01]$ ]] || {
+  echo "recursive/continue-on-error/dry-run/pipeline must be 0 or 1" >&2; exit 2;
 }
 [[ -x "$SINGLE" ]] || { echo "Single-recording script is not executable: $SINGLE" >&2; exit 2; }
 case "$DETECTOR_HANDEDNESS" in
@@ -149,6 +208,14 @@ esac
 case "$GLOVE_MARKER_ASSIST" in
   ""|0|1) ;;
   *) echo "--glove-marker-assist must be 0 or 1: $GLOVE_MARKER_ASSIST" >&2; exit 2 ;;
+esac
+case "$SAM3_GLOVE_ASSIST" in
+  ""|0|1) ;;
+  *) echo "--sam3-glove-assist must be 0 or 1: $SAM3_GLOVE_ASSIST" >&2; exit 2 ;;
+esac
+case "$SAM3_TEXT_ONLY" in
+  ""|0|1) ;;
+  *) echo "--sam3-text-only must be 0 or 1: $SAM3_TEXT_ONLY" >&2; exit 2 ;;
 esac
 
 INPUT_DIR="$(cd "$INPUT_DIR" && pwd)"
@@ -203,6 +270,44 @@ with Path(path).open("a", encoding="utf-8") as stream:
 PY
 }
 
+record_completion() {
+  local mcap="$1" output="$2" name="$3" exit_code="$4" started="$5" log="$6"
+  local finished status
+  finished="$(date +%s)"
+  if ((exit_code == 0)); then
+    status="success"
+    echo "[batch] success: ${name}"
+  else
+    status="failed"
+    echo "[batch] failed: ${name} (exit ${exit_code})" >&2
+  fi
+  append_json_status \
+    "$mcap" "$output" "$status" "$exit_code" "$started" "$finished" "$log"
+}
+
+PENDING_PID=""
+PENDING_MCAP=""
+PENDING_OUTPUT=""
+PENDING_NAME=""
+PENDING_STARTED=""
+PENDING_LOG=""
+LAST_POST_FAILED=0
+
+finish_pending_postprocess() {
+  local exit_code
+  LAST_POST_FAILED=0
+  [[ -n "$PENDING_PID" ]] || return 0
+  set +e
+  wait "$PENDING_PID"
+  exit_code=$?
+  set -e
+  record_completion \
+    "$PENDING_MCAP" "$PENDING_OUTPUT" "$PENDING_NAME" "$exit_code" \
+    "$PENDING_STARTED" "$PENDING_LOG"
+  ((exit_code != 0)) && LAST_POST_FAILED=1
+  PENDING_PID=""
+}
+
 for MCAP in "${MCAPS[@]}"; do
   NAME="$(basename "$MCAP")"
   STEM="${NAME%.*}"
@@ -241,17 +346,88 @@ for MCAP in "${MCAPS[@]}"; do
   [[ -n "$MARKER_MAX_APPLIED_SHIFT_PX" ]] && CMD+=(--marker-max-applied-shift-px "$MARKER_MAX_APPLIED_SHIFT_PX")
   [[ -n "$MARKER_BLEND" ]] && CMD+=(--marker-blend "$MARKER_BLEND")
   [[ -n "$MARKER_MAX_LOCAL_ADJUSTMENT_PX" ]] && CMD+=(--marker-max-local-adjustment-px "$MARKER_MAX_LOCAL_ADJUSTMENT_PX")
+  [[ -n "$SAM3_GLOVE_ASSIST" ]] && CMD+=(--sam3-glove-assist "$SAM3_GLOVE_ASSIST")
+  [[ -n "$SAM3_CONDA_ENV" ]] && CMD+=(--sam3-conda-env "$SAM3_CONDA_ENV")
+  [[ -n "$SAM3_TOOL_ROOT" ]] && CMD+=(--sam3-tool-root "$SAM3_TOOL_ROOT")
+  [[ -n "$SAM3_MODEL" ]] && CMD+=(--sam3-model "$SAM3_MODEL")
+  [[ -n "$SAM3_PROMPT" ]] && CMD+=(--sam3-prompt "$SAM3_PROMPT")
+  [[ -n "$SAM3_DEVICE" ]] && CMD+=(--sam3-device "$SAM3_DEVICE")
+  [[ -n "$SAM3_CONF" ]] && CMD+=(--sam3-conf "$SAM3_CONF")
+  [[ -n "$SAM3_MIN_SCORE" ]] && CMD+=(--sam3-min-score "$SAM3_MIN_SCORE")
+  [[ -n "$SAM3_MIN_BOX_IOU" ]] && CMD+=(--sam3-min-box-iou "$SAM3_MIN_BOX_IOU")
+  [[ -n "$SAM3_MIN_JOINT_SUPPORT" ]] && CMD+=(--sam3-min-joint-support "$SAM3_MIN_JOINT_SUPPORT")
+  [[ -n "$SAM3_HARD_JOINT_SUPPORT" ]] && CMD+=(--sam3-hard-joint-support "$SAM3_HARD_JOINT_SUPPORT")
+  [[ -n "$SAM3_TEXT_ONLY" ]] && CMD+=(--sam3-text-only "$SAM3_TEXT_ONLY")
+  [[ -n "$SAM3_REFINE_2D" ]] && CMD+=(--sam3-refine-2d "$SAM3_REFINE_2D")
+  [[ -n "$SAM3_MAX_2D_CORRECTION_PX" ]] && CMD+=(--sam3-max-2d-correction-px "$SAM3_MAX_2D_CORRECTION_PX")
+  [[ -n "$SAM3_2D_CORRECTION_BLEND" ]] && CMD+=(--sam3-2d-correction-blend "$SAM3_2D_CORRECTION_BLEND")
+  [[ -n "$SAM3_MAX_2D_BONE_CHANGE_RATIO" ]] && CMD+=(--sam3-max-2d-bone-change-ratio "$SAM3_MAX_2D_BONE_CHANGE_RATIO")
   [[ -n "$DETECTOR_HANDEDNESS" ]] && CMD+=(--detector-handedness "$DETECTOR_HANDEDNESS")
   ((${#CAMERAS[@]})) && CMD+=(--cameras "${CAMERAS[@]}")
   ((NO_VIDEO)) && CMD+=(--no-video)
 
   echo "[batch] ${NAME} -> ${RECORD_OUTPUT}"
   if ((DRY_RUN)); then
-    printf '  '
-    printf '%q ' "${CMD[@]}"
-    printf '\n'
+    if ((PIPELINE)); then
+      printf '  '
+      printf '%q ' "${CMD[@]}" --stop-after-inference
+      printf '\n  '
+      printf '%q ' "${CMD[@]}"
+      printf '\n'
+    else
+      printf '  '
+      printf '%q ' "${CMD[@]}"
+      printf '\n'
+    fi
     FINISHED="$(date +%s)"
     append_json_status "$MCAP" "$RECORD_OUTPUT" "dry_run" 0 "$STARTED" "$FINISHED" "$LOG_PATH"
+    continue
+  fi
+
+  if ((PIPELINE)); then
+    echo "[batch] GPU inference phase: ${NAME}"
+    set +e
+    "${CMD[@]}" --stop-after-inference 2>&1 | tee "$LOG_PATH"
+    EXIT_CODE=${PIPESTATUS[0]}
+    set -e
+
+    # The previous CPU/NVENC phase has been hidden behind this GPU phase.
+    finish_pending_postprocess
+    if ((EXIT_CODE != 0)); then
+      record_completion \
+        "$MCAP" "$RECORD_OUTPUT" "$NAME" "$EXIT_CODE" "$STARTED" "$LOG_PATH"
+      if ((CONTINUE_ON_ERROR == 0)); then
+        break
+      fi
+      continue
+    fi
+
+    if ((LAST_POST_FAILED && CONTINUE_ON_ERROR == 0)); then
+      # This inference was already in flight when the previous failure became
+      # visible. Complete its postprocess, then honor stop-on-error.
+      echo "[batch] CPU/NVENC postprocess phase: ${NAME}"
+      set +e
+      "${CMD[@]}" 2>&1 | tee -a "$LOG_PATH"
+      EXIT_CODE=${PIPESTATUS[0]}
+      set -e
+      record_completion \
+        "$MCAP" "$RECORD_OUTPUT" "$NAME" "$EXIT_CODE" "$STARTED" "$LOG_PATH"
+      break
+    fi
+
+    echo "[batch] launch CPU/NVENC postprocess: ${NAME}"
+    (
+      set +e
+      "${CMD[@]}" 2>&1 | tee -a "$LOG_PATH"
+      phase_exit=${PIPESTATUS[0]}
+      exit "$phase_exit"
+    ) &
+    PENDING_PID=$!
+    PENDING_MCAP="$MCAP"
+    PENDING_OUTPUT="$RECORD_OUTPUT"
+    PENDING_NAME="$NAME"
+    PENDING_STARTED="$STARTED"
+    PENDING_LOG="$LOG_PATH"
     continue
   fi
 
@@ -259,18 +435,14 @@ for MCAP in "${MCAPS[@]}"; do
   "${CMD[@]}" 2>&1 | tee "$LOG_PATH"
   EXIT_CODE=${PIPESTATUS[0]}
   set -e
-  FINISHED="$(date +%s)"
-  if ((EXIT_CODE == 0)); then
-    append_json_status "$MCAP" "$RECORD_OUTPUT" "success" 0 "$STARTED" "$FINISHED" "$LOG_PATH"
-    echo "[batch] success: ${NAME}"
-  else
-    append_json_status "$MCAP" "$RECORD_OUTPUT" "failed" "$EXIT_CODE" "$STARTED" "$FINISHED" "$LOG_PATH"
-    echo "[batch] failed: ${NAME} (exit ${EXIT_CODE})" >&2
-    if ((CONTINUE_ON_ERROR == 0)); then
-      break
-    fi
+  record_completion \
+    "$MCAP" "$RECORD_OUTPUT" "$NAME" "$EXIT_CODE" "$STARTED" "$LOG_PATH"
+  if ((EXIT_CODE != 0 && CONTINUE_ON_ERROR == 0)); then
+    break
   fi
 done
+
+finish_pending_postprocess
 
 python3 - "$STATUS_JSONL" "$OUTPUT_ROOT/batch_summary.json" "$INPUT_DIR" "$PATTERN" <<'PY'
 import json

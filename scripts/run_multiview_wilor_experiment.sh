@@ -17,6 +17,8 @@ COMPILE_BACKBONE=""
 FUSION_WORKERS=""
 GPU_PROFILE="compatible"
 NO_VIDEO=0
+STOP_AFTER_INFERENCE=0
+FINAL_VIDEO_ENABLED=0
 DETECTOR_HANDEDNESS=""
 GLOVE_MARKER_ASSIST="${EGO_GLOVE_MARKER_ASSIST:-${EGO_NOKOV_WILOR_ASSIST:-0}}"
 MARKER_SATURATION_MAX="${EGO_MARKER_SATURATION_MAX:-100}"
@@ -33,10 +35,27 @@ MARKER_MAX_SHIFT_PX="${EGO_MARKER_MAX_SHIFT_PX:-20}"
 MARKER_MAX_APPLIED_SHIFT_PX="${EGO_MARKER_MAX_APPLIED_SHIFT_PX:-10}"
 MARKER_BLEND="${EGO_MARKER_BLEND:-0.15}"
 MARKER_MAX_LOCAL_ADJUSTMENT_PX="${EGO_MARKER_MAX_LOCAL_ADJUSTMENT_PX:-3}"
+SAM3_GLOVE_ASSIST="${EGO_SAM3_GLOVE_ASSIST:-0}"
+SAM3_CONDA_ENV="${EGO_SAM3_CONDA_ENV:-annotator}"
+SAM3_TOOL_ROOT="${EGO_SAM3_TOOL_ROOT:-/home/p3/data_sda1/tool/auto-obb-annotator}"
+SAM3_MODEL="${EGO_SAM3_MODEL:-$SAM3_TOOL_ROOT/models/sam3.pt}"
+SAM3_PROMPT="${EGO_SAM3_PROMPT:-hand wearing a gray and black protective work glove}"
+SAM3_DEVICE="${EGO_SAM3_DEVICE:-cuda}"
+SAM3_CONF="${EGO_SAM3_CONF:-0.25}"
+SAM3_MIN_SCORE="${EGO_SAM3_MIN_SCORE:-0.25}"
+SAM3_MIN_BOX_IOU="${EGO_SAM3_MIN_BOX_IOU:-0.20}"
+SAM3_MIN_JOINT_SUPPORT="${EGO_SAM3_MIN_JOINT_SUPPORT:-0.55}"
+SAM3_HARD_JOINT_SUPPORT="${EGO_SAM3_HARD_JOINT_SUPPORT:-0.35}"
+SAM3_TEXT_ONLY=0
+SAM3_REFINE_2D="${EGO_SAM3_REFINE_2D:-1}"
+SAM3_MAX_2D_CORRECTION_PX="${EGO_SAM3_MAX_2D_CORRECTION_PX:-24.0}"
+SAM3_2D_CORRECTION_BLEND="${EGO_SAM3_2D_CORRECTION_BLEND:-0.75}"
+SAM3_MAX_2D_BONE_CHANGE_RATIO="${EGO_SAM3_MAX_2D_BONE_CHANGE_RATIO:-0.55}"
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
-  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--no-video]"
+  echo "Optional: --final-video also generates the final-only fused skeleton video (disabled by default)."
+  echo "Usage: $0 --mcap FILE --output DIR [--cameras camera0 camera1 ...] [--reference-camera camera2] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--sam3-glove-assist 0|1] [--sam3-conda-env NAME] [--sam3-model FILE] [--sam3-prompt TEXT] [--sam3-text-only 0|1] [--sam3-refine-2d 0|1] [--sam3-max-2d-correction-px N] [--sam3-2d-correction-blend N] [--sam3-max-2d-bone-change-ratio N] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--no-video] [--stop-after-inference]"
 }
 
 while (($#)); do
@@ -76,9 +95,27 @@ while (($#)); do
     --marker-max-applied-shift-px) MARKER_MAX_APPLIED_SHIFT_PX="$2"; shift 2 ;;
     --marker-blend) MARKER_BLEND="$2"; shift 2 ;;
     --marker-max-local-adjustment-px) MARKER_MAX_LOCAL_ADJUSTMENT_PX="$2"; shift 2 ;;
+    --sam3-glove-assist|--sam3-assist) SAM3_GLOVE_ASSIST="$2"; shift 2 ;;
+    --sam3-conda-env) SAM3_CONDA_ENV="$2"; shift 2 ;;
+    --sam3-tool-root) SAM3_TOOL_ROOT="$2"; shift 2 ;;
+    --sam3-model) SAM3_MODEL="$2"; shift 2 ;;
+    --sam3-prompt) SAM3_PROMPT="$2"; shift 2 ;;
+    --sam3-device) SAM3_DEVICE="$2"; shift 2 ;;
+    --sam3-conf) SAM3_CONF="$2"; shift 2 ;;
+    --sam3-min-score) SAM3_MIN_SCORE="$2"; shift 2 ;;
+    --sam3-min-box-iou) SAM3_MIN_BOX_IOU="$2"; shift 2 ;;
+    --sam3-min-joint-support) SAM3_MIN_JOINT_SUPPORT="$2"; shift 2 ;;
+    --sam3-hard-joint-support) SAM3_HARD_JOINT_SUPPORT="$2"; shift 2 ;;
+    --sam3-text-only) SAM3_TEXT_ONLY="$2"; shift 2 ;;
+    --sam3-refine-2d) SAM3_REFINE_2D="$2"; shift 2 ;;
+    --sam3-max-2d-correction-px) SAM3_MAX_2D_CORRECTION_PX="$2"; shift 2 ;;
+    --sam3-2d-correction-blend) SAM3_2D_CORRECTION_BLEND="$2"; shift 2 ;;
+    --sam3-max-2d-bone-change-ratio) SAM3_MAX_2D_BONE_CHANGE_RATIO="$2"; shift 2 ;;
     --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
     --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
+    --stop-after-inference) STOP_AFTER_INFERENCE=1; shift ;;
+    --final-video) FINAL_VIDEO_ENABLED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -94,9 +131,9 @@ case "$GPU_PROFILE" in
     FUSION_WORKERS="${FUSION_WORKERS:-1}"
     ;;
   rtx5090d)
-    BATCH_SIZE="${BATCH_SIZE:-16}"
-    FRAME_BATCH_SIZE="${FRAME_BATCH_SIZE:-4}"
-    PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-8}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
+    FRAME_BATCH_SIZE="${FRAME_BATCH_SIZE:-16}"
+    PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-16}"
     MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-1}"
     COMPILE_BACKBONE="${COMPILE_BACKBONE:-1}"
     FUSION_WORKERS="${FUSION_WORKERS:-8}"
@@ -144,6 +181,41 @@ if ! [[ "$GLOVE_MARKER_ASSIST" =~ ^[01]$ ]]; then
   echo "--glove-marker-assist must be 0 or 1: $GLOVE_MARKER_ASSIST" >&2
   exit 2
 fi
+if ! [[ "$SAM3_GLOVE_ASSIST" =~ ^[01]$ && "$SAM3_TEXT_ONLY" =~ ^[01]$ && "$SAM3_REFINE_2D" =~ ^[01]$ ]]; then
+  echo "--sam3-glove-assist/--sam3-text-only/--sam3-refine-2d must be 0 or 1" >&2
+  exit 2
+fi
+for VALUE in "$SAM3_CONF" "$SAM3_MIN_SCORE" "$SAM3_MIN_BOX_IOU" "$SAM3_MIN_JOINT_SUPPORT" "$SAM3_HARD_JOINT_SUPPORT" "$SAM3_MAX_2D_CORRECTION_PX" "$SAM3_2D_CORRECTION_BLEND" "$SAM3_MAX_2D_BONE_CHANGE_RATIO"; do
+  [[ "$VALUE" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+    echo "SAM3 thresholds must be non-negative decimal numbers: $VALUE" >&2
+    exit 2
+  }
+done
+python3 - "$SAM3_CONF" "$SAM3_MIN_SCORE" "$SAM3_MIN_BOX_IOU" "$SAM3_MIN_JOINT_SUPPORT" "$SAM3_HARD_JOINT_SUPPORT" "$SAM3_MAX_2D_CORRECTION_PX" "$SAM3_2D_CORRECTION_BLEND" "$SAM3_MAX_2D_BONE_CHANGE_RATIO" <<'PY'
+import sys
+values = [float(value) for value in sys.argv[1:]]
+if any(value <= 0.0 or value > 1.0 for value in values[:1]):
+    raise SystemExit("SAM3 confidence must be in (0, 1]")
+if any(value < 0.0 or value > 1.0 for value in values[1:5]):
+    raise SystemExit("SAM3 thresholds must be in [0, 1]")
+if values[4] > values[3]:
+    raise SystemExit("SAM3 hard joint support cannot exceed minimum joint support")
+if values[5] < 0.0:
+    raise SystemExit("SAM3 max 2D correction must be non-negative")
+if not 0.0 <= values[6] <= 1.0:
+    raise SystemExit("SAM3 2D correction blend must be in [0, 1]")
+if values[7] < 0.0:
+    raise SystemExit("SAM3 max 2D bone change ratio must be non-negative")
+PY
+if ((SAM3_GLOVE_ASSIST)); then
+  [[ -f "$SAM3_MODEL" ]] || {
+    echo "SAM3 model does not exist: $SAM3_MODEL" >&2
+    exit 2
+  }
+  if [[ "$SAM3_DEVICE" == "auto" ]]; then
+    SAM3_DEVICE="cuda"
+  fi
+fi
 if [[ -z "$DETECTOR_HANDEDNESS" ]]; then
   if ((GLOVE_MARKER_ASSIST)); then
     DETECTOR_HANDEDNESS="adaptive"
@@ -180,6 +252,15 @@ if ((GLOVE_MARKER_ASSIST)); then
 elif [[ "$DETECTOR_HANDEDNESS" != "strict" ]]; then
   FUSION="$OUTPUT/fusion_multiview_geometric"
 fi
+MARKER_PREDICTIONS="$PREDICTIONS"
+MARKER_FUSION="$FUSION"
+SAM3_SOURCE_PREDICTIONS="$PREDICTIONS"
+SAM3_PREDICTIONS="$OUTPUT/wilor_multiview_sam3_assisted"
+SAM3_FUSION="$OUTPUT/fusion_multiview_sam3_assisted"
+if ((SAM3_GLOVE_ASSIST)); then
+  PREDICTIONS="$SAM3_PREDICTIONS"
+  FUSION="$SAM3_FUSION"
+fi
 VIDEO="$FUSION/diagnostic_${#CAMERAS[@]}view.mp4"
 FINAL_VIDEO="$FUSION/final_only_${#CAMERAS[@]}view.mp4"
 CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
@@ -200,14 +281,20 @@ run_python() {
     python "$@"
 }
 
-run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$FUSION_WORKERS" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" "$DETECTOR_HANDEDNESS" "$GLOVE_MARKER_ASSIST" "$MARKER_SATURATION_MAX" "$MARKER_VALUE_MIN" "$MARKER_MIN_MATCHES" "$MARKER_MIN_FINGER_GROUPS" "$MARKER_GLOBAL_MIN_MATCHES" "$MARKER_GLOBAL_MIN_FINGER_GROUPS" "$MARKER_SEARCH_PADDING_PX" "$MARKER_BBOX_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_MAX_APPLIED_SHIFT_PX" "$MARKER_BLEND" "$MARKER_MAX_LOCAL_ADJUSTMENT_PX" <<'PY'
+run_sam3_python() {
+  conda run --no-capture-output -n "$SAM3_CONDA_ENV" \
+    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
+    python "$@"
+}
+
+run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$FUSION_WORKERS" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" "$DETECTOR_HANDEDNESS" "$GLOVE_MARKER_ASSIST" "$MARKER_SATURATION_MAX" "$MARKER_VALUE_MIN" "$MARKER_MIN_MATCHES" "$MARKER_MIN_FINGER_GROUPS" "$MARKER_GLOBAL_MIN_MATCHES" "$MARKER_GLOBAL_MIN_FINGER_GROUPS" "$MARKER_SEARCH_PADDING_PX" "$MARKER_BBOX_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_MAX_APPLIED_SHIFT_PX" "$MARKER_BLEND" "$MARKER_MAX_LOCAL_ADJUSTMENT_PX" "$SAM3_GLOVE_ASSIST" "$SAM3_CONDA_ENV" "$SAM3_TOOL_ROOT" "$SAM3_MODEL" "$SAM3_PROMPT" "$SAM3_DEVICE" "$SAM3_CONF" "$SAM3_MIN_SCORE" "$SAM3_MIN_BOX_IOU" "$SAM3_MIN_JOINT_SUPPORT" "$SAM3_HARD_JOINT_SUPPORT" "$SAM3_TEXT_ONLY" "$SAM3_REFINE_2D" "$SAM3_MAX_2D_CORRECTION_PX" "$SAM3_2D_CORRECTION_BLEND" "$SAM3_MAX_2D_BONE_CHANGE_RATIO" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 from glove_marker_assist import MarkerAssistConfig
 
-config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, fusion_workers, camera_csv, reference_camera, anchor_cameras_text, detector_handedness, marker_enabled, marker_saturation_max, marker_value_min, marker_min_matches, marker_min_finger_groups, marker_global_min_matches, marker_global_min_finger_groups, marker_search_padding_px, marker_bbox_padding_px, marker_seed_distance_px, marker_match_distance_px, marker_max_shift_px, marker_max_applied_shift_px, marker_blend, marker_max_local_adjustment_px = sys.argv[1:]
+config_path, source_text, max_frames, device, batch_size, gpu_profile, frame_batch_size, preprocess_workers, max_detections_per_class, compile_backbone, fusion_workers, camera_csv, reference_camera, anchor_cameras_text, detector_handedness, marker_enabled, marker_saturation_max, marker_value_min, marker_min_matches, marker_min_finger_groups, marker_global_min_matches, marker_global_min_finger_groups, marker_search_padding_px, marker_bbox_padding_px, marker_seed_distance_px, marker_match_distance_px, marker_max_shift_px, marker_max_applied_shift_px, marker_blend, marker_max_local_adjustment_px, sam3_enabled, sam3_conda_env, sam3_tool_root, sam3_model, sam3_prompt, sam3_device, sam3_conf, sam3_min_score, sam3_min_box_iou, sam3_min_joint_support, sam3_hard_joint_support, sam3_text_only, sam3_refine_2d, sam3_max_2d_correction_px, sam3_2d_correction_blend, sam3_max_2d_bone_change_ratio = sys.argv[1:]
 source = Path(source_text).resolve()
 stat = source.stat()
 camera_ids = camera_csv.split(",")
@@ -244,6 +331,24 @@ config = {
     "fusion_workers": int(fusion_workers),
     "detector_handedness": detector_handedness,
     "glove_marker_assist": {"enabled": bool(int(marker_enabled)), **marker_config.to_dict()},
+    "sam3_glove_assist": {
+        "enabled": bool(int(sam3_enabled)),
+        "conda_env": sam3_conda_env,
+        "tool_root": str(Path(sam3_tool_root).resolve()),
+        "model": str(Path(sam3_model).resolve()),
+        "prompt": sam3_prompt,
+        "device": sam3_device,
+        "conf": float(sam3_conf),
+        "min_score": float(sam3_min_score),
+        "min_box_iou": float(sam3_min_box_iou),
+        "min_joint_support": float(sam3_min_joint_support),
+        "hard_joint_support": float(sam3_hard_joint_support),
+        "text_only": bool(int(sam3_text_only)),
+        "refine_2d": bool(int(sam3_refine_2d)),
+        "max_2d_correction_px": float(sam3_max_2d_correction_px),
+        "two_d_correction_blend": float(sam3_2d_correction_blend),
+        "max_2d_bone_change_ratio": float(sam3_max_2d_bone_change_ratio),
+    },
     "camera_confidences": {"camera0": 0.2, "camera1": 0.3, "camera2": 0.3,
                            "camera3": 0.3, "camera4": 0.1, "camera5": 0.1},
     "fusion_algorithm": "anchor_guided_dynamic_temporal_marker_v4",
@@ -273,6 +378,27 @@ if path.exists():
         "glove_marker_assist",
         {"enabled": False, **MarkerAssistConfig().to_dict()},
     )
+    previous.setdefault(
+        "sam3_glove_assist",
+        {
+            "enabled": False,
+            "conda_env": sam3_conda_env,
+            "tool_root": str(Path(sam3_tool_root).resolve()),
+            "model": str(Path(sam3_model).resolve()),
+            "prompt": sam3_prompt,
+            "device": sam3_device,
+            "conf": float(sam3_conf),
+            "min_score": float(sam3_min_score),
+            "min_box_iou": float(sam3_min_box_iou),
+            "min_joint_support": float(sam3_min_joint_support),
+            "hard_joint_support": float(sam3_hard_joint_support),
+            "text_only": bool(int(sam3_text_only)),
+            "refine_2d": bool(int(sam3_refine_2d)),
+            "max_2d_correction_px": float(sam3_max_2d_correction_px),
+            "two_d_correction_blend": float(sam3_2d_correction_blend),
+            "max_2d_bone_change_ratio": float(sam3_max_2d_bone_change_ratio),
+        },
+    )
     if previous.get("fusion_algorithm") == "anchor_guided_dynamic_temporal_handedness_v3":
         previous["fusion_algorithm"] = "anchor_guided_dynamic_temporal_marker_v4"
     if previous != config:
@@ -297,7 +423,10 @@ require_complete_or_absent() {
 require_complete_or_absent "$NORMALIZED" manifest.json
 require_complete_or_absent "$RAW_PREDICTIONS" summary.json
 if ((GLOVE_MARKER_ASSIST)); then
-  require_complete_or_absent "$PREDICTIONS" summary.json
+  require_complete_or_absent "$MARKER_PREDICTIONS" summary.json
+fi
+if ((SAM3_GLOVE_ASSIST)); then
+  require_complete_or_absent "$SAM3_PREDICTIONS" summary.json
 fi
 require_complete_or_absent "$FUSION" summary.json
 
@@ -326,6 +455,11 @@ else
   echo "[multiview] reuse WiLoR predictions"
 fi
 
+if ((STOP_AFTER_INFERENCE)); then
+  echo "[multiview] inference checkpoint complete: $RAW_PREDICTIONS"
+  exit 0
+fi
+
 if ((GLOVE_MARKER_ASSIST)) && [[ ! -f "$PREDICTIONS/summary.json" ]]; then
   echo "[multiview] refine WiLoR image joints with visible glove markers"
   run_python "$ROOT/scripts/assist_wilor_with_glove_markers.py" \
@@ -348,6 +482,34 @@ elif ((GLOVE_MARKER_ASSIST)); then
   echo "[multiview] reuse glove-marker-assisted WiLoR predictions"
 fi
 
+if ((SAM3_GLOVE_ASSIST)) && [[ ! -f "$SAM3_PREDICTIONS/summary.json" ]]; then
+  echo "[multiview] validate WiLoR detections and 2D hypotheses with SAM3 glove masks"
+  SAM3_ARGS=(
+    "$ROOT/scripts/sam3_glove_assist.py"
+    --dataset "$NORMALIZED"
+    --predictions "$SAM3_SOURCE_PREDICTIONS"
+    --output "$SAM3_PREDICTIONS"
+    --cameras "${CAMERAS[@]}"
+    --tool-root "$SAM3_TOOL_ROOT"
+    --model "$SAM3_MODEL"
+    --prompt "$SAM3_PROMPT"
+    --device "$SAM3_DEVICE"
+    --conf "$SAM3_CONF"
+    --min-score "$SAM3_MIN_SCORE"
+    --min-box-iou "$SAM3_MIN_BOX_IOU"
+    --min-joint-support "$SAM3_MIN_JOINT_SUPPORT"
+    --refine-2d "$SAM3_REFINE_2D"
+    --max-2d-correction-px "$SAM3_MAX_2D_CORRECTION_PX"
+    --2d-correction-blend "$SAM3_2D_CORRECTION_BLEND"
+    --max-2d-bone-change-ratio "$SAM3_MAX_2D_BONE_CHANGE_RATIO"
+    --max-frames "$MAX_FRAMES"
+  )
+  ((SAM3_TEXT_ONLY)) && SAM3_ARGS+=(--text-only)
+  run_sam3_python "${SAM3_ARGS[@]}"
+elif ((SAM3_GLOVE_ASSIST)); then
+  echo "[multiview] reuse SAM3-assisted WiLoR predictions"
+fi
+
 if [[ ! -f "$FUSION/summary.json" ]]; then
   echo "[multiview] fuse native Double-Sphere rays with RANSAC"
   FUSION_ARGS=(
@@ -359,26 +521,36 @@ if [[ ! -f "$FUSION/summary.json" ]]; then
     --detector-handedness "$DETECTOR_HANDEDNESS"
     --workers "$FUSION_WORKERS"
     --max-frames "$MAX_FRAMES"
+    --sam3-gate "$SAM3_GLOVE_ASSIST"
+    --sam3-min-score "$SAM3_MIN_SCORE"
+    --sam3-min-box-iou "$SAM3_MIN_BOX_IOU"
+    --sam3-min-joint-support "$SAM3_MIN_JOINT_SUPPORT"
+    --sam3-hard-joint-support "$SAM3_HARD_JOINT_SUPPORT"
   )
   run_python "$ROOT/scripts/fuse_multiview_wilor_guided.py" "${FUSION_ARGS[@]}"
 else
   echo "[multiview] reuse fused result"
 fi
 
-if [[ "$NO_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
+if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ! -f "$VIDEO" && ! -f "$FINAL_VIDEO" ]]; then
+  echo "[multiview] render diagnostic and final videos in one decode pass"
+  run_python "$ROOT/scripts/render_multiview_wilor.py" \
+    --dataset "$NORMALIZED" --fusion "$FUSION" \
+    --output "$VIDEO" --final-output "$FINAL_VIDEO" \
+    --cameras "${CAMERAS[@]}" --video-codec auto \
+    --max-frames "$MAX_FRAMES"
+elif [[ "$NO_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
   echo "[multiview] render ${#CAMERAS[@]}-view diagnostic video"
   run_python "$ROOT/scripts/render_multiview_wilor.py" \
     --dataset "$NORMALIZED" --fusion "$FUSION" \
     --output "$VIDEO" --cameras "${CAMERAS[@]}" \
-    --max-frames "$MAX_FRAMES"
-fi
-
-if [[ "$NO_VIDEO" == 0 && ! -f "$FINAL_VIDEO" ]]; then
+    --video-codec auto --max-frames "$MAX_FRAMES"
+elif [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ! -f "$FINAL_VIDEO" ]]; then
   echo "[multiview] render final stabilized skeletons only"
   run_python "$ROOT/scripts/render_multiview_wilor.py" \
     --dataset "$NORMALIZED" --fusion "$FUSION" \
     --output "$FINAL_VIDEO" --cameras "${CAMERAS[@]}" \
-    --overlay-mode final-only --max-frames "$MAX_FRAMES"
+    --overlay-mode final-only --video-codec auto --max-frames "$MAX_FRAMES"
 fi
 
 echo "[multiview] finished: $FUSION"

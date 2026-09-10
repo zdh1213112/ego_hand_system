@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
 import av
+from mcap.exceptions import EndOfFile
 from mcap.reader import NonSeekingReader
 from mcap_protobuf.decoder import DecoderFactory
 
@@ -148,18 +150,34 @@ class H264MatroskaWriter:
             self.container = None
 
     def validate(self, expected_size: tuple[int, int]) -> int:
-        decoded = 0
-        with av.open(str(self.path), "r") as container:
-            stream = container.streams.video[0]
-            if (stream.width, stream.height) != expected_size:
-                raise RuntimeError(
-                    f"{self.camera_id} remuxed size {(stream.width, stream.height)} "
-                    f"differs from camera_info {expected_size}"
-                )
-            for frame in container.decode(stream):
-                if (frame.width, frame.height) != expected_size:
-                    raise RuntimeError(f"{self.camera_id} decoded a frame with an unexpected size")
-                decoded += 1
+        def decoded_frame_count(codec_name: str) -> int:
+            decoded = 0
+            with av.open(str(self.path), "r") as container:
+                stream = container.streams.video[0]
+                if (stream.width, stream.height) != expected_size:
+                    raise RuntimeError(
+                        f"{self.camera_id} remuxed size "
+                        f"{(stream.width, stream.height)} differs from "
+                        f"camera_info {expected_size}"
+                    )
+                decoder = av.CodecContext.create(codec_name, "r")
+                decoder.extradata = stream.codec_context.extradata
+                for packet in container.demux(stream):
+                    for frame in decoder.decode(packet):
+                        if (frame.width, frame.height) != expected_size:
+                            raise RuntimeError(
+                                f"{self.camera_id} decoded a frame with an "
+                                "unexpected size"
+                            )
+                        decoded += 1
+            return decoded
+
+        try:
+            decoded = decoded_frame_count("h264_cuvid")
+            if decoded != self.packet_count:
+                decoded = decoded_frame_count("h264")
+        except Exception:
+            decoded = decoded_frame_count("h264")
         if decoded != self.packet_count:
             raise RuntimeError(
                 f"{self.camera_id} remuxed {self.packet_count} access units but decoded {decoded} frames"
@@ -269,8 +287,15 @@ def remux_stereo_mcap(
     camera_ids: tuple[str, ...],
     output_paths: dict[str, Path],
     max_frames_per_camera: int = 0,
+    allow_truncated: bool = False,
 ) -> tuple[dict[str, CameraCalibration], dict[str, list[dict]], dict[str, dict], dict[str, str]]:
-    """Remux selected GEN H264 streams without decoding or re-encoding."""
+    """Remux selected GEN H264 streams without decoding or re-encoding.
+
+    MCAP files copied while a recorder is still writing can end in the middle
+    of a record.  The default remains strict and raises ``EndOfFile``; when
+    ``allow_truncated`` is enabled, complete messages already read are kept
+    and the incomplete tail is discarded.
+    """
     path = path.resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -298,39 +323,43 @@ def remux_stereo_mcap(
         return writer
 
     try:
-        with path.open("rb") as stream:
-            reader = NonSeekingReader(stream, decoder_factories=[factory])
-            for schema, channel, message in reader.iter_messages(
-                topics=topic_to_camera.keys(), log_time_order=False
-            ):
-                camera_id, kind = topic_to_camera[channel.topic]
-                decoder = factory.decoder_for(channel.message_encoding, schema)
-                if decoder is None:
-                    raise RuntimeError(f"no protobuf decoder for {channel.topic}")
-                proto = decoder(message.data)
-                if kind == "calibration":
-                    calibration = camera_from_genrobot_message(camera_id, proto)
-                    previous = calibrations.get(camera_id)
-                    if previous is not None and not _same_calibration(previous, calibration):
-                        raise RuntimeError(f"{camera_id} calibration changes within one MCAP")
-                    calibrations[camera_id] = calibration
-                    info_counts[camera_id] += 1
-                    ensure_writer(camera_id)
-                    continue
-                if str(proto.format).strip().lower() != "h264":
-                    raise ValueError(f"{camera_id} image format must be h264, got {proto.format!r}")
-                writer = ensure_writer(camera_id)
-                if writer is None:
-                    pending_packets[camera_id].append((bytes(proto.data), int(message.log_time)))
-                    continue
-                if max_frames_per_camera and writer.packet_count >= max_frames_per_camera:
-                    if (
-                        all(item in writers and writers[item].packet_count >= max_frames_per_camera for item in camera_ids)
-                        and all(item in calibrations for item in camera_ids)
-                    ):
-                        break
-                    continue
-                writer.write(bytes(proto.data), int(message.log_time))
+        try:
+            with path.open("rb") as stream:
+                reader = NonSeekingReader(stream, decoder_factories=[factory])
+                for schema, channel, message in reader.iter_messages(
+                    topics=topic_to_camera.keys(), log_time_order=False
+                ):
+                    camera_id, kind = topic_to_camera[channel.topic]
+                    decoder = factory.decoder_for(channel.message_encoding, schema)
+                    if decoder is None:
+                        raise RuntimeError(f"no protobuf decoder for {channel.topic}")
+                    proto = decoder(message.data)
+                    if kind == "calibration":
+                        calibration = camera_from_genrobot_message(camera_id, proto)
+                        previous = calibrations.get(camera_id)
+                        if previous is not None and not _same_calibration(previous, calibration):
+                            raise RuntimeError(f"{camera_id} calibration changes within one MCAP")
+                        calibrations[camera_id] = calibration
+                        info_counts[camera_id] += 1
+                        ensure_writer(camera_id)
+                        continue
+                    if str(proto.format).strip().lower() != "h264":
+                        raise ValueError(f"{camera_id} image format must be h264, got {proto.format!r}")
+                    writer = ensure_writer(camera_id)
+                    if writer is None:
+                        pending_packets[camera_id].append((bytes(proto.data), int(message.log_time)))
+                        continue
+                    if max_frames_per_camera and writer.packet_count >= max_frames_per_camera:
+                        if (
+                            all(item in writers and writers[item].packet_count >= max_frames_per_camera for item in camera_ids)
+                            and all(item in calibrations for item in camera_ids)
+                        ):
+                            break
+                        continue
+                    writer.write(bytes(proto.data), int(message.log_time))
+        except EndOfFile:
+            if not allow_truncated:
+                raise
         missing = set(camera_ids) - calibrations.keys()
         if missing:
             raise RuntimeError(f"missing camera_info for: {', '.join(sorted(missing))}")
@@ -343,8 +372,20 @@ def remux_stereo_mcap(
             writer.close()
     statistics = {}
     rows = {}
+    worker_count = min(6, len(writers))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        validation_futures = {
+            camera_id: executor.submit(
+                writer.validate, calibrations[camera_id].image_size
+            )
+            for camera_id, writer in writers.items()
+        }
+        decoded_counts = {
+            camera_id: future.result()
+            for camera_id, future in validation_futures.items()
+        }
     for camera_id, writer in writers.items():
-        decoded_count = writer.validate(calibrations[camera_id].image_size)
+        decoded_count = decoded_counts[camera_id]
         statistics[camera_id] = {
             **writer.statistics(decoded_count),
             "camera_info_message_count": info_counts[camera_id],

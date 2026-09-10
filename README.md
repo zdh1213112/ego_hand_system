@@ -163,6 +163,9 @@ camera2/3 锚点选择、DS 射线、外围相机关联和逐关节 RANSAC 的�
 戴有反光 marker 球的黑色手套可以直接用原始 RGB 图像辅助 WiLoR，见
 [`docs/GEN6_GLOVE_MARKER_WILOR_ASSIST.md`](docs/GEN6_GLOVE_MARKER_WILOR_ASSIST.md)。该功能默认
 关闭；启用后逐帧检测亮点并修正 WiLoR 的二维投影，不读取 NOKOV CSV，也不修改相机标定。
+如果要用 SAM3 对防护手套做掩膜验证、保守修正 2D 骨架并参与六目 3D 融合，见
+[`docs/GEN6_SAM3_GLOVE_WILOR_ASSIST.md`](docs/GEN6_SAM3_GLOVE_WILOR_ASSIST.md)。该功能同样默认
+关闭，原始 WiLoR 预测会保留用于 A/B 对比和安全回退。
 
 主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
 `camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
@@ -192,12 +195,13 @@ conda activate ego-hand
     --device     cuda \
     --gpu-profile rtx5090d \
     --max-frames 0 \
-    --batch-size 16 \
     --glove-marker-assist 1
 ```
 
-`--gpu-profile rtx5090d` 会使用 4 帧检测批次、16 个 WiLoR 假设批次、8 个并行
-OpenCV 抗锯齿裁剪线程、FP16 autocast/TF32，并仅在每路相机结束后清理 CUDA 缓存。
+`--gpu-profile rtx5090d` 会使用 16 帧检测批次、64 个 WiLoR 假设批次、16 个并行
+OpenCV 抗锯齿裁剪线程、锁页内存异步传输和 H.264 解码预取、FP16 autocast/TF32，
+并仅在每路相机结束后清理 CUDA 缓存。若 24 GB 显存仍不足，推理会自动将 WiLoR
+假设批次减半并重试。
 WiLoR backbone 默认通过 `torch.compile` 合并 CUDA kernel；首次运行会有一次编译等待，
 之后的完整序列会摊薄该开销。
 由于严格 handedness 模式下每帧物理上最多只有一只左手和一只右手，该配置还会为
@@ -205,11 +209,12 @@ WiLoR backbone 默认通过 `torch.compile` 合并 CUDA kernel；首次运行会
 RTX 5060 保持默认的
 `--gpu-profile compatible --batch-size 4`，继续使用原有逐帧 FP32 路径。可用
 `--frame-batch-size` 和 `--preprocess-workers` 单独覆盖批次与裁剪线程数；显存不足
-时先把 `--batch-size` 从 `16` 降为 `8`，再把帧批次从 `4` 降为 `2`。
+时先把 `--batch-size` 从 `64` 降为 `32`，再把帧批次从 `16` 降为 `8`。
 如需保留所有候选框，可显式传入 `--max-detections-per-class 0`。
 如当前 PyTorch/驱动组合无法编译，可用 `--compile-backbone 0` 关闭编译，其余 5090D
 优化仍然保留。
-5090D profile 还会使用 8 个 CPU 进程并行处理相互独立的逐帧多视角 RANSAC；可用
+5090D profile 还会使用 8 个 CPU 进程并行处理相互独立的逐帧多视角 RANSAC；候选
+重投影按相机批量计算，并限制每个 worker 内部的 BLAS 线程数。可用
 `--fusion-workers N` 单独调整。融合阶段每 25 帧输出一次当前吞吐率。
 
 如需从新的 GEN MCAP 只运行四目，例如 `camera1~camera4`，可直接指定相机子集：
@@ -259,8 +264,10 @@ RTX 5060 保持默认的
 多视角几何与 marker 证据重试。可显式传入 `strict` 强制旧规则，或传入 `ignore` 始终由
 几何选择身份；后两种模式都应单独检查左右手稳定性。
 
-如果一个目录中有多个 MCAP，可使用批处理入口逐个运行。默认串行执行（适合单张 5090D），
-每个 MCAP 使用文件名创建独立输出目录，某个文件失败后默认继续下一个：
+如果一个目录中有多个 MCAP，可使用批处理入口运行。`rtx5090d` 默认启用两级流水线：
+下一条记录执行 GPU inference 时，上一条记录同时执行 CPU fusion 和 NVENC render；
+可用 `--pipeline 0` 恢复严格串行。每个 MCAP 使用文件名创建独立输出目录，某个文件
+失败后默认继续下一个：
 
 ```bash
 ./scripts/run_multiview_wilor_batch.sh \
@@ -273,6 +280,12 @@ RTX 5060 保持默认的
   --preprocess-workers 16 \
   --fusion-workers 16
 ```
+
+视频编码会优先使用 PyAV 的 `h264_nvenc`，不可用时自动回退到 OpenCV `mp4v`。
+渲染会并行读取六路视频并预取下一帧；添加 `--final-video` 时，诊断版与最终版在同一次
+六路解码中生成，避免重复读取完整视频。
+normalization 的 remux 完整性校验也会优先使用六路并行 `h264_cuvid`/NVDEC，不支持
+NVDEC 的机器自动回退到软件 H.264 解码。
 
 批量输出示例：
 

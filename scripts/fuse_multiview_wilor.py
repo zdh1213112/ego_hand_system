@@ -86,18 +86,42 @@ def _intersect_rays(rays: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray | N
 def _errors(
     point_base: np.ndarray,
     observations: list[tuple[str, CameraCalibration, np.ndarray]],
+    rays: list[tuple[np.ndarray, np.ndarray] | None] | None = None,
 ) -> np.ndarray:
-    result = np.full(len(observations), np.inf, dtype=np.float64)
+    if rays is None:
+        rays = [
+            _ray_in_base(camera, pixel)
+            for _, camera, pixel in observations
+        ]
+    return _errors_many(point_base[None], observations, rays)[0]
+
+
+def _errors_many(
+    points_base: np.ndarray,
+    observations: list[tuple[str, CameraCalibration, np.ndarray]],
+    rays: list[tuple[np.ndarray, np.ndarray] | None],
+) -> np.ndarray:
+    """Project several RANSAC candidates in one vectorized call per camera."""
+    points_base = np.asarray(points_base, dtype=np.float64)
+    result = np.full(
+        (len(points_base), len(observations)), np.inf, dtype=np.float64
+    )
     for index, (_, camera, pixel) in enumerate(observations):
+        ray = rays[index]
+        if ray is None:
+            continue
         rotation = camera.T_base_camera[:3, :3]
         center = camera.T_base_camera[:3, 3]
-        point_camera = rotation.T @ (point_base - center)
-        ray = _ray_in_base(camera, pixel)
-        if ray is None or np.dot(point_base - center, ray[1]) <= 0:
+        relative = points_base - center
+        forward = relative @ ray[1] > 0
+        if not np.any(forward):
             continue
-        projected, valid = project_points(camera, point_camera[None])
-        if bool(valid[0]) and np.all(np.isfinite(projected[0])):
-            result[index] = np.linalg.norm(projected[0] - pixel)
+        points_camera = relative @ rotation
+        projected, valid = project_points(camera, points_camera)
+        valid &= forward & np.all(np.isfinite(projected), axis=1)
+        result[valid, index] = np.linalg.norm(
+            projected[valid] - pixel, axis=1
+        )
     return result
 
 
@@ -106,27 +130,47 @@ def triangulate_ransac(
     threshold_px: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rays = [_ray_in_base(camera, pixel) for _, camera, pixel in observations]
-    best: tuple[int, float, np.ndarray, np.ndarray] | None = None
+    candidate_points = []
     for first, second in itertools.combinations(range(len(observations)), 2):
         if rays[first] is None or rays[second] is None:
             continue
         point = _intersect_rays([rays[first], rays[second]])
         if point is None:
             continue
-        errors = _errors(point, observations)
-        inliers = np.isfinite(errors) & (errors <= threshold_px)
-        count = int(inliers.sum())
-        score = float(np.median(errors[inliers])) if count else float("inf")
-        candidate = (count, -score, point, inliers)
-        if best is None or candidate[:2] > best[:2]:
-            best = candidate
-    if best is None or best[0] < 2:
+        candidate_points.append(point)
+    if not candidate_points:
         return np.full(3, np.nan), np.full(len(observations), np.inf), np.zeros(len(observations), bool)
-    inlier_rays = [rays[index] for index in np.flatnonzero(best[3]) if rays[index] is not None]
+
+    candidate_points_array = np.asarray(candidate_points, dtype=np.float64)
+    candidate_errors = _errors_many(
+        candidate_points_array, observations, rays
+    )
+    candidate_inliers = np.isfinite(candidate_errors) & (
+        candidate_errors <= threshold_px
+    )
+    counts = candidate_inliers.sum(axis=1)
+    scores = np.asarray([
+        np.median(errors[inliers]) if count else np.inf
+        for errors, inliers, count in zip(
+            candidate_errors, candidate_inliers, counts
+        )
+    ])
+    # np.lexsort uses the final key as primary and preserves the old RANSAC
+    # ordering for an exact tie: most inliers, then lowest median error.
+    best_index = int(np.lexsort((np.arange(len(counts)), scores, -counts))[0])
+    if counts[best_index] < 2:
+        return np.full(3, np.nan), np.full(len(observations), np.inf), np.zeros(len(observations), bool)
+    best_point = candidate_points_array[best_index]
+    best_inliers = candidate_inliers[best_index]
+    inlier_rays = [
+        rays[index]
+        for index in np.flatnonzero(best_inliers)
+        if rays[index] is not None
+    ]
     point = _intersect_rays(inlier_rays)
     if point is None:
-        point = best[2]
-    errors = _errors(point, observations)
+        point = best_point
+    errors = _errors(point, observations, rays)
     inliers = np.isfinite(errors) & (errors <= threshold_px)
     return point, errors, inliers
 
@@ -137,6 +181,7 @@ def _triangulate_hand(
     calibrations: dict[str, CameraCalibration],
     threshold_px: float,
     min_views: int,
+    sam3_gate: bool = False,
 ) -> dict[str, Any]:
     cameras = tuple(selected)
     points = np.full((21, 3), np.nan, dtype=np.float64)
@@ -145,7 +190,15 @@ def _triangulate_hand(
     inlier_counts = np.zeros(21, dtype=np.int32)
     for joint in range(21):
         observations = [
-            (camera, calibrations[camera], np.asarray(selected[camera]["joints_2d"][joint], dtype=np.float64))
+            (
+                camera,
+                calibrations[camera],
+                (
+                    np.asarray(selected[camera]["joints_2d"][joint], dtype=np.float64)
+                    if not (sam3_gate and _sam3_joint_is_hard_outlier(selected[camera], joint))
+                    else np.full(2, np.nan, dtype=np.float64)
+                ),
+            )
             for camera in cameras
         ]
         point, joint_errors, inliers = triangulate_ransac(observations, threshold_px)
@@ -233,6 +286,17 @@ def _baseline_comparison(
     }
 
 
+def _sam3_joint_is_hard_outlier(hand: dict[str, Any], joint: int) -> bool:
+    """Check the persisted per-joint SAM3 mask gate without loading masks."""
+    info = hand.get("sam3_assist", {})
+    flags = info.get("hard_outlier_flags", [])
+    if not info.get("enabled") or not info.get("matched"):
+        return False
+    if not isinstance(flags, (list, tuple)) or len(flags) != 21:
+        return False
+    return bool(flags[joint])
+
+
 def _serialize_hand(
     result: dict[str, Any], selected: dict[str, dict[str, Any]],
     calibrations: dict[str, CameraCalibration], baseline_cameras: tuple[str, str],
@@ -252,6 +316,8 @@ def _serialize_hand(
             view["wilor_joints_2d"] = hand["wilor_joints_2d"]
         if "marker_assist" in hand:
             view["marker_assist"] = hand["marker_assist"]
+        if "sam3_assist" in hand:
+            view["sam3_assist"] = hand["sam3_assist"]
         return view
 
     return {

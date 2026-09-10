@@ -22,6 +22,9 @@ class MultiviewGpuProfileTests(unittest.TestCase):
         self.assertIn("--max-detections-per-class N", result.stdout)
         self.assertIn("--compile-backbone 0|1", result.stdout)
         self.assertIn("--fusion-workers N", result.stdout)
+        self.assertIn("--sam3-refine-2d 0|1", result.stdout)
+        self.assertIn("--sam3-max-2d-correction-px N", result.stdout)
+        self.assertIn("--sam3-2d-correction-blend N", result.stdout)
 
     def test_compatible_defaults_preserve_original_path(self):
         runner = RUNNER.read_text(encoding="utf-8")
@@ -34,13 +37,14 @@ class MultiviewGpuProfileTests(unittest.TestCase):
         )
         self.assertIn('COMPILE_BACKBONE="${COMPILE_BACKBONE:-0}"', runner)
         self.assertIn('FUSION_WORKERS="${FUSION_WORKERS:-1}"', runner)
+        self.assertIn('SAM3_REFINE_2D="${EGO_SAM3_REFINE_2D:-1}"', runner)
 
     def test_5090d_defaults_enable_cross_frame_amp_path(self):
         runner = RUNNER.read_text(encoding="utf-8")
         inference = INFERENCE.read_text(encoding="utf-8")
-        self.assertIn('BATCH_SIZE="${BATCH_SIZE:-16}"', runner)
-        self.assertIn('FRAME_BATCH_SIZE="${FRAME_BATCH_SIZE:-4}"', runner)
-        self.assertIn('PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-8}"', runner)
+        self.assertIn('BATCH_SIZE="${BATCH_SIZE:-64}"', runner)
+        self.assertIn('FRAME_BATCH_SIZE="${FRAME_BATCH_SIZE:-16}"', runner)
+        self.assertIn('PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-16}"', runner)
         self.assertIn(
             'MAX_DETECTIONS_PER_CLASS="${MAX_DETECTIONS_PER_CLASS:-1}"', runner
         )
@@ -52,6 +56,8 @@ class MultiviewGpuProfileTests(unittest.TestCase):
         self.assertIn("ThreadPoolExecutor", inference)
         self.assertIn("cv2.GaussianBlur", inference)
         self.assertIn("torch.compile", inference)
+        self.assertIn("_prefetched_frame_chunks", inference)
+        self.assertIn("pin_memory", inference)
 
 
 if __name__ == "__main__":

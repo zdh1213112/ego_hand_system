@@ -4,15 +4,25 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 import itertools
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import sys
 import time
 from typing import Any
+
+# Fusion launches several processes and all of its linear algebra matrices are
+# tiny.  A BLAS thread pool inside every worker only oversubscribes the CPU.
+for _thread_variable in (
+    "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_variable, "1")
 
 import numpy as np
 
@@ -67,6 +77,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal-recovery-gap", type=int, default=3)
     parser.add_argument("--temporal-association-threshold-px", type=float, default=90.0)
     parser.add_argument("--max-temporal-wrist-step-m", type=float, default=0.12)
+    parser.add_argument(
+        "--robust-view-consensus", type=int, choices=(0, 1), default=1,
+        help=(
+            "reject a per-hand camera view when at least two other views "
+            "strongly disagree with it"
+        ),
+    )
+    parser.add_argument("--consensus-min-views", type=int, default=3)
+    parser.add_argument("--consensus-min-inlier-joints", type=int, default=8)
+    parser.add_argument("--consensus-outlier-median-px", type=float, default=35.0)
+    parser.add_argument("--consensus-outlier-ratio", type=float, default=2.5)
+    parser.add_argument(
+        "--sam3-gate", type=int, choices=(0, 1), default=0,
+        help=(
+            "use per-view sam3_assist records as a conservative hypothesis/"
+            "view gate (0 keeps the original fusion behavior)"
+        ),
+    )
+    parser.add_argument("--sam3-min-score", type=float, default=0.25)
+    parser.add_argument("--sam3-min-box-iou", type=float, default=0.20)
+    parser.add_argument("--sam3-min-joint-support", type=float, default=0.55)
+    parser.add_argument(
+        "--sam3-hard-joint-support", type=float, default=0.35,
+        help="support below this value can reject a view when other views agree",
+    )
     parser.add_argument("--anatomy-refinement", type=int, choices=(0, 1), default=1)
     parser.add_argument("--anatomy-outlier-window", type=int, default=4)
     parser.add_argument("--anatomy-outlier-distance-m", type=float, default=0.10)
@@ -79,7 +114,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anatomy-max-reprojection-shift-px", type=float, default=35.0)
     parser.add_argument("--anatomy-temporal-radius", type=int, default=4)
     parser.add_argument("--anatomy-temporal-palm-residual-m", type=float, default=0.070)
+    parser.add_argument(
+        "--anatomy-temporal-palm-strong-residual-m", type=float, default=0.140,
+    )
+    parser.add_argument(
+        "--anatomy-temporal-global-min-rejected-joints", type=int, default=6,
+    )
     parser.add_argument("--anatomy-temporal-local-residual", type=float, default=0.90)
+    parser.add_argument("--anatomy-temporal-blend", type=float, default=0.50)
+    parser.add_argument(
+        "--anatomy-temporal-max-global-adjustment-m", type=float, default=0.10,
+    )
+    parser.add_argument(
+        "--anatomy-temporal-max-local-adjustment-m", type=float, default=0.05,
+    )
+    parser.add_argument(
+        "--anatomy-temporal-spike-joint-step-m", type=float, default=0.12,
+    )
+    parser.add_argument(
+        "--anatomy-temporal-spike-palm-step-m", type=float, default=0.20,
+    )
+    parser.add_argument(
+        "--anatomy-temporal-spike-max-spread-m", type=float, default=0.08,
+    )
     parser.add_argument(
         "--workers", type=int, default=1,
         help="independent frame-fusion worker processes",
@@ -194,6 +251,152 @@ def _anatomy_penalty(points: np.ndarray) -> float:
     )
 
 
+def _view_consensus_metrics(
+    result: dict[str, Any],
+) -> dict[str, dict[str, float | int]]:
+    """Summarize each camera's agreement with one triangulated hand."""
+    metrics: dict[str, dict[str, float | int]] = {}
+    errors = np.asarray(result["errors"], dtype=np.float64)
+    inlier_mask = np.asarray(result["inlier_mask"], dtype=bool)
+    for index, camera in enumerate(result["cameras"]):
+        values = errors[:, index]
+        finite = np.isfinite(values)
+        metrics[camera] = {
+            "median_px": (
+                float(np.median(values[finite])) if np.any(finite) else float("inf")
+            ),
+            "p95_px": (
+                float(np.percentile(values[finite], 95))
+                if np.any(finite) else float("inf")
+            ),
+            "inlier_joint_count": int(np.count_nonzero(inlier_mask[:, index])),
+            "valid_joint_count": int(np.count_nonzero(finite)),
+        }
+    return metrics
+
+
+def _robust_view_consensus(
+    selected_by_side: dict[int, dict[str, dict[str, Any]]],
+    calibrations: dict[str, CameraCalibration],
+    args: argparse.Namespace,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[int, list[str]],
+    dict[int, dict[str, dict[str, float | int]]],
+]:
+    """Remove a per-hand view only when other views provide strong support.
+
+    The old path always trusted the selected anchor pair.  This pass keeps the
+    pair as an initial seed, but tests every selected view against the robust
+    multi-view result.  A camera is removed for that hand only when at least
+    two other views have usable inliers and the camera is an absolute and
+    relative outlier.  This makes camera5 and isolated camera3 failures unable
+    to move an otherwise consistent 3D estimate, while retaining two-view
+    fallback when the sequence genuinely has only two valid observations.
+    """
+    rejected_by_side: dict[int, list[str]] = {0: [], 1: []}
+    diagnostics_by_side: dict[int, dict[str, dict[str, float | int]]] = {
+        0: {}, 1: {},
+    }
+    enabled = bool(getattr(args, "robust_view_consensus", 0))
+    min_views = max(3, int(getattr(args, "consensus_min_views", 3)))
+    min_inliers = max(2, int(getattr(args, "consensus_min_inlier_joints", 8)))
+    absolute_threshold = float(
+        getattr(args, "consensus_outlier_median_px", 35.0)
+    )
+    ratio_threshold = float(getattr(args, "consensus_outlier_ratio", 2.5))
+
+    for _iteration in range(2):
+        results = [
+            _triangulate_hand(
+                side, selected_by_side[side], calibrations,
+                args.ransac_threshold_px, 2, bool(getattr(args, "sam3_gate", 0)),
+            )
+            for side in (0, 1)
+        ]
+        if not enabled:
+            return results, rejected_by_side, diagnostics_by_side
+        changed = False
+        for side, result in enumerate(results):
+            metrics = _view_consensus_metrics(result)
+            # SAM3 is an auxiliary image-space check.  Keep its diagnostics
+            # beside the geometric diagnostics so a rejected view is
+            # explainable in accepted.jsonl/summary.json.
+            for camera, values in metrics.items():
+                selected_hand = selected_by_side[side].get(camera, {})
+                values["sam3_enabled"] = int(
+                    bool(selected_hand.get("sam3_assist", {}).get("enabled"))
+                )
+                values["sam3_matched"] = int(
+                    bool(selected_hand.get("sam3_assist", {}).get("matched"))
+                )
+                support_value = selected_hand.get("sam3_assist", {}).get(
+                    "tolerant_inside_ratio_visible"
+                )
+                values["sam3_joint_support"] = (
+                    float(support_value) if support_value is not None else -1.0
+                )
+                values["sam3_bad"] = int(
+                    _sam3_view_is_bad(selected_hand, args)
+                )
+            for camera, values in metrics.items():
+                diagnostics_by_side[side][camera] = dict(values)
+            selected = selected_by_side[side]
+            if len(selected) < min_views:
+                continue
+            to_remove: list[str] = []
+            for camera, values in metrics.items():
+                others = [item for key, item in metrics.items() if key != camera]
+                supporting = [
+                    item for item in others
+                    if int(item["inlier_joint_count"]) >= min_inliers
+                    and np.isfinite(float(item["median_px"]))
+                    and not bool(item.get("sam3_bad", 0))
+                ]
+                if len(supporting) < 2:
+                    continue
+                reference_median = float(np.median([
+                    float(item["median_px"]) for item in supporting
+                ]))
+                camera_median = float(values["median_px"])
+                high_error = (
+                    camera_median > absolute_threshold
+                    and camera_median > ratio_threshold * max(reference_median, 1.0)
+                )
+                low_support = (
+                    int(values["inlier_joint_count"]) < min_inliers
+                    and len(supporting) >= 2
+                )
+                sam3_bad = bool(values.get("sam3_bad", 0))
+                # A SAM3 rejection is only actionable when at least two other
+                # views support the same hand.  This preserves the old
+                # two-view fallback and makes SAM3 a conservative gate.
+                if (high_error or low_support or (sam3_bad and len(supporting) >= 2)) and camera in selected:
+                    to_remove.append(camera)
+            # Never reduce a hand below a valid stereo pair.  Removing several
+            # clear outliers at once is useful when two cameras fail together.
+            max_removable = max(0, len(selected) - 2)
+            for camera in to_remove[:max_removable]:
+                selected.pop(camera, None)
+                if camera not in rejected_by_side[side]:
+                    rejected_by_side[side].append(camera)
+                changed = True
+        if not changed:
+            return results, rejected_by_side, diagnostics_by_side
+
+    results = [
+        _triangulate_hand(
+            side, selected_by_side[side], calibrations,
+            args.ransac_threshold_px, 2, bool(getattr(args, "sam3_gate", 0)),
+        )
+        for side in (0, 1)
+    ]
+    for side, result in enumerate(results):
+        for camera, values in _view_consensus_metrics(result).items():
+            diagnostics_by_side[side][camera] = dict(values)
+    return results, rejected_by_side, diagnostics_by_side
+
+
 def _marker_assist_cost(
     selected_by_side: dict[int, dict[str, dict[str, Any]]],
 ) -> float:
@@ -223,6 +426,72 @@ def _marker_assist_cost(
     return cost
 
 
+def _sam3_assist_cost(
+    selected_by_side: dict[int, dict[str, dict[str, Any]]],
+    args: argparse.Namespace,
+) -> float:
+    """Add a small SAM3 preference without overriding multiview geometry.
+
+    SAM3 is evidence about the visible glove region, not a replacement for a
+    calibrated ray.  Accepted hypotheses receive a mild bonus; a matched mask
+    with poor joint support receives a penalty.  Missing masks are neutral so
+    an occluded/low-contrast frame can still use the original WiLoR path.
+    """
+    if not bool(getattr(args, "sam3_gate", 0)):
+        return 0.0
+    cost = 0.0
+    min_support = float(getattr(args, "sam3_min_joint_support", 0.55))
+    min_score = float(getattr(args, "sam3_min_score", 0.25))
+    min_iou = float(getattr(args, "sam3_min_box_iou", 0.20))
+    for selected in selected_by_side.values():
+        for hand in selected.values():
+            info = hand.get("sam3_assist", {})
+            if not info.get("enabled"):
+                continue
+            if not info.get("matched"):
+                # Keep missing masks neutral for hard rejection (occlusion is
+                # common), but give a small preference to detections that did
+                # produce a glove mask when competing geometric hypotheses
+                # are otherwise nearly tied.
+                cost += 0.15
+                continue
+            score = float(info.get("mask_score", 0.0))
+            iou = float(info.get("mask_box_iou_yolo", 0.0))
+            support_value = info.get("tolerant_inside_ratio_visible")
+            support = (
+                float(support_value) if support_value is not None else 0.0
+            )
+            quality = min(
+                score / max(min_score, 1e-6),
+                iou / max(min_iou, 1e-6),
+                support / max(min_support, 1e-6),
+            )
+            cost += 0.8 * max(0.0, 1.0 - min(quality, 1.0))
+            if quality >= 1.0:
+                cost -= 0.35
+    return float(cost)
+
+
+def _sam3_view_is_bad(hand: dict[str, Any], args: argparse.Namespace) -> bool:
+    """Return true only for a matched mask that strongly rejects this pose."""
+    if not bool(getattr(args, "sam3_gate", 0)):
+        return False
+    info = hand.get("sam3_assist", {})
+    if not info.get("enabled") or not info.get("matched"):
+        # A missing mask is intentionally neutral.  It can be caused by
+        # occlusion and must not erase an otherwise geometrically valid view.
+        return False
+    score = float(info.get("mask_score", 0.0))
+    iou = float(info.get("mask_box_iou_yolo", 0.0))
+    support_value = info.get("tolerant_inside_ratio_visible")
+    support = float(support_value) if support_value is not None else 0.0
+    return (
+        score < float(getattr(args, "sam3_min_score", 0.25))
+        or iou < float(getattr(args, "sam3_min_box_iou", 0.20))
+        or support < float(getattr(args, "sam3_hard_joint_support", 0.35))
+    )
+
+
 def _evaluate_anchor_assignment(
     anchor_cameras: tuple[str, str],
     anchor_pairs: tuple[tuple[int, int], tuple[int, int]],
@@ -238,7 +507,7 @@ def _evaluate_anchor_assignment(
     anchor_results = {
         side: _triangulate_hand(
             side, selected_by_side[side], calibrations,
-            args.anchor_threshold_px, 2,
+            args.anchor_threshold_px, 2, bool(getattr(args, "sam3_gate", 0)),
         )
         for side in (0, 1)
     }
@@ -259,23 +528,37 @@ def _evaluate_anchor_assignment(
     final_results = [
         _triangulate_hand(
             side, selected_by_side[side], calibrations,
-            args.ransac_threshold_px, 2,
+            args.ransac_threshold_px, 2, bool(getattr(args, "sam3_gate", 0)),
         )
         for side in (0, 1)
     ]
+    consensus_rejected, consensus_diagnostics = ({0: [], 1: []}, {0: {}, 1: {}})
+    if bool(getattr(args, "robust_view_consensus", 0)):
+        (
+            final_results,
+            consensus_rejected,
+            consensus_diagnostics,
+        ) = _robust_view_consensus(selected_by_side, calibrations, args)
     missing = sum(21 - result["valid_joints"] for result in final_results)
     extra_joint_support = sum(
         int(np.maximum(result["inlier_counts"] - 2, 0).sum())
         for result in final_results
     )
-    matched_side_views = sum(len(selected_by_side[side]) - 2 for side in (0, 1))
+    matched_side_views = sum(
+        max(len(selected_by_side[side]) - 2, 0) for side in (0, 1)
+    )
+    rejected_view_count = sum(
+        len(consensus_rejected[side]) for side in (0, 1)
+    )
     cost = (
         100.0 * missing
         + sum(result["median_px"] + 0.2 * result["p95_px"] for result in final_results)
         + sum(_anatomy_penalty(result["points"]) for result in final_results)
         + _marker_assist_cost(selected_by_side)
+        + _sam3_assist_cost(selected_by_side, args)
         - 1.5 * extra_joint_support
         - 4.0 * matched_side_views
+        + 1.0 * rejected_view_count
     )
     return {
         "cost": float(cost),
@@ -283,6 +566,8 @@ def _evaluate_anchor_assignment(
         "selected": selected_by_side,
         "results": final_results,
         "association_errors": association_errors,
+        "consensus_rejected": consensus_rejected,
+        "consensus_diagnostics": consensus_diagnostics,
     }
 
 
@@ -329,10 +614,17 @@ def _recover_from_reference(
     results = [
         _triangulate_hand(
             side, selected_by_side[side], calibrations,
-            args.ransac_threshold_px, 2,
+            args.ransac_threshold_px, 2, bool(getattr(args, "sam3_gate", 0)),
         )
         for side in (0, 1)
     ]
+    consensus_rejected, consensus_diagnostics = ({0: [], 1: []}, {0: {}, 1: {}})
+    if bool(getattr(args, "robust_view_consensus", 0)):
+        (
+            results,
+            consensus_rejected,
+            consensus_diagnostics,
+        ) = _robust_view_consensus(selected_by_side, calibrations, args)
     if _quality_reasons(results, args):
         return None
     frame_gap = abs(sync_index - int(reference["sync_index"]))
@@ -356,6 +648,13 @@ def _recover_from_reference(
             result, selected_by_side[side], calibrations, comparison_pair
         )
         hand["association_error_px"] = association_errors[side]
+        if bool(getattr(args, "robust_view_consensus", 0)):
+            hand["consensus_rejected_camera_ids"] = sorted(
+                consensus_rejected.get(side, [])
+            )
+            hand["consensus_view_diagnostics"] = consensus_diagnostics.get(
+                side, {}
+            )
         hand["fusion_mode"] = "temporal_guided_multiview"
         hands.append(hand)
     active = sorted(set().union(*(hand["camera_ids"] for hand in hands)))
@@ -472,6 +771,13 @@ def _fuse_primary_frame_mode(
             result, best["selected"][side], calibrations, chosen_anchors
         )
         hand["association_error_px"] = best["association_errors"][side]
+        if bool(getattr(args, "robust_view_consensus", 0)):
+            hand["consensus_rejected_camera_ids"] = sorted(
+                best.get("consensus_rejected", {}).get(side, [])
+            )
+            hand["consensus_view_diagnostics"] = best.get(
+                "consensus_diagnostics", {}
+            ).get(side, {})
         hand["fusion_mode"] = (
             "multiview" if len(best["selected"][side]) >= 3 else "stereo_anchor"
         )
@@ -571,7 +877,33 @@ def _primary_results(
         initializer=_initialize_fusion_worker,
         initargs=(prediction_rows, calibrations, cameras, preferred_anchors, args),
     ) as executor:
-        yield from executor.map(_fuse_primary_frame_worker, frame_ids, chunksize=1)
+        chunksize = max(
+            1, min(4, len(frame_ids) // max(args.workers * 4, 1))
+        )
+        yield from executor.map(
+            _fuse_primary_frame_worker, frame_ids, chunksize=chunksize
+        )
+
+
+def _nearest_reference_row(
+    references: list[dict[str, Any]],
+    reference_ids: list[int],
+    sync_index: int,
+) -> tuple[dict[str, Any], int]:
+    """Find the closest accepted frame without scanning the full sequence."""
+    position = bisect_left(reference_ids, sync_index)
+    candidates = []
+    if position > 0:
+        candidates.append(position - 1)
+    if position < len(reference_ids):
+        candidates.append(position)
+    nearest_index = min(
+        candidates,
+        key=lambda index: (abs(reference_ids[index] - sync_index), index),
+    )
+    return references[nearest_index], abs(
+        reference_ids[nearest_index] - sync_index
+    )
 
 
 def main() -> int:
@@ -581,6 +913,18 @@ def main() -> int:
     if args.workers < 1 or args.progress_interval < 1 or args.max_frames < 0:
         raise ValueError(
             "workers/progress-interval must be positive; max-frames must be non-negative"
+        )
+    if not 0.0 <= args.sam3_min_score <= 1.0:
+        raise ValueError("--sam3-min-score must be in [0, 1]")
+    if not 0.0 <= args.sam3_min_box_iou <= 1.0:
+        raise ValueError("--sam3-min-box-iou must be in [0, 1]")
+    if not 0.0 <= args.sam3_hard_joint_support <= 1.0:
+        raise ValueError("--sam3-hard-joint-support must be in [0, 1]")
+    if not 0.0 <= args.sam3_min_joint_support <= 1.0:
+        raise ValueError("--sam3-min-joint-support must be in [0, 1]")
+    if args.sam3_hard_joint_support > args.sam3_min_joint_support:
+        raise ValueError(
+            "--sam3-hard-joint-support cannot exceed --sam3-min-joint-support"
         )
     anatomy_config = FusionAnatomyConfig(
         outlier_window=args.anatomy_outlier_window,
@@ -596,7 +940,23 @@ def main() -> int:
         max_reprojection_shift_px=args.anatomy_max_reprojection_shift_px,
         temporal_radius=args.anatomy_temporal_radius,
         temporal_palm_residual_m=args.anatomy_temporal_palm_residual_m,
+        temporal_palm_strong_residual_m=(
+            args.anatomy_temporal_palm_strong_residual_m
+        ),
+        temporal_global_min_rejected_joints=(
+            args.anatomy_temporal_global_min_rejected_joints
+        ),
         temporal_local_residual=args.anatomy_temporal_local_residual,
+        temporal_blend=args.anatomy_temporal_blend,
+        temporal_max_global_adjustment_m=(
+            args.anatomy_temporal_max_global_adjustment_m
+        ),
+        temporal_max_local_adjustment_m=(
+            args.anatomy_temporal_max_local_adjustment_m
+        ),
+        temporal_spike_joint_step_m=args.anatomy_temporal_spike_joint_step_m,
+        temporal_spike_palm_step_m=args.anatomy_temporal_spike_palm_step_m,
+        temporal_spike_max_spread_m=args.anatomy_temporal_spike_max_spread_m,
     )
     anatomy_config.validate()
     fusion_started = time.perf_counter()
@@ -644,13 +1004,14 @@ def main() -> int:
     temporal_recovered = []
     if args.temporal_recovery_gap > 0 and accepted:
         references = sorted(accepted, key=lambda row: int(row["sync_index"]))
+        reference_ids = [int(row["sync_index"]) for row in references]
         remaining_rejected = []
         for rejection in rejected:
             sync_index = int(rejection["sync_index"])
-            reference = min(
-                references, key=lambda row: abs(int(row["sync_index"]) - sync_index)
+            reference, reference_distance = _nearest_reference_row(
+                references, reference_ids, sync_index
             )
-            if abs(int(reference["sync_index"]) - sync_index) > args.temporal_recovery_gap:
+            if reference_distance > args.temporal_recovery_gap:
                 remaining_rejected.append(rejection)
                 continue
             groups = {
@@ -701,6 +1062,11 @@ def main() -> int:
         for hand in hands for camera, view in hand["views"].items()
         if int(view.get("inlier_joint_count", 0)) > 0
     )
+    consensus_rejected_counts = Counter(
+        camera
+        for hand in hands
+        for camera in hand.get("consensus_rejected_camera_ids", [])
+    )
     detector_handedness_mismatches = sum(
         1
         for hand in hands for view in hand["views"].values()
@@ -731,6 +1097,36 @@ def main() -> int:
         for view in marker_evidence_views
         if view.get("marker_assist", {}).get("evidence_only")
     ]
+    sam3_views = [
+        view
+        for hand in hands for view in hand["views"].values()
+        if view.get("sam3_assist", {}).get("enabled")
+    ]
+    sam3_matched_views = [
+        view for view in sam3_views
+        if view.get("sam3_assist", {}).get("matched")
+    ]
+    sam3_accepted_views = [
+        view for view in sam3_views
+        if view.get("sam3_assist", {}).get("accepted")
+    ]
+    sam3_rejected_views = [
+        view for view in sam3_views
+        if (
+            view.get("sam3_assist", {}).get("matched")
+            and not view.get("sam3_assist", {}).get("accepted")
+        )
+    ]
+    sam3_corrected_views = [
+        view for view in sam3_views
+        if int(view.get("sam3_assist", {}).get("two_d_correction", {})
+               .get("corrected_joint_count", 0)) > 0
+    ]
+    sam3_corrected_joints = sum(
+        int(view.get("sam3_assist", {}).get("two_d_correction", {})
+            .get("corrected_joint_count", 0))
+        for view in sam3_views
+    )
     stereo_cross_view = [
         hand["stereo_baseline_comparison"]["cross_view_reprojection_median_px"]
         for hand in hands
@@ -752,7 +1148,11 @@ def main() -> int:
     summary = {
         "schema_version": 1,
         "stage": (
-            "wilor_anchor_guided_multiview_fusion_with_glove_marker_assist"
+            "wilor_anchor_guided_multiview_fusion_with_sam3_and_glove_marker_assist"
+            if sam3_views and marker_assisted_views
+            else "wilor_anchor_guided_multiview_fusion_with_sam3_assist"
+            if sam3_views
+            else "wilor_anchor_guided_multiview_fusion_with_glove_marker_assist"
             if marker_assisted_views
             else "wilor_anchor_guided_multiview_fusion"
         ),
@@ -762,6 +1162,10 @@ def main() -> int:
         "camera_contribution_hand_counts": {
             camera: camera_contribution_counts.get(camera, 0) for camera in cameras
         },
+        "consensus_rejected_view_count": int(sum(consensus_rejected_counts.values())),
+        "consensus_rejected_camera_counts": {
+            camera: consensus_rejected_counts.get(camera, 0) for camera in cameras
+        },
         "detector_handedness_mismatch_observation_count": detector_handedness_mismatches,
         "marker_assisted_view_count": len(marker_assisted_views),
         "marker_evidence_view_count": len(marker_evidence_views),
@@ -769,6 +1173,13 @@ def main() -> int:
         "marker_matched_count_median": (
             float(np.median(marker_match_counts)) if marker_match_counts else None
         ),
+        "sam3_gate_enabled": bool(args.sam3_gate),
+        "sam3_view_count": len(sam3_views),
+        "sam3_matched_view_count": len(sam3_matched_views),
+        "sam3_accepted_view_count": len(sam3_accepted_views),
+        "sam3_rejected_matched_view_count": len(sam3_rejected_views),
+        "sam3_corrected_view_count": len(sam3_corrected_views),
+        "sam3_corrected_joint_count": sam3_corrected_joints,
         "processed_frame_count": len(frame_ids),
         "accepted_frame_count": len(accepted),
         "primary_accepted_frame_count": primary_accepted_count,
@@ -814,6 +1225,26 @@ def main() -> int:
             "temporal_recovery_gap": args.temporal_recovery_gap,
             "temporal_association_threshold_px": args.temporal_association_threshold_px,
             "detector_handedness": args.detector_handedness,
+            "robust_view_consensus": bool(
+                getattr(args, "robust_view_consensus", 0)
+            ),
+            "consensus_min_views": int(
+                getattr(args, "consensus_min_views", 3)
+            ),
+            "consensus_min_inlier_joints": int(
+                getattr(args, "consensus_min_inlier_joints", 8)
+            ),
+            "consensus_outlier_median_px": float(
+                getattr(args, "consensus_outlier_median_px", 35.0)
+            ),
+            "consensus_outlier_ratio": float(
+                getattr(args, "consensus_outlier_ratio", 2.5)
+            ),
+            "sam3_gate": bool(args.sam3_gate),
+            "sam3_min_score": float(args.sam3_min_score),
+            "sam3_min_box_iou": float(args.sam3_min_box_iou),
+            "sam3_min_joint_support": float(args.sam3_min_joint_support),
+            "sam3_hard_joint_support": float(args.sam3_hard_joint_support),
             "workers": args.workers,
         },
         "anatomy_refinement": anatomy_summary or {

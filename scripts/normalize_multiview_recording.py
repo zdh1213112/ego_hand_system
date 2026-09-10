@@ -29,6 +29,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-camera", default="camera2")
     parser.add_argument("--max-delta-us", type=int, default=1500)
     parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument(
+        "--allow-truncated",
+        action="store_true",
+        help=(
+            "keep complete MCAP messages when the file ends mid-record; "
+            "the incomplete tail is discarded"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -114,7 +122,11 @@ def normalize(args: argparse.Namespace) -> Path:
             camera_root.mkdir(parents=True)
             video_paths[camera] = camera_root / "video.mkv"
         calibrations, frame_rows, decode_stats, topics = remux_stereo_mcap(
-            source, camera_ids, video_paths, args.max_frames
+            source,
+            camera_ids,
+            video_paths,
+            args.max_frames,
+            allow_truncated=args.allow_truncated,
         )
         for camera in camera_ids:
             _write_csv(
@@ -148,6 +160,7 @@ def normalize(args: argparse.Namespace) -> Path:
             "source": {
                 "path": str(source), "size_bytes": source.stat().st_size,
                 "sha256": _sha256(source),
+                "allow_truncated": bool(args.allow_truncated),
             },
             "camera_ids": list(camera_ids),
             "reference_camera": args.reference_camera,
