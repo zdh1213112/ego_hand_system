@@ -23,6 +23,27 @@ def project(camera: CameraCalibration, points: np.ndarray) -> tuple[np.ndarray, 
     return pixels.reshape(points.shape[:-1] + (2,)), valid.reshape(points.shape[:-1])
 
 
+def unproject(camera: CameraCalibration, pixels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Convert KB fisheye pixels to unit camera-frame rays."""
+    if camera.model != "KB":
+        raise ValueError("KB unprojection requires a KB camera")
+    pixels = np.asarray(pixels, dtype=np.float64)
+    if pixels.shape[-1] != 2:
+        raise ValueError("pixels must have a final dimension of two")
+    flat = pixels.reshape(-1, 2)
+    undistorted = cv2.fisheye.undistortPoints(
+        flat.reshape(-1, 1, 2), camera.K, camera.distortion
+    )[:, 0]
+    rays = np.ones((len(flat), 3), dtype=np.float64)
+    rays[:, :2] = undistorted
+    valid = np.all(np.isfinite(flat), axis=1) & np.all(np.isfinite(rays), axis=1)
+    norms = np.linalg.norm(rays, axis=1)
+    valid &= norms > 1e-12
+    rays[valid] /= norms[valid, None]
+    rays[~valid] = np.nan
+    return rays.reshape(pixels.shape[:-1] + (3,)), valid.reshape(pixels.shape[:-1])
+
+
 def create_rectification(
     calibration: StereoCalibration, options: RectificationOptions
 ) -> RectificationResult:

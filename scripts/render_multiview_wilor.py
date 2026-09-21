@@ -39,11 +39,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument(
         "--overlay-mode",
-        choices=("diagnostic", "final-only"),
+        choices=("diagnostic", "2d-only", "final-only"),
         default="diagnostic",
         help=(
-            "diagnostic draws detector/marker/intermediate overlays; final-only "
-            "draws exactly one final fused 3D skeleton per physical hand"
+            "diagnostic draws detector/marker/intermediate overlays; 2d-only "
+            "draws only the selected per-camera 2D observations; final-only draws "
+            "exactly one final fused 3D skeleton per physical hand"
+        ),
+    )
+    parser.add_argument("--final-min-inlier-joints", type=int, default=12)
+    parser.add_argument("--final-max-residual-median-px", type=float, default=25.0)
+    parser.add_argument("--final-max-residual-p95-px", type=float, default=50.0)
+    parser.add_argument(
+        "--final-require-marker-evidence",
+        choices=("auto", "0", "1"),
+        default="auto",
+        help=(
+            "require at least one marker-supported view before rendering a final hand; "
+            "auto enables this for marker-assisted fusion"
         ),
     )
     return parser.parse_args()
@@ -112,6 +125,72 @@ def _project_refined_hand(
     pixels, valid = project_points(camera, points_camera)
     pixels[~valid] = np.nan
     return pixels
+
+
+def _hand_has_marker_evidence(hand: dict) -> bool:
+    return any(
+        bool(view.get("marker_assist", {}).get("applied"))
+        or bool(view.get("marker_assist", {}).get("evidence_only"))
+        for view in hand.get("views", {}).values()
+    )
+
+
+def _final_overlay_for_view(
+    camera: CameraCalibration,
+    hand: dict,
+    camera_id: str,
+    min_inlier_joints: int = 12,
+    max_residual_median_px: float = 25.0,
+    max_residual_p95_px: float = 50.0,
+) -> tuple[np.ndarray | None, str]:
+    """Return a safe final projection only for a genuinely observed view."""
+    view = hand.get("views", {}).get(camera_id)
+    if view is None:
+        return None, "no_view"
+    if int(view.get("inlier_joint_count", 0)) < min_inlier_joints:
+        return None, "low_support"
+    points_base = np.asarray(hand.get("joints_base_m", []), dtype=np.float64)
+    if points_base.shape != (21, 3):
+        return None, "invalid_3d"
+    finite_3d = np.isfinite(points_base).all(axis=1)
+    if int(np.count_nonzero(finite_3d)) < 18:
+        return None, "invalid_3d"
+    pixels = _project_refined_hand(camera, points_base)
+    # A partially visible projection can connect points across the camera
+    # plane and is the main source of long, floating skeleton segments.
+    if pixels.shape != (21, 2):
+        return None, "partial_projection"
+    finite_projection = np.isfinite(pixels).all(axis=1)
+    if int(np.count_nonzero(finite_projection)) < 18:
+        return None, "partial_projection"
+    observed = np.asarray(view.get("joints_2d", []), dtype=np.float64)
+    if observed.shape != (21, 2):
+        return None, "invalid_observation"
+    comparable = finite_projection & np.isfinite(observed).all(axis=1)
+    if int(np.count_nonzero(comparable)) < 18:
+        return None, "invalid_observation"
+    residual = np.linalg.norm(pixels[comparable] - observed[comparable], axis=1)
+    if float(np.median(residual)) > max_residual_median_px:
+        return None, "residual_median"
+    if float(np.percentile(residual, 95)) > max_residual_p95_px:
+        return None, "residual_p95"
+    box = np.asarray(view.get("bbox_xyxy", []), dtype=np.float64)
+    if box.shape != (4,) or not np.isfinite(box).all():
+        return None, "invalid_bbox"
+    width = max(float(box[2] - box[0]), 1.0)
+    height = max(float(box[3] - box[1]), 1.0)
+    padding_x = 0.10 * width
+    padding_y = 0.10 * height
+    projected = pixels[finite_projection]
+    inside = (
+        (projected[:, 0] >= box[0] - padding_x)
+        & (projected[:, 0] <= box[2] + padding_x)
+        & (projected[:, 1] >= box[1] - padding_y)
+        & (projected[:, 1] <= box[3] + padding_y)
+    )
+    if int(np.count_nonzero(inside)) < max(16, int(np.ceil(0.85 * len(projected)))):
+        return None, "outside_bbox"
+    return pixels, "safe"
 
 
 def _draw_final_detection(frame: np.ndarray, view: dict, side: int) -> None:
@@ -184,6 +263,14 @@ def main() -> int:
         json.loads(fusion_summary_path.read_text(encoding="utf-8"))
         if fusion_summary_path.is_file() else {}
     )
+    marker_assisted_fusion = "glove_marker_assist" in str(
+        fusion_summary.get("stage", "")
+    )
+    require_marker_evidence = (
+        marker_assisted_fusion
+        if args.final_require_marker_evidence == "auto"
+        else bool(int(args.final_require_marker_evidence))
+    )
     default_cameras = fusion_summary.get("camera_ids", available_cameras)
     cameras = tuple(dict.fromkeys(args.cameras or default_cameras))
     if not cameras:
@@ -239,34 +326,60 @@ def main() -> int:
             tiles = []
             for camera in cameras:
                 frame = readers[camera].read(int(row[f"{camera}_frame_index"]))
+                final_overlay_count = 0
+                final_rejection_reasons: list[str] = []
                 if result is not None:
                     for hand in result["hands"]:
                         anatomy = hand.get("anatomy_refinement", {})
-                        if args.overlay_mode == "diagnostic":
+                        dropped = bool(anatomy.get("dropped_unreconstructable"))
+                        if args.overlay_mode in ("diagnostic", "2d-only"):
                             view = hand["views"].get(camera)
                             if view is not None:
                                 _draw_hand(frame, view, int(hand["side"]))
                         else:
                             view = hand["views"].get(camera)
+                            if dropped:
+                                final_rejection_reasons.append("dropped")
+                                continue
+                            if require_marker_evidence and not _hand_has_marker_evidence(hand):
+                                final_rejection_reasons.append("no_marker")
+                                continue
+                            refined_pixels, final_reason = _final_overlay_for_view(
+                                calibrations[camera],
+                                hand,
+                                camera,
+                                min_inlier_joints=args.final_min_inlier_joints,
+                                max_residual_median_px=args.final_max_residual_median_px,
+                                max_residual_p95_px=args.final_max_residual_p95_px,
+                            )
+                            if refined_pixels is None:
+                                final_rejection_reasons.append(final_reason)
+                                continue
                             if view is not None:
                                 _draw_final_detection(
                                     frame, view, int(hand["side"])
                                 )
-                        if (
-                            args.overlay_mode == "final-only"
-                            or anatomy.get("applied")
-                        ):
-                            refined_pixels = _project_refined_hand(
-                                calibrations[camera],
-                                np.asarray(hand["joints_base_m"], dtype=np.float64),
-                            )
                             _draw_refined_hand(
                                 frame,
                                 refined_pixels,
                                 int(hand["side"]),
                                 int(anatomy.get("corrected_joint_count", 0)),
-                                final_only=args.overlay_mode == "final-only",
+                                final_only=True,
                             )
+                            final_overlay_count += 1
+                        if args.overlay_mode == "diagnostic" and anatomy.get("applied"):
+                            refined_pixels = _project_refined_hand(
+                                calibrations[camera],
+                                np.asarray(hand["joints_base_m"], dtype=np.float64),
+                            )
+                            if not dropped:
+                                _draw_refined_hand(
+                                    frame,
+                                    refined_pixels,
+                                    int(hand["side"]),
+                                    int(anatomy.get("corrected_joint_count", 0)),
+                                    final_only=args.overlay_mode == "final-only",
+                                )
                 camera_views = [
                     hand["views"][camera] for hand in result["hands"]
                     if camera in hand["views"]
@@ -275,7 +388,17 @@ def main() -> int:
                 if result is None:
                     status, status_color = "REJECTED", (40, 80, 255)
                 elif args.overlay_mode == "final-only":
-                    status, status_color = "FINAL FUSED", (70, 220, 70)
+                    if final_overlay_count:
+                        status, status_color = f"FINAL FUSED {final_overlay_count}", (70, 220, 70)
+                    elif camera_views:
+                        status, status_color = "FINAL SUPPRESSED", (40, 170, 255)
+                    else:
+                        status, status_color = "INACTIVE", (180, 180, 180)
+                elif args.overlay_mode == "2d-only":
+                    if camera_views:
+                        status, status_color = f"2D OBS {len(camera_views)}", (70, 220, 70)
+                    else:
+                        status, status_color = "INACTIVE", (180, 180, 180)
                 elif not camera_views:
                     status, status_color = "INACTIVE", (180, 180, 180)
                 elif inlier_joints == 0:

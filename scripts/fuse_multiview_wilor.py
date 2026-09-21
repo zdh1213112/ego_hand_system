@@ -17,8 +17,31 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from camera_models import project_points  # noqa: E402
-from camera_models.double_sphere import unproject  # noqa: E402
+from camera_models.double_sphere import unproject as unproject_double_sphere  # noqa: E402
+from camera_models.kb import unproject as unproject_kb  # noqa: E402
 from ego_data.calibration import CameraCalibration  # noqa: E402
+
+
+# A very small ray angle makes depth essentially unconstrained.  The previous
+# 0.75 degree gate was enough for the synthetic near-parallel unit test, but
+# still allowed badly conditioned pairs in real recordings.  At the working
+# distance of the GEN cameras a 1.25 degree angle is comfortably below the
+# normal inter-camera angle while removing the unstable tail.
+MIN_TRIANGULATION_ANGLE_DEG = 1.25
+MAX_TRIANGULATED_BASE_DISTANCE_M = 3.0
+MAX_TRIANGULATED_HAND_RADIUS_M = 0.30
+MAX_PAIR_POINT_SPREAD_M = 0.12
+# A ray intersection a few centimetres in front of the camera is usually the
+# result of pairing two different detector boxes.  It can nevertheless have
+# an almost perfect reprojection score, so image error alone must not accept
+# it.  The GEN recordings put the glove well outside this near-camera volume;
+# keep the threshold conservative enough for close hand motions.
+MIN_TRIANGULATED_CAMERA_DISTANCE_M = 0.12
+# A 21-joint hand with a palm span outside this interval is not a plausible
+# physical hand.  This catches cross-camera box pairings whose individual
+# rays happen to meet at a compact/oversized pseudo-pose.
+MIN_TRIANGULATED_PALM_WIDTH_M = 0.035
+MAX_TRIANGULATED_PALM_WIDTH_M = 0.18
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +83,12 @@ def _groups(row: dict[str, Any]) -> dict[int, dict[int, dict[str, Any]]]:
 
 
 def _ray_in_base(camera: CameraCalibration, pixel: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    if camera.model == "DS":
+        unproject = unproject_double_sphere
+    elif camera.model == "KB":
+        unproject = unproject_kb
+    else:
+        raise ValueError(f"unsupported camera model: {camera.model}")
     ray_camera, valid = unproject(camera, np.asarray(pixel, dtype=np.float64)[None])
     if not bool(valid[0]):
         return None
@@ -81,6 +110,90 @@ def _intersect_rays(rays: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray | N
     if np.linalg.cond(matrix) > 1e8:
         return None
     return np.linalg.solve(matrix, target)
+
+
+def regularized_ray_intersection(
+    rays: list[tuple[np.ndarray, np.ndarray]],
+    prior: np.ndarray,
+    weight: float,
+) -> np.ndarray | None:
+    """Intersect rays while softly anchoring the solution to a 3-D prior.
+
+    Two cameras with a small baseline constrain image position well but leave
+    depth poorly conditioned.  A temporal prior turns that ill-conditioned
+    intersection into the regularized least-squares problem
+
+    ``sum ||(I-dd^T)(p-c)||² + weight ||p-prior||²``.
+
+    ``weight`` is dimensionless relative to the ray normal equations.  The
+    caller is responsible for deciding when the prior is trustworthy; this
+    function only solves the bounded linear system and rejects non-finite
+    inputs.
+    """
+    prior = np.asarray(prior, dtype=np.float64)
+    if prior.shape != (3,) or not np.all(np.isfinite(prior)) or len(rays) < 2:
+        return None
+    lam = max(float(weight), 0.0)
+    matrix = np.eye(3) * lam
+    target = lam * prior
+    identity = np.eye(3)
+    valid = 0
+    for center, direction in rays:
+        center = np.asarray(center, dtype=np.float64)
+        direction = np.asarray(direction, dtype=np.float64)
+        norm = float(np.linalg.norm(direction))
+        if (
+            center.shape != (3,)
+            or direction.shape != (3,)
+            or not np.all(np.isfinite(center))
+            or not np.all(np.isfinite(direction))
+            or norm <= 1e-9
+        ):
+            continue
+        direction = direction / norm
+        projector = identity - np.outer(direction, direction)
+        matrix += projector
+        target += projector @ center
+        valid += 1
+    if valid < 2:
+        return None
+    try:
+        point = np.linalg.solve(matrix, target)
+    except np.linalg.LinAlgError:
+        return None
+    return point if np.all(np.isfinite(point)) else None
+
+
+def _maximum_ray_angle_deg(
+    rays: list[tuple[np.ndarray, np.ndarray]],
+) -> float:
+    maximum = 0.0
+    for first, second in itertools.combinations(rays, 2):
+        cosine = float(np.clip(np.dot(first[1], second[1]), -1.0, 1.0))
+        maximum = max(maximum, float(np.degrees(np.arccos(cosine))))
+    return maximum
+
+
+def _pairwise_triangulation_points(
+    rays: list[tuple[np.ndarray, np.ndarray]],
+) -> list[np.ndarray]:
+    """Return well-conditioned pair intersections for a ray set.
+
+    A least-squares intersection can have a low reprojection error even when
+    different camera pairs imply materially different depths.  Keeping the
+    pair solutions lets the caller detect that ambiguity before accepting a
+    depth branch.
+    """
+    points: list[np.ndarray] = []
+    for first, second in itertools.combinations(rays, 2):
+        cosine = float(np.clip(np.dot(first[1], second[1]), -1.0, 1.0))
+        angle = float(np.degrees(np.arccos(cosine)))
+        if angle < MIN_TRIANGULATION_ANGLE_DEG:
+            continue
+        point = _intersect_rays([first, second])
+        if point is not None and np.all(np.isfinite(point)):
+            points.append(point)
+    return points
 
 
 def _errors(
@@ -106,9 +219,14 @@ def triangulate_ransac(
     threshold_px: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rays = [_ray_in_base(camera, pixel) for _, camera, pixel in observations]
-    best: tuple[int, float, np.ndarray, np.ndarray] | None = None
+    # (inlier count, negative median error, pair angle, point, inlier mask)
+    best: tuple[int, float, float, np.ndarray, np.ndarray] | None = None
     for first, second in itertools.combinations(range(len(observations)), 2):
         if rays[first] is None or rays[second] is None:
+            continue
+        cosine = float(np.clip(np.dot(rays[first][1], rays[second][1]), -1.0, 1.0))
+        pair_angle = float(np.degrees(np.arccos(cosine)))
+        if pair_angle < MIN_TRIANGULATION_ANGLE_DEG:
             continue
         point = _intersect_rays([rays[first], rays[second]])
         if point is None:
@@ -117,18 +235,91 @@ def triangulate_ransac(
         inliers = np.isfinite(errors) & (errors <= threshold_px)
         count = int(inliers.sum())
         score = float(np.median(errors[inliers])) if count else float("inf")
-        candidate = (count, -score, point, inliers)
-        if best is None or candidate[:2] > best[:2]:
+        # Prefer a better-conditioned pair when support and reprojection are
+        # tied.  This is a tie breaker only; image agreement remains primary.
+        candidate = (count, -score, pair_angle, point, inliers)
+        if best is None or candidate[:3] > best[:3]:
             best = candidate
     if best is None or best[0] < 2:
         return np.full(3, np.nan), np.full(len(observations), np.inf), np.zeros(len(observations), bool)
-    inlier_rays = [rays[index] for index in np.flatnonzero(best[3]) if rays[index] is not None]
+    inlier_rays = [rays[index] for index in np.flatnonzero(best[4]) if rays[index] is not None]
     point = _intersect_rays(inlier_rays)
     if point is None:
-        point = best[2]
+        point = best[3]
     errors = _errors(point, observations)
     inliers = np.isfinite(errors) & (errors <= threshold_px)
+    final_rays = [
+        rays[index] for index in np.flatnonzero(inliers)
+        if rays[index] is not None
+    ]
+    if (
+        len(final_rays) < 2
+        or _maximum_ray_angle_deg(final_rays) < MIN_TRIANGULATION_ANGLE_DEG
+        or not np.all(np.isfinite(point))
+        or float(np.linalg.norm(point)) > MAX_TRIANGULATED_BASE_DISTANCE_M
+    ):
+        return (
+            np.full(3, np.nan),
+            errors,
+            np.zeros(len(observations), dtype=bool),
+        )
+    # Reject intersections that lie essentially on a camera centre.  Such a
+    # point is a classic low-baseline/depth branch: every selected pixel can
+    # still be explained, but the recovered depth is physically meaningless.
+    ray_distances = np.asarray(
+        [np.linalg.norm(point - rays[index][0]) for index in np.flatnonzero(inliers)
+         if rays[index] is not None],
+        dtype=np.float64,
+    )
+    if (
+        ray_distances.size < 2
+        or not np.all(np.isfinite(ray_distances))
+        or float(np.min(ray_distances)) < MIN_TRIANGULATED_CAMERA_DISTANCE_M
+    ):
+        return (
+            np.full(3, np.nan),
+            errors,
+            np.zeros(len(observations), dtype=bool),
+        )
+    pair_points = _pairwise_triangulation_points(final_rays)
+    if len(pair_points) >= 2:
+        pair_array = np.asarray(pair_points, dtype=np.float64)
+        pair_centre = np.median(pair_array, axis=0)
+        pair_spread = np.linalg.norm(pair_array - pair_centre, axis=1)
+        # Pair disagreement is a depth-branch ambiguity, not ordinary pixel
+        # noise.  Reject only a high quantile so one noisy camera does not
+        # discard an otherwise well-supported point.
+        if float(np.percentile(pair_spread, 75)) > MAX_PAIR_POINT_SPREAD_M:
+            return (
+                np.full(3, np.nan),
+                errors,
+                np.zeros(len(observations), dtype=bool),
+            )
     return point, errors, inliers
+
+
+def _reject_gross_hand_geometry(
+    points: np.ndarray,
+    inlier_mask: np.ndarray,
+    inlier_counts: np.ndarray,
+) -> int:
+    """Invalidate isolated triangulations outside a physical hand envelope."""
+    rejected = 0
+    for _ in range(2):
+        finite = np.isfinite(points).all(axis=1)
+        joints = np.flatnonzero(finite)
+        if len(joints) < 5:
+            break
+        centre = np.median(points[joints], axis=0)
+        distances = np.linalg.norm(points[joints] - centre, axis=1)
+        bad = joints[distances > MAX_TRIANGULATED_HAND_RADIUS_M]
+        if not len(bad):
+            break
+        points[bad] = np.nan
+        inlier_mask[bad] = False
+        inlier_counts[bad] = 0
+        rejected += len(bad)
+    return rejected
 
 
 def _triangulate_hand(
@@ -154,11 +345,109 @@ def _triangulate_hand(
         inlier_counts[joint] = int(inliers.sum())
         if inlier_counts[joint] >= min_views:
             points[joint] = point
+    geometry_rejected_joints = _reject_gross_hand_geometry(
+        points, inlier_mask, inlier_counts
+    )
+    # Keep the conditioning information alongside the reconstructed points.
+    # Reprojection error alone is not enough to identify an unstable stereo
+    # branch: two nearly parallel rays can intersect at an arbitrary depth and
+    # still explain both pixels almost perfectly.  These per-joint summaries
+    # are consumed by the guided selector and are also serialized for audit.
+    joint_ray_angles = np.full(21, np.nan, dtype=np.float64)
+    joint_pair_spreads = np.full(21, np.nan, dtype=np.float64)
+    # Conditioning of the palm anchors determines whether the whole hand is
+    # trustworthy.  Computing pair intersections for all 21 joints inside the
+    # already combinatorial candidate enumeration was needlessly expensive;
+    # retain the full-shaped arrays for compatibility but evaluate the five
+    # palm joints only.
+    conditioning_joints = (0, 5, 9, 13, 17)
+    for joint in conditioning_joints:
+        if not np.all(np.isfinite(points[joint])):
+            continue
+        ray_values = []
+        for index, camera in enumerate(cameras):
+            if not inlier_mask[joint, index]:
+                continue
+            pixel_values = np.asarray(
+                selected[camera].get("joints_2d", [])[joint], dtype=np.float64
+            )
+            if pixel_values.shape != (2,) or not np.all(np.isfinite(pixel_values)):
+                continue
+            ray = _ray_in_base(calibrations[camera], pixel_values)
+            if ray is not None:
+                ray_values.append(ray)
+        if len(ray_values) < 2:
+            continue
+        angles = []
+        pair_points = []
+        for first, second in itertools.combinations(ray_values, 2):
+            cosine = float(np.clip(np.dot(first[1], second[1]), -1.0, 1.0))
+            angles.append(float(np.degrees(np.arccos(cosine))))
+            if angles[-1] >= MIN_TRIANGULATION_ANGLE_DEG:
+                pair_point = _intersect_rays([first, second])
+                if pair_point is not None and np.all(np.isfinite(pair_point)):
+                    pair_points.append(pair_point)
+        if angles:
+            # The largest inlier-ray angle is the useful conditioning angle:
+            # it is the pair RANSAC prefers when image support is tied.
+            joint_ray_angles[joint] = max(angles)
+        if len(pair_points) >= 2:
+            pair_array = np.asarray(pair_points, dtype=np.float64)
+            pair_centre = np.median(pair_array, axis=0)
+            joint_pair_spreads[joint] = float(np.percentile(
+                np.linalg.norm(pair_array - pair_centre, axis=1), 75
+            ))
+    geometry_rejection_reasons: list[str] = []
+    finite_points = np.isfinite(points).all(axis=1)
+    palm_indices = np.asarray([0, 5, 9, 13, 17], dtype=np.int64)
+    finite_palm = finite_points[palm_indices]
+    palm_width = float("nan")
+    camera_distance = float("nan")
+    if np.count_nonzero(finite_palm) >= 3:
+        palm_values = points[palm_indices[finite_palm]]
+        palm_center = np.median(palm_values, axis=0)
+        if np.all(np.isfinite(palm_center)):
+            centers = np.asarray(
+                [calibrations[camera].T_base_camera[:3, 3] for camera in cameras],
+                dtype=np.float64,
+            )
+            camera_distance = float(np.min(
+                np.linalg.norm(palm_center[None] - centers, axis=1)
+            )) if len(centers) else float("nan")
+        if finite_points[5] and finite_points[17]:
+            palm_width = float(np.linalg.norm(points[5] - points[17]))
+        if np.isfinite(camera_distance) and (
+            camera_distance < MIN_TRIANGULATED_CAMERA_DISTANCE_M
+        ):
+            geometry_rejection_reasons.append("near_camera_hand_center")
+        if np.isfinite(palm_width) and (
+            palm_width < MIN_TRIANGULATED_PALM_WIDTH_M
+            or palm_width > MAX_TRIANGULATED_PALM_WIDTH_M
+        ):
+            geometry_rejection_reasons.append("implausible_palm_width")
+    # The physical envelope is a hand-level gate.  Do not leave a partially
+    # valid pseudo-hand for later temporal code to propagate when its palm is
+    # already impossible; retaining the reason makes the rejection auditable.
+    if geometry_rejection_reasons:
+        geometry_rejected_joints += int(np.count_nonzero(finite_points))
+        points[:] = np.nan
+        inlier_mask[:] = False
+        inlier_counts[:] = 0
     finite_errors = errors[np.isfinite(errors)]
     inlier_errors = errors[inlier_mask & np.isfinite(errors)]
     valid_joints = int(np.count_nonzero(np.isfinite(points).all(axis=1)))
     median = float(np.median(inlier_errors)) if len(inlier_errors) else float("inf")
     p95 = float(np.percentile(inlier_errors, 95)) if len(inlier_errors) else float("inf")
+    finite_angles = joint_ray_angles[np.isfinite(joint_ray_angles)]
+    finite_spreads = joint_pair_spreads[np.isfinite(joint_pair_spreads)]
+    palm_indices = np.asarray([0, 5, 9, 13, 17], dtype=np.int64)
+    finite_palm = np.isfinite(points[palm_indices]).all(axis=1)
+    palm_angles = joint_ray_angles[palm_indices]
+    palm_angles = palm_angles[np.isfinite(palm_angles)]
+    palm_spreads = joint_pair_spreads[palm_indices]
+    palm_spreads = palm_spreads[np.isfinite(palm_spreads)]
+    palm_support = inlier_counts[palm_indices][finite_palm]
+    support_values = inlier_counts[np.isfinite(points).all(axis=1)]
     return {
         "side": side,
         "cameras": list(cameras),
@@ -167,6 +456,10 @@ def _triangulate_hand(
         "inlier_mask": inlier_mask,
         "inlier_counts": inlier_counts,
         "valid_joints": valid_joints,
+        "geometry_rejected_joints": geometry_rejected_joints,
+        "geometry_rejection_reasons": geometry_rejection_reasons,
+        "palm_width_m": palm_width,
+        "camera_distance_m": camera_distance,
         "median_px": median,
         "p95_px": p95,
         "all_view_median_px": (
@@ -174,6 +467,42 @@ def _triangulate_hand(
         ),
         "all_view_p95_px": (
             float(np.percentile(finite_errors, 95)) if len(finite_errors) else float("inf")
+        ),
+        "joint_ray_angle_deg": joint_ray_angles,
+        "joint_pair_spread_m": joint_pair_spreads,
+        "ray_angle_min_deg": (
+            float(np.min(finite_angles)) if len(finite_angles) else float("nan")
+        ),
+        "ray_angle_p25_deg": (
+            float(np.percentile(finite_angles, 25)) if len(finite_angles) else float("nan")
+        ),
+        "ray_angle_median_deg": (
+            float(np.median(finite_angles)) if len(finite_angles) else float("nan")
+        ),
+        "palm_ray_angle_min_deg": (
+            float(np.min(palm_angles)) if len(palm_angles) else float("nan")
+        ),
+        "palm_ray_angle_p25_deg": (
+            float(np.percentile(palm_angles, 25)) if len(palm_angles) else float("nan")
+        ),
+        "palm_ray_angle_median_deg": (
+            float(np.median(palm_angles)) if len(palm_angles) else float("nan")
+        ),
+        "pair_spread_p75_m": (
+            float(np.percentile(finite_spreads, 75)) if len(finite_spreads) else 0.0
+        ),
+        "pair_spread_max_m": (
+            float(np.max(finite_spreads)) if len(finite_spreads) else 0.0
+        ),
+        "palm_pair_spread_p75_m": (
+            float(np.percentile(palm_spreads, 75)) if len(palm_spreads) else 0.0
+        ),
+        "palm_three_view_count": int(np.count_nonzero(palm_support >= 3)),
+        "palm_two_view_fraction": (
+            float(np.mean(palm_support == 2)) if len(palm_support) else 1.0
+        ),
+        "two_view_joint_fraction": (
+            float(np.mean(support_values == 2)) if len(support_values) else 1.0
         ),
     }
 
@@ -265,6 +594,21 @@ def _serialize_hand(
             "multiview_reprojection_p95_px": result["p95_px"],
             "all_view_reprojection_median_px": result["all_view_median_px"],
             "all_view_reprojection_p95_px": result["all_view_p95_px"],
+            "geometry_rejected_joint_count": int(
+                result.get("geometry_rejected_joints", 0)
+            ),
+            "ray_angle_min_deg": result.get("ray_angle_min_deg"),
+            "ray_angle_p25_deg": result.get("ray_angle_p25_deg"),
+            "ray_angle_median_deg": result.get("ray_angle_median_deg"),
+            "palm_ray_angle_min_deg": result.get("palm_ray_angle_min_deg"),
+            "palm_ray_angle_p25_deg": result.get("palm_ray_angle_p25_deg"),
+            "palm_ray_angle_median_deg": result.get("palm_ray_angle_median_deg"),
+            "pair_spread_p75_m": result.get("pair_spread_p75_m"),
+            "pair_spread_max_m": result.get("pair_spread_max_m"),
+            "palm_pair_spread_p75_m": result.get("palm_pair_spread_p75_m"),
+            "palm_three_view_count": result.get("palm_three_view_count"),
+            "palm_two_view_fraction": result.get("palm_two_view_fraction"),
+            "two_view_joint_fraction": result.get("two_view_joint_fraction"),
         },
         "stereo_baseline_comparison": _baseline_comparison(
             result, selected, calibrations, baseline_cameras

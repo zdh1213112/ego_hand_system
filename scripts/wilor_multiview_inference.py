@@ -7,6 +7,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import csv
 import gc
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -34,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--checkpoint", type=Path, default=PROJECT_ROOT / "models/wilor/wilor_final.ckpt")
     parser.add_argument("--model-config", type=Path, default=PROJECT_ROOT / "models/wilor/model_config.yaml")
-    parser.add_argument("--detector", type=Path, default=PROJECT_ROOT / "models/wilor/detector.pt")
+    parser.add_argument("--detector", type=Path, default=PROJECT_ROOT / "models/wilor/best.pt")
     parser.add_argument("--mano-model-dir", type=Path, default=PROJECT_ROOT / "models/mano")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -67,6 +68,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rescale-factor", type=float, default=2.0)
     parser.add_argument("--max-frames", type=int, default=0)
     return parser.parse_args()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validated_detector_names(detector) -> dict[int, str]:
+    names = detector.names
+    if isinstance(names, (list, tuple)):
+        names = dict(enumerate(names))
+    normalized = {int(index): str(name).strip().lower() for index, name in names.items()}
+    expected = {0: "left", 1: "right"}
+    if normalized != expected:
+        raise ValueError(
+            "WiLoR detector must contain exactly class 0='left' and class 1='right'; "
+            f"got {normalized}"
+        )
+    return normalized
 
 
 def infer_dual(
@@ -392,6 +415,7 @@ def main() -> int:
                 flush=True,
             )
     detector = base.load_detector(args.detector, device)
+    detector_names = _validated_detector_names(detector)
     camera_summaries = {}
     inference_started = time.perf_counter()
     for camera in cameras:
@@ -484,6 +508,11 @@ def main() -> int:
         "camera_ids": list(cameras),
         "frame_count": len(rows),
         "hypotheses_per_detection": 2,
+        "detector": {
+            "path": str(args.detector.resolve()),
+            "sha256": _sha256_file(args.detector.resolve()),
+            "class_names": detector_names,
+        },
         "gpu_profile": args.gpu_profile,
         "frame_batch_size": frame_batch_size,
         "hypothesis_batch_size": args.batch_size,

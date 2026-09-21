@@ -53,6 +53,13 @@ class MultiviewGpuProfileTests(unittest.TestCase):
         self.assertIn("cv2.GaussianBlur", inference)
         self.assertIn("torch.compile", inference)
 
+    def test_hand_specific_detector_is_default_and_validated(self):
+        inference = INFERENCE.read_text(encoding="utf-8")
+        self.assertIn('PROJECT_ROOT / "models/wilor/best.pt"', inference)
+        self.assertIn("_validated_detector_names", inference)
+        self.assertIn('expected = {0: "left", 1: "right"}', inference)
+        self.assertIn('"sha256": _sha256_file', inference)
+
 
 if __name__ == "__main__":
     unittest.main()
