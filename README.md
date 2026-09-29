@@ -232,6 +232,87 @@ RTX 5060 保持默认的
 脚本会自动使用 `camera2/3` 作为锚点，并生成 `diagnostic_4view.mp4`；确认冒烟测试后将
 `--max-frames` 改为 `0` 运行完整数据。
 
+### 新 Orbbec EGO Pro 四目 MCAP：原始 WiLoR 基线
+
+新款 EGO Pro 录制目录（包含一个 `.mcap` 和对应 `meta_*.json`）使用以下适配脚本：
+
+```bash
+./scripts/run_orbbec_multiview_wilor.sh \
+  --input /home/p3/data_sda1/ego_hand_system/recordings/new/EGO_Pro_AZLR86000F7_20260917_170004 \
+  --output /home/p3/data_sda1/ego_hand_system/output/orbbec_20260917_170004_raw_wilor \
+  --conda-env ego-hand --device cuda --gpu-profile rtx5090d --max-frames 0 \
+  --optimized-video
+```
+
+它把 `/camera/left`、`left_side`、`right`、`right_side` 无损 remux 为
+`camera0..camera3`，按设备时间戳同步，然后逐路运行双假设 WiLoR。输出的
+`fusion_multiview/raw_wilor_2d_4view.mp4` 只画原始相机内 2D 框和 21 点骨架，不启用
+SAM3、三角化、3D 融合或时序修正。这个 MCAP 没有 `camera_info`，因此适配器不会伪造
+标定；要做 3D 融合，需另行提供每路内参/畸变和统一坐标系外参，可通过
+`--calibration-dir` 传入 `camera0.json` ... `camera3.json`。增加 `--optimized-video` 后还会
+生成 `fusion_multiview/optimized_wilor_2d_dedup_quality15_4view.mp4`：它只应用之前验证过的
+二维身份锁定、重复框合并、短时序保持和可见关节质量门控，不改变原始预测文件。
+
+### Orbbec EGO Pro 四路 MP4 导出：复用 GEN 多视角链路
+
+`recordings/20260928` 这类录制目录包含四路 MP4、各路 `*_pts.csv` 和
+`*_calibration_camera.yaml`。规范化器使用 YAML 中的相机 ID 建立映射：
+`camera0=left/cam_0`、`camera1=right/cam_1`、`camera2=right_side/cam_2`、
+`camera3=left_side/cam_3`。输入适配器输出与 GEN 相同的 `normalized_multiview`
+数据格式，并保留 KB 鱼眼标定。后续复用 GEN 的逐路双假设 WiLoR、跨视角匹配、
+3D 融合、关节时序与质量后处理、诊断渲染链路；融合及后处理判据与 GEN 保持一致。
+
+先运行 60 帧检查数据适配和融合结果：
+
+```bash
+./scripts/run_multiview_wilor_experiment.sh \
+  --session recordings/20260928/EGO_Pro_AZLR86000F7_20260928_135841 \
+  --output output/0928/ego4_135841_anchor01 --max-frames 60 --device cuda
+```
+
+输出 `fusion_multiview/diagnostic_4view.mp4` 和相应的融合结果。EGO4 四目恢复
+`camera0, camera1` 的首选锚点顺序；这对相机在当前帧不可用或未通过质量检查时，
+再尝试其他相机对。
+输入适配还设置相机选择、主视角、
+标定模型及其射线反投影，不启用额外的单手双目放宽判据。
+如需最终交付视频，添加 `--final-video`。对这段录制前 60 帧的实测中，WiLoR
+四路分别只在 17、2、5、10 帧检出手；GEN 严格融合判据接受 0 帧，原因是没有形成
+“两路相机同时观测到双手”的有效锚点。原始四目 MCAP 的 2D 基线仍可通过
+`run_orbbec_multiview_wilor.sh` 单独运行，适合定位检测问题。确认 60 帧后，
+使用新目录和 `--max-frames 0` 跑完整录制。
+旧目录 `output/0928/ego4_135841` 使用了不同的左右手处理和单手双目判据，
+不能用于当前 GEN 严格链路的断点续跑。
+
+需要把融合结果送入 MANO 序列拟合时，选择主视角双目导出：
+
+```bash
+conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
+  python scripts/prepare_multiview_mano_input.py \
+  --dataset output/0928/ego4_135841_anchor01/normalized_multiview \
+  --fusion output/0928/ego4_135841_anchor01/fusion_multiview \
+  --left-camera camera0 --right-camera camera1 \
+  --output output/0928/ego4_135841_anchor01/mano_input.npz \
+  --rectification-output output/0928/ego4_135841_anchor01/mano_rectification.npz
+```
+
+`recordings/20260928` 下的每个录制子目录单独指定给 `--session`，并使用各自的输出目录。
+
+如果只需要接近第一人称演示的连续骨架画面，可从已完成的逐相机预测生成单主视角视频：
+
+```bash
+conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
+  python scripts/render_native_2d_multiview.py \
+  --dataset output/0928/ego4_135841_test/normalized_multiview \
+  --predictions output/0928/ego4_135841_test/wilor_multiview \
+  --output output/0928/ego4_135841_test/hand_pose_single_view_final.mp4 \
+  --cameras camera0 --columns 1 --tile-width 1200 --crop-top-px 300 \
+  --min-visible-joints 15 --max-hold-frames 2 --overlay-style clean
+```
+
+`--crop-top-px 300` 只针对 `135841` 中双手始终位于画面下方的录制验证过；其它录制应先检查手是否会进入裁掉的区域。`clean` 仅隐藏诊断框和文字，不改变关节数据。`native_2d` 视频展示的是 2D 跟踪，不能作为 3D 精度证明。
+
+需要保留只有一只手通过多视角质量门限的帧时，在新输出目录运行 EGO4 流程并加 `--allow-single-hand-anchors 1`。这个选项仍要求至少两路真实观测通过几何检查；默认值保持为 `0`。在 `135841` 前 60 帧，开启后保留了原有 39 帧双手结果，并增加 20 帧单手结果。
+
 确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
 序列。脚本会生成 `fusion_multiview/diagnostic_6view.mp4`，其中六个画面按 3x2 排列；
 绿色 `USED` 显示该相机实际贡献的内点关节，灰色 `INACTIVE` 表示未参与，红色
@@ -282,8 +363,9 @@ RTX 5060 保持默认的
 ```
 
 视频编码会优先使用 PyAV 的 `h264_nvenc`，不可用时自动回退到 OpenCV `mp4v`。
-渲染会并行读取六路视频并预取下一帧；添加 `--final-video` 时，诊断版与最终版在同一次
-六路解码中生成，避免重复读取完整视频。
+渲染会并行读取六路视频并预取下一帧；添加 `--final-video` 时，先生成诊断版，再生成
+保守的 trusted-3D/native-2D 混合交付版（可用 `EGO_FINAL_RENDERER=fused` 显式恢复纯
+融合 3D）。混合版只在深度几何可靠时显示 3D，否则显示该相机的原生 2D，避免扭曲手指。
 normalization 的 remux 完整性校验也会优先使用六路并行 `h264_cuvid`/NVDEC，不支持
 NVDEC 的机器自动回退到软件 H.264 解码。
 
@@ -314,7 +396,7 @@ gen6_batch_5090d/
 ./scripts/run_multiview_wilor_label_batch.sh \
   --experiment-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
   --layout separate \
-  --conda-env ego-hand --device cuda \
+  --conda-env ego-hand --device cuda --gpu-profile rtx5090d \
   --export-camera camera2 --view-filter complete21 \
   --max-samples 0
 ```
@@ -332,13 +414,15 @@ gen6_batch_5090d/
   --visualization-samples 20 \
   --view-filter complete21 \
   --sample-stride 10 \
-  --conda-env ego-hand --device cuda \
+  --conda-env ego-hand --device cuda --gpu-profile rtx5090d \
   --export-camera camera2 --view-filter complete21 \
   --max-samples 0
 ```
 
 合并模式在 `runs/<实验名>/` 保留每段录制的 MANO 拟合和断点缓存，最终训练集位于
 `dataset/`。图片和标签统一重新编号，`.npy` 内容不修改，`index.jsonl` 额外记录来源实验。
+`rtx5090d` 标签配置使用 CUDA 拟合和大批次 GPU 校验。实测并发拟合会产生 GPU 争用，
+因此默认 `--workers 1`；`--workers 2|3` 仅建议在独占 GPU 时试验。
 
 ### GEN 四目子集测试
 
@@ -416,6 +500,18 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
 和手框的 JPG。每张图会将同一个 `sync_index` 的左右手画在一起；可用
 `--visualization-samples 20` 调整数量，或用 `--render-visualization 0` 关闭。
 
+按来源录制生成完整标签可视化视频：
+
+```bash
+PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
+  python scripts/render_wilor_training_videos.py \
+  --dataset /path/to/merged/dataset \
+  --output /path/to/merged/dataset/visualization_videos \
+  --cameras camera2 --fps 10 --workers 2 --video-codec auto
+```
+
+`auto` 优先使用 NVIDIA NVENC；合并训练集会为每个 `source_experiment` 单独生成 MP4。
+
 ```bash
 ./scripts/run_multiview_wilor_label_export.sh \
   --experiment /home/zdh/ego_hand_system/output/gen4_new_run \
@@ -426,7 +522,7 @@ PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
   --layout merged \
   --export-camera camera2 \
   --view-filter complete21 \
-  --sample-stride 10 \
+  --sample-stride 5 \
   --visualization-samples 20 \
   --max-samples 0
 ```

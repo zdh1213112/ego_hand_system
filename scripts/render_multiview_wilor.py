@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import csv
 from fractions import Fraction
@@ -165,6 +166,109 @@ def parse_args() -> argparse.Namespace:
             "fusion result saved before anatomical/temporal refinement"
         ),
     )
+    parser.add_argument(
+        "--final-min-valid-joints", type=int, default=21,
+        help=(
+            "minimum finite joints required before drawing a final 3-D hand "
+            "or using it as a continuous-gap endpoint; the default 21 keeps "
+            "a missing finger from being rendered as a distorted skeleton"
+        ),
+    )
+    parser.add_argument(
+        "--final-min-joint-inlier-views", type=int, default=3,
+        help=(
+            "minimum independent camera inliers required for every final 3-D "
+            "joint; hands with a sparser joint fall back to native WiLoR 2-D"
+        ),
+    )
+    parser.add_argument(
+        "--final-require-local-view", type=int, choices=(0, 1), default=1,
+        help=(
+            "in final-only mode, draw a fused hand in a camera only when that "
+            "camera has a local observation; this prevents an occluded tile "
+            "from showing a stale pose projected from another camera"
+        ),
+    )
+    parser.add_argument(
+        "--interpolate-short-gaps", type=int, choices=(0, 1), default=0,
+        help=(
+            "for final/diagnostic review videos only, geodesically fill a "
+            "1--2 frame rejected gap when both endpoint poses are well supported; "
+            "the fusion JSONL remains unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--short-gap-max-frames", type=int, default=2,
+        help="maximum rejected gap length eligible for display interpolation",
+    )
+    parser.add_argument(
+        "--short-gap-max-step-m", type=float, default=0.060,
+        help="maximum endpoint motion per frame accepted for display interpolation",
+    )
+    parser.add_argument(
+        "--interpolate-all-gaps", type=int, choices=(0, 1), default=0,
+        help=(
+            "fill every bounded hand-track gap for visualization only; the "
+            "synthetic poses are labeled PREDICTED and fusion JSONL is unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--all-gap-max-frames", type=int, default=0,
+        help=(
+            "maximum gap length for --interpolate-all-gaps (0 means no "
+            "length limit)"
+        ),
+    )
+    parser.add_argument(
+        "--all-gap-max-step-m", type=float, default=0.0,
+        help=(
+            "optional endpoint displacement per frame bound for all-gap "
+            "prediction (0 means no bound)"
+        ),
+    )
+    parser.add_argument(
+        "--all-gap-prediction-mode",
+        choices=("hold", "hold-previous", "linear", "geodesic"),
+        default="hold",
+        help=(
+            "pose used for display-only long-gap prediction: geodesically "
+            "blend rigid finger bones (smooth, fixed-length), or linearly "
+            "blend all joints (legacy; may deform fingers), hold the nearest "
+            "trusted endpoint, or hold the previous endpoint for the whole "
+            "gap; hold is the safe default for delivery review"
+        ),
+    )
+    parser.add_argument(
+        "--final-predicted-2d-fallback", type=int, choices=(0, 1), default=0,
+        help=(
+            "in final-only review, draw the current camera's WiLoR 2-D "
+            "observation for a hand whose 3-D pose is synthetic or invalid; "
+            "this avoids showing a twisted geodesic pose during a depth gap"
+        ),
+    )
+    parser.add_argument(
+        "--final-2d-residual-fallback-px", type=float, default=0.0,
+        help=(
+            "in final-only review, use the current camera's observed 2-D "
+            "hand when the projected 3-D pose has a residual percentile above "
+            "this value; 0 disables the per-camera fallback"
+        ),
+    )
+    parser.add_argument(
+        "--final-2d-residual-percentile", type=float, default=50.0,
+        help=(
+            "percentile of per-joint projected-vs-observed 2-D residual used "
+            "by --final-2d-residual-fallback-px (50 means median)"
+        ),
+    )
+    parser.add_argument(
+        "--final-wrist-residual-fallback-px", type=float, default=0.0,
+        help=(
+            "fallback to the native camera 2-D pose when the projected "
+            "fused wrist differs from that camera by more than this many "
+            "pixels; 0 disables the wrist-specific gate"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -246,6 +350,545 @@ def _load_jsonl(path: Path) -> dict[int, dict]:
             if line.strip()
         )
     }
+
+
+def _interpolate_short_gap_results(
+    rows: list[dict[str, str]],
+    accepted: dict[int, dict],
+    *,
+    max_gap_frames: int = 2,
+    max_step_m: float = 0.060,
+) -> dict[int, dict]:
+    """Create conservative display-only poses for very short rejected gaps.
+
+    Fusion rows remain unchanged: a rejected frame is still rejected in the
+    JSONL output.  For a review video only, a one- or two-frame gap may be
+    filled when both endpoint poses belong to the same physical hand, have at
+    least 18 common finite joints, and their endpoint displacement is within a
+    plausible per-frame motion bound.  Long gaps and ambiguous reacquisition
+    are left blank instead of inventing a trajectory.
+    """
+    if max_gap_frames <= 0 or max_step_m <= 0.0 or not accepted:
+        return {}
+    ordered_ids = [int(row["sync_index"]) for row in rows]
+    ordered_id_set = set(ordered_ids)
+    accepted_ids = sorted(int(sync_index) for sync_index in accepted)
+    interpolated: dict[int, dict] = {}
+
+    def _points(hand: dict, key: str) -> np.ndarray:
+        value = np.asarray(hand.get(key, []), dtype=np.float64)
+        if value.shape != (21, 3):
+            return np.full((21, 3), np.nan, dtype=np.float64)
+        return value
+
+    def _view_between(
+        previous: dict | None, following: dict | None, alpha: float,
+    ) -> dict | None:
+        if previous is None and following is None:
+            return None
+        if previous is None:
+            return copy.deepcopy(following)
+        if following is None:
+            return copy.deepcopy(previous)
+        view = copy.deepcopy(previous)
+        for key in ("bbox_xyxy", "joints_2d", "wilor_joints_2d"):
+            first = np.asarray(previous.get(key, []), dtype=np.float64)
+            second = np.asarray(following.get(key, []), dtype=np.float64)
+            if first.shape != second.shape or first.size == 0:
+                continue
+            if not np.isfinite(first).all() or not np.isfinite(second).all():
+                continue
+            view[key] = ((1.0 - alpha) * first + alpha * second).tolist()
+        view["confidence"] = float(
+            (1.0 - alpha) * float(previous.get("confidence", 0.0))
+            + alpha * float(following.get("confidence", 0.0))
+        )
+        view["interpolated"] = True
+        return view
+
+    # Work pair-by-pair so every missing frame in a short block uses the same
+    # two trusted endpoint identities.  This avoids chaining a synthetic pose
+    # into the next interpolation decision.
+    for previous_id, following_id in zip(accepted_ids, accepted_ids[1:]):
+        gap = following_id - previous_id - 1
+        if gap <= 0 or gap > int(max_gap_frames):
+            continue
+        previous_result = accepted[previous_id]
+        following_result = accepted[following_id]
+        previous_hands = {
+            int(hand.get("side", -1)): hand
+            for hand in previous_result.get("hands", [])
+            if int(hand.get("side", -1)) in (0, 1)
+        }
+        following_hands = {
+            int(hand.get("side", -1)): hand
+            for hand in following_result.get("hands", [])
+            if int(hand.get("side", -1)) in (0, 1)
+        }
+        for offset in range(1, gap + 1):
+            sync_index = previous_id + offset
+            if sync_index not in ordered_id_set or sync_index in accepted:
+                continue
+            alpha = float(offset) / float(gap + 1)
+            hands: list[dict] = []
+            for side in (0, 1):
+                previous_hand = previous_hands.get(side)
+                following_hand = following_hands.get(side)
+                if previous_hand is None or following_hand is None:
+                    continue
+                previous_points = _points(previous_hand, "joints_base_m")
+                following_points = _points(following_hand, "joints_base_m")
+                common = (
+                    np.isfinite(previous_points).all(axis=1)
+                    & np.isfinite(following_points).all(axis=1)
+                )
+                if int(np.count_nonzero(common)) < 18:
+                    continue
+                endpoint_steps = np.linalg.norm(
+                    following_points[common] - previous_points[common], axis=1
+                )
+                # Use the maximum endpoint displacement, not only the wrist:
+                # a depth branch in one fingertip must not be hidden by a
+                # plausible palm translation.
+                if (
+                    not np.isfinite(endpoint_steps).all()
+                    or float(np.max(endpoint_steps))
+                    > float(max_step_m) * float(gap + 1)
+                ):
+                    continue
+                # Interpolate bone directions on the sphere rather than
+                # blending each distal joint independently.  The latter can
+                # change finger length/shape in the one- or two-frame gap
+                # and is the same visible morph that the long-gap geodesic
+                # path was introduced to avoid.
+                points = _geodesic_hand_pose(
+                    previous_points, following_points, alpha
+                )
+                hand = copy.deepcopy(previous_hand)
+                hand["joints_base_m"] = points.tolist()
+                for key in ("unrefined_joints_base_m",):
+                    first = _points(previous_hand, key)
+                    second = _points(following_hand, key)
+                    finite = (
+                        np.isfinite(first).all(axis=1)
+                        & np.isfinite(second).all(axis=1)
+                    )
+                    if int(np.count_nonzero(finite)) >= 18:
+                        value = np.full((21, 3), np.nan, dtype=np.float64)
+                        value[finite] = first[finite]
+                        for chain in _GEO_CHAINS:
+                            for parent, child in zip(chain[:-1], chain[1:]):
+                                if not (finite[parent] and finite[child]):
+                                    continue
+                                first_vector = first[child] - first[parent]
+                                second_vector = second[child] - second[parent]
+                                first_length = float(np.linalg.norm(first_vector))
+                                second_length = float(np.linalg.norm(second_vector))
+                                if first_length <= 1e-8 or second_length <= 1e-8:
+                                    continue
+                                direction = _slerp_direction(
+                                    first_vector, second_vector, alpha
+                                )
+                                value[child] = value[parent] + (
+                                    (1.0 - alpha) * first_length
+                                    + alpha * second_length
+                                ) * direction
+                        hand[key] = value.tolist()
+                previous_views = previous_hand.get("views", {})
+                following_views = following_hand.get("views", {})
+                views: dict[str, dict] = {}
+                for camera in sorted(set(previous_views) | set(following_views)):
+                    view = _view_between(
+                        previous_views.get(camera), following_views.get(camera), alpha
+                    )
+                    if view is not None:
+                        views[camera] = view
+                hand["views"] = views
+                hand["camera_ids"] = [
+                    camera for camera in previous_hand.get("camera_ids", [])
+                    if camera in views
+                ] or list(views)
+                hand["fusion_mode"] = "short_gap_interpolation"
+                hand["interpolated"] = {
+                    "applied": True,
+                    "from_sync_index": int(previous_id),
+                    "to_sync_index": int(following_id),
+                    "alpha": alpha,
+                }
+                hand["anatomy_refinement"] = {
+                    "applied": True,
+                    "corrected_joint_count": 0,
+                }
+                hands.append(hand)
+            if hands:
+                interpolated[sync_index] = {
+                    "sync_index": sync_index,
+                    "active_cameras": list(
+                        previous_result.get("active_cameras", [])
+                    ),
+                    "active_camera_count": int(
+                        previous_result.get("active_camera_count", 0)
+                    ),
+                    "hands": hands,
+                    "fusion_mode": "short_gap_interpolation",
+                    "interpolated": {
+                        "applied": True,
+                        "from_sync_index": int(previous_id),
+                        "to_sync_index": int(following_id),
+                    },
+                }
+    return interpolated
+
+
+_GEO_CHAINS = (
+    (0, 1, 2, 3, 4),
+    (5, 6, 7, 8),
+    (9, 10, 11, 12),
+    (13, 14, 15, 16),
+    (17, 18, 19, 20),
+)
+
+
+def _slerp_direction(first: np.ndarray, second: np.ndarray, alpha: float) -> np.ndarray:
+    """Spherical interpolation of two bone directions."""
+    first_norm = float(np.linalg.norm(first))
+    second_norm = float(np.linalg.norm(second))
+    if first_norm < 1e-8 or second_norm < 1e-8:
+        return (1.0 - alpha) * first + alpha * second
+    first = first / first_norm
+    second = second / second_norm
+    cosine = float(np.clip(np.dot(first, second), -1.0, 1.0))
+    angle = float(np.arccos(cosine))
+    if angle < 1e-6 or np.sin(angle) < 1e-6:
+        value = (1.0 - alpha) * first + alpha * second
+    else:
+        value = (
+            np.sin((1.0 - alpha) * angle) / np.sin(angle) * first
+            + np.sin(alpha * angle) / np.sin(angle) * second
+        )
+    norm = float(np.linalg.norm(value))
+    return value / norm if norm > 1e-8 else first
+
+
+def _geodesic_hand_pose(
+    previous: np.ndarray, following: np.ndarray, alpha: float,
+) -> np.ndarray:
+    """Interpolate a hand by rigid bone directions, never by free joint lines.
+
+    Palm anchors follow a linear rigid translation/orientation proxy, while
+    every finger segment follows a spherical direction interpolation and a
+    linearly interpolated *length*.  Because children are reconstructed from
+    their parent, a gap cannot create the familiar independently-interpolated
+    ``twisted finger`` shape.  Missing endpoint joints fall back to the
+    available endpoint value.
+    """
+    first = np.asarray(previous, dtype=np.float64)
+    second = np.asarray(following, dtype=np.float64)
+    result = np.full((21, 3), np.nan, dtype=np.float64)
+    finite_first = np.isfinite(first).all(axis=1)
+    finite_second = np.isfinite(second).all(axis=1)
+    both = finite_first & finite_second
+    result[both] = (1.0 - alpha) * first[both] + alpha * second[both]
+    result[finite_first & ~finite_second] = first[finite_first & ~finite_second]
+    result[finite_second & ~finite_first] = second[finite_second & ~finite_first]
+
+    for chain in _GEO_CHAINS:
+        root = chain[0]
+        if not np.isfinite(result[root]).all():
+            continue
+        for parent, child in zip(chain[:-1], chain[1:]):
+            first_vector = first[child] - first[parent]
+            second_vector = second[child] - second[parent]
+            first_ok = np.isfinite(first_vector).all()
+            second_ok = np.isfinite(second_vector).all()
+            if first_ok and second_ok and np.isfinite(result[parent]).all():
+                first_length = float(np.linalg.norm(first_vector))
+                second_length = float(np.linalg.norm(second_vector))
+                if first_length > 1e-8 and second_length > 1e-8:
+                    direction = _slerp_direction(first_vector, second_vector, alpha)
+                    length = (1.0 - alpha) * first_length + alpha * second_length
+                    result[child] = result[parent] + length * direction
+                    continue
+            # A one-sided fingertip or malformed edge is not inventable.  Keep
+            # the endpoint value already selected above.
+    return result
+
+
+def _interpolate_all_gap_results(
+    rows: list[dict[str, str]],
+    accepted: dict[int, dict],
+    *,
+    max_gap_frames: int = 0,
+    max_step_m: float = 0.0,
+    min_hand_joints: int = 18,
+    prediction_mode: str = "hold",
+) -> dict[int, dict]:
+    """Build a dense, explicitly predicted display track between observations.
+
+    This is intentionally a rendering aid, not a new measurement: accepted
+    and rejected JSONL files are never changed.  Each physical-side track is
+    interpolated directly between its two nearest *valid* fused poses, even
+    when the other side or the whole frame was rejected.  This removes the
+    blank-frame-to-reacquisition teleport that is visually distracting in a
+    review video.  The resulting rows are marked ``temporal_gap_prediction``
+    and the renderer labels them ``PREDICTED`` so they cannot be mistaken for
+    a multi-view measurement.
+    """
+    if not accepted:
+        return {}
+    if max_gap_frames < 0 or max_step_m < 0.0:
+        return {}
+    if prediction_mode not in ("hold", "hold-previous", "linear", "geodesic"):
+        raise ValueError(
+            "prediction_mode must be 'hold', 'hold-previous', 'linear', or 'geodesic'"
+        )
+    ordered_ids = [int(row["sync_index"]) for row in rows]
+    ordered_id_set = set(ordered_ids)
+
+    def _points(hand: dict, key: str) -> np.ndarray:
+        value = np.asarray(hand.get(key, []), dtype=np.float64)
+        if value.shape != (21, 3):
+            return np.full((21, 3), np.nan, dtype=np.float64)
+        return value
+
+    def _valid_hand(hand: dict | None) -> bool:
+        if hand is None:
+            return False
+        points = _points(hand, "joints_base_m")
+        finite = np.isfinite(points).all(axis=1)
+        # A count-only gate can accept a malformed skeleton with its wrist
+        # missing (for example 18 fingertips but no palm root).  Such a pose
+        # is not a usable endpoint for temporal display prediction.
+        core_indices = (0, 1, 2, 5, 9, 13, 17)
+        return (
+            int(np.count_nonzero(finite)) >= int(min_hand_joints)
+            and bool(finite[list(core_indices)].all())
+        )
+
+    def _view_between(
+        previous: dict | None, following: dict | None, alpha: float,
+    ) -> dict | None:
+        if previous is None and following is None:
+            return None
+        if previous is None:
+            view = copy.deepcopy(following)
+            view["interpolated"] = True
+            return view
+        if following is None:
+            view = copy.deepcopy(previous)
+            view["interpolated"] = True
+            return view
+        view = copy.deepcopy(previous)
+        for key in ("bbox_xyxy", "joints_2d", "wilor_joints_2d"):
+            first = np.asarray(previous.get(key, []), dtype=np.float64)
+            second = np.asarray(following.get(key, []), dtype=np.float64)
+            if first.shape != second.shape or first.size == 0:
+                continue
+            if not np.isfinite(first).all() or not np.isfinite(second).all():
+                continue
+            view[key] = ((1.0 - alpha) * first + alpha * second).tolist()
+        view["confidence"] = float(
+            (1.0 - alpha) * float(previous.get("confidence", 0.0))
+            + alpha * float(following.get("confidence", 0.0))
+        )
+        view["interpolated"] = True
+        return view
+
+    # Keep only complete endpoint poses.  Rows that contain a rejected/sparse
+    # hand are not allowed to become an interpolation endpoint.
+    endpoints: dict[int, list[tuple[int, dict]]] = {0: [], 1: []}
+    for sync_index in sorted(int(value) for value in accepted):
+        for hand in accepted[sync_index].get("hands", []):
+            side = int(hand.get("side", -1))
+            if side in endpoints and _valid_hand(hand):
+                endpoints[side].append((sync_index, hand))
+
+    predicted: dict[int, dict] = {}
+    for side in (0, 1):
+        for (previous_id, previous_hand), (following_id, following_hand) in zip(
+            endpoints[side], endpoints[side][1:]
+        ):
+            gap = int(following_id - previous_id - 1)
+            if gap <= 0:
+                continue
+            if max_gap_frames and gap > int(max_gap_frames):
+                continue
+            previous_points = _points(previous_hand, "joints_base_m")
+            following_points = _points(following_hand, "joints_base_m")
+            common = (
+                np.isfinite(previous_points).all(axis=1)
+                & np.isfinite(following_points).all(axis=1)
+            )
+            previous_finite = np.isfinite(previous_points).all(axis=1)
+            following_finite = np.isfinite(following_points).all(axis=1)
+            union = previous_finite | following_finite
+            # A sparse endpoint can legitimately lose a different fingertip
+            # than the other endpoint.  For display-only prediction, accept
+            # that case when the overlap is still substantial and the union
+            # contains enough joints to draw a complete-looking hand.  The
+            # strict fusion gate remains unchanged at ``min_hand_joints``.
+            min_common = max(1, int(min_hand_joints) - 2)
+            if (
+                int(np.count_nonzero(common)) < min_common
+                or int(np.count_nonzero(union)) < int(min_hand_joints)
+            ):
+                continue
+            endpoint_steps = np.linalg.norm(
+                following_points[common] - previous_points[common], axis=1
+            )
+            if (
+                max_step_m > 0.0
+                and (
+                    not np.isfinite(endpoint_steps).all()
+                    or float(np.max(endpoint_steps))
+                    > float(max_step_m) * float(gap + 1)
+                )
+            ):
+                continue
+            previous_result = accepted[previous_id]
+            following_result = accepted[following_id]
+            for offset in range(1, gap + 1):
+                sync_index = previous_id + offset
+                if sync_index not in ordered_id_set:
+                    continue
+                alpha = float(offset) / float(gap + 1)
+                current = predicted.get(sync_index)
+                if current is None:
+                    if sync_index in accepted:
+                        current = copy.deepcopy(accepted[sync_index])
+                    else:
+                        current = {
+                            "sync_index": sync_index,
+                            "anchor_cameras": list(
+                                previous_result.get("anchor_cameras", [])
+                            ),
+                            "active_cameras": list(
+                                previous_result.get("active_cameras", [])
+                            ),
+                            "active_camera_count": int(
+                                previous_result.get("active_camera_count", 0)
+                            ),
+                            "hands": [],
+                        }
+                # Preserve a real hand measurement if this side is already
+                # valid on an accepted row.  Otherwise replace its sparse
+                # placeholder with the predicted complete pose.
+                kept_hands = []
+                for hand in current.get("hands", []):
+                    if int(hand.get("side", -1)) != side or _valid_hand(hand):
+                        kept_hands.append(hand)
+                if any(
+                    int(hand.get("side", -1)) == side
+                    and _valid_hand(hand)
+                    for hand in kept_hands
+                ):
+                    predicted[sync_index] = current
+                    continue
+                if prediction_mode in ("hold", "hold-previous"):
+                    # A long occlusion is not a measurement.  Blending each
+                    # joint independently between potentially different
+                    # endpoint articulations creates a visibly twisted hand
+                    # (and can make one finger pass through another).  For a
+                    # continuous *review* tile, hold the nearest trusted pose
+                    # until reacquisition instead.  The row remains explicitly
+                    # synthetic and is never written back to fusion JSONL.
+                    # ``hold`` switches to the following trusted pose at the
+                    # midpoint.  A branch-gated track can request
+                    # ``hold-previous`` so one rejected interval keeps one
+                    # finger shape throughout instead of changing again in
+                    # the middle of a gap.
+                    use_previous = prediction_mode == "hold-previous" or alpha < 0.5
+                    points = (
+                        previous_points.copy()
+                        if use_previous else following_points.copy()
+                    )
+                elif prediction_mode == "geodesic":
+                    # Interpolate only the rigid palm anchors and spherical
+                    # finger-bone directions.  This is display-only and keeps
+                    # each kinematic chain anatomically connected.
+                    points = _geodesic_hand_pose(
+                        previous_points, following_points, alpha
+                    )
+                else:
+                    points = np.full((21, 3), np.nan, dtype=np.float64)
+                    points[common] = (
+                        (1.0 - alpha) * previous_points[common]
+                        + alpha * following_points[common]
+                    )
+                    # Keep a one-sided fingertip at its observed endpoint
+                    # rather than dropping the entire predicted hand.  Such
+                    # points are explicitly synthetic and are never written
+                    # to fusion JSONL.
+                    previous_only = previous_finite & ~following_finite
+                    following_only = following_finite & ~previous_finite
+                    points[previous_only] = previous_points[previous_only]
+                    points[following_only] = following_points[following_only]
+                hand = copy.deepcopy(previous_hand)
+                hand["joints_base_m"] = points.tolist()
+                for key in ("unrefined_joints_base_m",):
+                    first = _points(previous_hand, key)
+                    second = _points(following_hand, key)
+                    finite = (
+                        np.isfinite(first).all(axis=1)
+                        & np.isfinite(second).all(axis=1)
+                    )
+                    if (
+                        prediction_mode == "linear"
+                        and int(np.count_nonzero(finite)) >= int(min_hand_joints)
+                    ):
+                        value = np.full((21, 3), np.nan, dtype=np.float64)
+                        value[finite] = (
+                            (1.0 - alpha) * first[finite]
+                            + alpha * second[finite]
+                        )
+                        first_finite = np.isfinite(first).all(axis=1)
+                        second_finite = np.isfinite(second).all(axis=1)
+                        value[first_finite & ~second_finite] = first[
+                            first_finite & ~second_finite
+                        ]
+                        value[second_finite & ~first_finite] = second[
+                            second_finite & ~first_finite
+                        ]
+                        hand[key] = value.tolist()
+                previous_views = previous_hand.get("views", {})
+                following_views = following_hand.get("views", {})
+                views: dict[str, dict] = {}
+                for camera in sorted(set(previous_views) | set(following_views)):
+                    view = _view_between(
+                        previous_views.get(camera), following_views.get(camera), alpha
+                    )
+                    if view is not None:
+                        views[camera] = view
+                hand["views"] = views
+                hand["camera_ids"] = [
+                    camera for camera in previous_hand.get("camera_ids", [])
+                    if camera in views
+                ] or list(views)
+                hand["fusion_mode"] = "temporal_gap_prediction"
+                hand["temporal_gap_prediction"] = {
+                    "applied": True,
+                    "from_sync_index": int(previous_id),
+                    "to_sync_index": int(following_id),
+                    "gap_frames": gap,
+                    "alpha": alpha,
+                    "prediction_mode": prediction_mode,
+                }
+                hand["anatomy_refinement"] = {
+                    "applied": True,
+                    "corrected_joint_count": 0,
+                }
+                kept_hands.append(hand)
+                current["hands"] = sorted(
+                    kept_hands, key=lambda value: int(value.get("side", 0))
+                )
+                current["fusion_mode"] = "temporal_gap_prediction"
+                current["interpolated"] = {
+                    "applied": True,
+                    "from_sync_index": int(previous_id),
+                    "to_sync_index": int(following_id),
+                }
+                predicted[sync_index] = current
+    return predicted
 
 
 def _build_cam3_raw_fallback_results(
@@ -337,6 +980,9 @@ def _build_2d_stabilized_views(
     outlier_threshold_px: float,
     wrist_outlier_threshold_px: float,
     view_overrides: dict[tuple[int, int, str], dict] | None = None,
+    point_key: str = "wilor_joints_2d",
+    temporal_view_guard: bool = False,
+    hide_sparse_3d: bool = False,
 ) -> dict[tuple[int, int, str], dict]:
     """Prepare optional 2D-only stabilization without touching fusion data.
 
@@ -349,6 +995,7 @@ def _build_2d_stabilized_views(
         (side, camera): []
         for side in (0, 1) for camera in cameras
     }
+    stabilized: dict[tuple[int, int, str], dict] = {}
     for ordinal, row in enumerate(rows):
         sync_index = int(row["sync_index"])
         result = accepted.get(sync_index)
@@ -366,9 +1013,25 @@ def _build_2d_stabilized_views(
                         is_override = True
                 if view is None:
                     continue
+                if hide_sparse_3d:
+                    base_points = np.asarray(
+                        hand.get("joints_base_m", []), dtype=np.float64
+                    )
+                    if (
+                        base_points.shape == (21, 3)
+                        and int(np.isfinite(base_points).all(axis=1).sum()) < 18
+                    ):
+                        # The 3-D hand-level guard intentionally marked this
+                        # sample as a dropout.  Do not show a misleading
+                        # partial 2-D skeleton in the diagnostic tile.
+                        hidden_view = dict(view)
+                        hidden_view["inlier_joint_count"] = 0
+                        hidden_view["joints_2d"] = []
+                        stabilized[(sync_index, side, camera)] = hidden_view
+                        continue
                 points = np.asarray(
                     view.get(
-                        "joints_2d" if is_override else "wilor_joints_2d",
+                        "joints_2d" if is_override else point_key,
                         view.get("joints_2d", []),
                     ),
                     dtype=np.float64,
@@ -379,9 +1042,37 @@ def _build_2d_stabilized_views(
                     (ordinal, sync_index, view, points)
                 )
 
-    stabilized: dict[tuple[int, int, str], dict] = {}
     for (side, camera), entries in samples.items():
         for position, (ordinal, sync_index, view, points) in enumerate(entries):
+            temporal_jump = False
+            previous_points = None
+            previous_view = None
+            if temporal_view_guard and position > 0:
+                previous_ordinal, previous_sync, previous_view, previous_points = entries[position - 1]
+                if sync_index - previous_sync != 1:
+                    previous_points = None
+                    previous_view = None
+            if temporal_view_guard and previous_points is not None:
+                wrist_jump = float(np.linalg.norm(points[0] - previous_points[0]))
+                current_box = np.asarray(view.get("bbox_xyxy", []), dtype=np.float64)
+                previous_box = np.asarray(previous_view.get("bbox_xyxy", []), dtype=np.float64)
+                current_area = (
+                    max(float(current_box[2] - current_box[0]), 0.0)
+                    * max(float(current_box[3] - current_box[1]), 0.0)
+                    if current_box.shape == (4,) and np.isfinite(current_box).all()
+                    else 0.0
+                )
+                previous_area = (
+                    max(float(previous_box[2] - previous_box[0]), 0.0)
+                    * max(float(previous_box[3] - previous_box[1]), 0.0)
+                    if previous_box.shape == (4,) and np.isfinite(previous_box).all()
+                    else 0.0
+                )
+                area_ratio = current_area / max(previous_area, 1.0)
+                temporal_jump = (
+                    wrist_jump >= 180.0
+                    or (wrist_jump >= 130.0 and area_ratio >= 1.50)
+                )
             if radius <= 0:
                 filtered = points.copy()
             else:
@@ -420,7 +1111,19 @@ def _build_2d_stabilized_views(
                     ):
                         filtered += median_points[0] - wrist
 
-            stabilized_view = dict(view)
+            if temporal_jump and previous_points is not None:
+                # Keep one unmistakable merged-box sample on the last trusted
+                # 2-D pose.  The source 3-D guard marks the same hand missing;
+                # this prevents diagnostic/SAM3 tiles from showing a false
+                # image-plane jump during that dropout.
+                filtered = previous_points.copy()
+                stabilized_view = dict(previous_view)
+                stabilized_view["temporal_2d_guard"] = {
+                    "applied": True,
+                    "held_from_sync_index": int(sync_index - 1),
+                }
+            else:
+                stabilized_view = dict(view)
             stabilized_view["joints_2d"] = filtered.tolist()
             stabilized[(sync_index, side, camera)] = stabilized_view
     return stabilized
@@ -779,7 +1482,12 @@ def _draw_final_detection(
     box = np.rint(view.get("bbox_xyxy", [])).astype(np.int32)
     if box.shape != (4,):
         return
-    color = (255, 210, 40) if side == 0 else (40, 220, 255)
+    # Final delivery convention: physical left is cyan (FINAL L), right is
+    # yellow (FINAL R).  Keep this independent of the diagnostic detector
+    # palette so a label swap cannot make the final-only view ambiguous.
+    # OpenCV uses BGR.  Physical left is cyan and physical right is yellow
+    # in the delivery convention (the old tuples were accidentally swapped).
+    color = (255, 255, 0) if side == 0 else (0, 255, 255)
     cv2.rectangle(
         frame, tuple(box[:2]), tuple(box[2:]), (20, 20, 20), 7, cv2.LINE_AA
     )
@@ -798,6 +1506,144 @@ def _draw_final_detection(
     )
 
 
+def _draw_final_2d_fallback(
+    frame: np.ndarray, view: dict, side: int,
+) -> None:
+    """Draw an observed camera-space hand when its 3-D pose is unavailable.
+
+    A display-only all-gap prediction can have a perfectly good 2-D detector
+    observation while its rays do not determine a trustworthy depth branch.
+    Projecting an invented 3-D hand in that case is what creates the visibly
+    twisted fingers in the delivery video.  Keep the evidence in the image
+    plane instead.  This helper intentionally uses the final physical-side
+    palette, but labels the overlay ``2D`` so it cannot be mistaken for a
+    measured fused 3-D pose.
+    """
+    # The native WiLoR image-plane track is the responsive fallback.  SAM3
+    # corrections remain available when an older fusion record has no raw
+    # copy, but they must not silently replace the A/B native branch.
+    points = np.asarray(view.get("wilor_joints_2d", []), dtype=np.float64)
+    if points.shape != (21, 2):
+        points = np.asarray(view.get("joints_2d", []), dtype=np.float64)
+    if points.shape != (21, 2):
+        return
+    finite = np.isfinite(points).all(axis=1)
+    if int(np.count_nonzero(finite)) < 5:
+        return
+    color = (255, 255, 0) if side == 0 else (0, 255, 255)
+    box = np.asarray(view.get("bbox_xyxy", []), dtype=np.float64)
+    if box.shape != (4,) or not np.isfinite(box).all():
+        visible = points[finite]
+        x0, y0 = np.min(visible, axis=0)
+        x1, y1 = np.max(visible, axis=0)
+        padding = max(12.0, 0.18 * max(float(x1 - x0), float(y1 - y0), 12.0))
+        box = np.asarray([x0 - padding, y0 - padding, x1 + padding, y1 + padding])
+    rounded = np.zeros((21, 2), dtype=np.int32)
+    rounded[finite] = np.rint(points[finite]).astype(np.int32)
+    box_i = np.rint(box).astype(np.int32)
+    cv2.rectangle(frame, tuple(box_i[:2]), tuple(box_i[2:]), (20, 20, 20), 7, cv2.LINE_AA)
+    cv2.rectangle(frame, tuple(box_i[:2]), tuple(box_i[2:]), color, 3, cv2.LINE_AA)
+    cv2.putText(
+        frame,
+        f"2D {'L' if side == 0 else 'R'}",
+        (int(box_i[0]), max(28, int(box_i[1]) - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.68,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+    for start, end in HAND_CONNECTIONS:
+        if not (finite[start] and finite[end]):
+            continue
+        cv2.line(
+            frame, tuple(rounded[start]), tuple(rounded[end]),
+            (20, 20, 20), 8, cv2.LINE_AA,
+        )
+        cv2.line(
+            frame, tuple(rounded[start]), tuple(rounded[end]),
+            color, 4, cv2.LINE_AA,
+        )
+    for point in rounded[finite]:
+        cv2.circle(frame, tuple(point), 6, (20, 20, 20), -1, cv2.LINE_AA)
+        cv2.circle(frame, tuple(point), 4, color, -1, cv2.LINE_AA)
+
+
+def _final_bbox_from_projected_points(
+    points: np.ndarray,
+    image_shape: tuple[int, ...],
+    padding_ratio: float = 0.18,
+    min_joints: int = 21,
+) -> np.ndarray | None:
+    """Return a stable display box derived from the final projected pose.
+
+    Detector boxes are useful evidence in diagnostic mode, but they can jump
+    or disappear when one camera changes its detection.  The final-only view
+    should use the same fused pose that it draws, so derive its box from the
+    finite projected joints and add a modest hand-sized margin.
+    """
+    values = np.asarray(points, dtype=np.float64)
+    if values.shape != (21, 2):
+        return None
+    finite = np.isfinite(values).all(axis=1)
+    if int(np.count_nonzero(finite)) < int(min_joints):
+        return None
+    height, width = int(image_shape[0]), int(image_shape[1])
+    visible = values[finite]
+    x0, y0 = np.min(visible, axis=0)
+    x1, y1 = np.max(visible, axis=0)
+    span = max(float(x1 - x0), float(y1 - y0), 12.0)
+    padding = max(12.0, float(padding_ratio) * span)
+    box = np.asarray(
+        [x0 - padding, y0 - padding, x1 + padding, y1 + padding],
+        dtype=np.float64,
+    )
+    box[[0, 2]] = np.clip(box[[0, 2]], 0.0, max(width - 1, 0))
+    box[[1, 3]] = np.clip(box[[1, 3]], 0.0, max(height - 1, 0))
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return None
+    return box
+
+
+def _has_renderable_final_pose(
+    points: np.ndarray, min_joints: int = 21,
+) -> bool:
+    values = np.asarray(points, dtype=np.float64)
+    if values.shape != (21, 3):
+        return False
+    finite = np.isfinite(values).all(axis=1)
+    core_indices = (0, 1, 2, 5, 9, 13, 17)
+    return (
+        int(np.count_nonzero(finite)) >= int(min_joints)
+        and bool(finite[list(core_indices)].all())
+    )
+
+
+def _has_renderable_joint_support(
+    hand: dict,
+    min_inlier_views: int = 3,
+) -> bool:
+    """Reject a visually complete pose whose fingers came from sparse rays.
+
+    Temporal/anatomical stages can make a joint finite after its original
+    triangulation had only two (or fewer) supporting views.  Such a point can
+    look smooth in 3-D while being on the wrong depth branch.  Keep the raw
+    image-plane WiLoR observation for display instead of drawing that point as
+    a measured final pose.  Older fusion records without support metadata are
+    left compatible and pass this check.
+    """
+    if min_inlier_views <= 0:
+        return True
+    counts = np.asarray(hand.get("inlier_view_counts", []), dtype=np.float64)
+    points = np.asarray(hand.get("joints_base_m", []), dtype=np.float64)
+    if counts.shape != (21,) or points.shape != (21, 3):
+        return True
+    finite = np.isfinite(points).all(axis=1)
+    if not finite.any():
+        return False
+    return bool(np.all(counts[finite] >= float(min_inlier_views)))
+
+
 def _draw_refined_hand(
     frame: np.ndarray,
     points: np.ndarray,
@@ -807,7 +1653,8 @@ def _draw_refined_hand(
 ) -> None:
     if points.shape != (21, 2):
         return
-    color = (255, 210, 40) if side == 0 else (40, 220, 255)
+    # Match _draw_final_detection: left/cyan, right/yellow.
+    color = (255, 255, 0) if side == 0 else (0, 255, 255)
     finite = np.isfinite(points).all(axis=1)
     rounded = np.zeros((21, 2), dtype=np.int32)
     rounded[finite] = np.rint(points[finite]).astype(np.int32)
@@ -847,6 +1694,14 @@ def _render_camera_tile(
     target_camera: str | None,
     tile_size: tuple[int, int],
     raw_fallback_result: dict | None = None,
+    final_min_valid_joints: int = 21,
+    observed_result: dict | None = None,
+    final_predicted_2d_fallback: bool = False,
+    final_2d_residual_fallback_px: float = 0.0,
+    final_2d_residual_percentile: float = 50.0,
+    final_wrist_residual_fallback_px: float = 0.0,
+    final_min_joint_inlier_views: int = 3,
+    final_require_local_view: bool = True,
 ) -> np.ndarray:
     using_raw_fallback = (
         result is None
@@ -855,12 +1710,74 @@ def _render_camera_tile(
         and camera == target_camera
     )
     display_result = raw_fallback_result if using_raw_fallback else result
+    final_2d_fallback_count = 0
+    observed_hands = {
+        int(hand.get("side", -1)): hand
+        for hand in (observed_result or {}).get("hands", [])
+        if int(hand.get("side", -1)) in (0, 1)
+    }
     if display_result is not None:
         for hand in display_result["hands"]:
+            side = int(hand.get("side", -1))
+            observed_hand = observed_hands.get(side)
+            prediction_metadata = hand.get("temporal_gap_prediction", {})
+            is_predicted_hand = bool(
+                isinstance(prediction_metadata, dict)
+                and prediction_metadata.get("applied")
+            )
+            if overlay_mode == "final-only":
+                # A fused hand may remain valid in world coordinates while
+                # this particular camera is occluded.  Projecting it anyway
+                # makes an old pose appear on a different hand (especially
+                # during a laptop/arm occlusion).  For delivery rendering,
+                # require local camera evidence; the diagnostic mode still
+                # shows all available cross-view information.
+                if final_require_local_view and camera not in hand.get("views", {}):
+                    continue
+                final_points = np.asarray(
+                    hand.get("joints_base_m", []), dtype=np.float64
+                )
+                renderable_final_pose = _has_renderable_final_pose(
+                    final_points, min_joints=final_min_valid_joints
+                )
+                renderable_final_pose = (
+                    renderable_final_pose
+                    and _has_renderable_joint_support(
+                        hand, final_min_joint_inlier_views
+                    )
+                )
+                if final_predicted_2d_fallback and (
+                    is_predicted_hand or not renderable_final_pose
+                ):
+                    # A depth branch can be invalid while the current camera
+                    # still has a usable 2-D observation.  Keep that image
+                    # evidence instead of projecting an invented 3-D pose.
+                    fallback_view = None
+                    if observed_hand is not None:
+                        fallback_view = observed_hand.get("views", {}).get(camera)
+                    if fallback_view is None:
+                        fallback_view = hand.get("views", {}).get(camera)
+                    if stabilized_views is not None:
+                        fallback_view = stabilized_views.get(
+                            (sync_index, side, camera), fallback_view
+                        )
+                    if fallback_view is not None:
+                        _draw_final_2d_fallback(frame, fallback_view, side)
+                        continue
+                if not renderable_final_pose:
+                    # A detector box without a trustworthy fused pose is not
+                    # a final result.  Hiding the orphan box prevents a
+                    # one-frame 3-D dropout from looking like a hand that
+                    # teleported while keeping diagnostic/SAM3 2-D evidence
+                    # available in their dedicated modes.
+                    continue
             anatomy = hand.get("anatomy_refinement", {})
             view = hand["views"].get(camera)
             if (
-                overlay_mode in ("wilor-2d-stabilized", "cam3-optimized-2d")
+                overlay_mode in (
+                    "diagnostic", "sam3-2d-only", "wilor-2d-stabilized",
+                    "cam3-optimized-2d",
+                )
                 and stabilized_views is not None
             ):
                 view = stabilized_views.get(
@@ -885,10 +1802,6 @@ def _render_camera_tile(
                             overlay_mode not in ("diagnostic", "sam3-2d-only")
                         ),
                     )
-            elif view is not None:
-                _draw_final_detection(
-                    frame, view, int(hand["side"]), joints_source
-                )
             if (
                 overlay_mode == "final-only"
                 or (overlay_mode == "diagnostic" and anatomy.get("applied"))
@@ -906,10 +1819,69 @@ def _render_camera_tile(
                     calibration,
                     np.asarray(hand[joints_key], dtype=np.float64),
                 )
+                if (
+                    overlay_mode == "final-only"
+                    and final_2d_residual_fallback_px > 0.0
+                    and view is not None
+                ):
+                    observed_points = np.asarray(
+                        view.get("wilor_joints_2d", view.get("joints_2d", [])),
+                        dtype=np.float64,
+                    )
+                    if observed_points.shape != (21, 2):
+                        observed_points = np.asarray(
+                            view.get("joints_2d", []), dtype=np.float64
+                        )
+                    if observed_points.shape == (21, 2):
+                        finite = (
+                            np.isfinite(observed_points).all(axis=1)
+                            & np.isfinite(refined_pixels).all(axis=1)
+                        )
+                    else:
+                        finite = np.zeros(21, dtype=bool)
+                    if int(np.count_nonzero(finite)) >= 5:
+                        residuals = np.linalg.norm(
+                            refined_pixels[finite] - observed_points[finite],
+                            axis=1,
+                        )
+                        wrist_residual = None
+                        if (
+                            final_wrist_residual_fallback_px > 0.0
+                            and finite[0]
+                        ):
+                            wrist_residual = float(
+                                np.linalg.norm(
+                                    refined_pixels[0] - observed_points[0]
+                                )
+                            )
+                        residual = float(np.percentile(
+                            residuals,
+                            final_2d_residual_percentile,
+                        ))
+                        wrist_outlier = (
+                            wrist_residual is not None
+                            and wrist_residual > final_wrist_residual_fallback_px
+                        )
+                        if residual > final_2d_residual_fallback_px or wrist_outlier:
+                            _draw_final_2d_fallback(frame, view, side)
+                            final_2d_fallback_count += 1
+                            continue
+                if overlay_mode == "final-only":
+                    final_view = dict(view or {})
+                    fused_box = _final_bbox_from_projected_points(
+                        refined_pixels, frame.shape,
+                        min_joints=final_min_valid_joints,
+                    )
+                    if fused_box is not None:
+                        final_view["bbox_xyxy"] = fused_box.tolist()
+                    if final_view.get("bbox_xyxy") is not None:
+                        _draw_final_detection(
+                            frame, final_view, side, joints_source
+                        )
                 _draw_refined_hand(
                     frame,
                     refined_pixels,
-                    int(hand["side"]),
+                    side,
                     int(anatomy.get("corrected_joint_count", 0)),
                     final_only=overlay_mode == "final-only",
                 )
@@ -917,6 +1889,15 @@ def _render_camera_tile(
         [
             hand["views"][camera] for hand in display_result["hands"]
             if camera in hand["views"]
+            and (
+                overlay_mode != "final-only"
+                or (
+                    _has_renderable_final_pose(
+                        np.asarray(hand.get("joints_base_m", []), dtype=np.float64),
+                        min_joints=final_min_valid_joints,
+                    )
+                )
+            )
         ]
         if display_result is not None else []
     )
@@ -927,9 +1908,22 @@ def _render_camera_tile(
         status, status_color = "RAW FALLBACK", (0, 190, 255)
     elif result is None:
         status, status_color = "REJECTED", (40, 80, 255)
+    elif display_result.get("fusion_mode") == "temporal_gap_prediction":
+        status, status_color = "PREDICTED", (0, 190, 255)
+    elif display_result.get("fusion_mode") == "short_gap_interpolation":
+        status, status_color = "INTERPOLATED", (0, 190, 255)
     elif overlay_mode == "final-only":
-        status = "FINAL FUSED" if joints_source == "refined" else "RAW FUSED"
-        status_color = (70, 220, 70)
+        if final_2d_fallback_count and camera_views:
+            status = "FUSED + 2D FALLBACK"
+            status_color = (0, 190, 255)
+        elif final_2d_fallback_count:
+            status = "2D FALLBACK"
+            status_color = (0, 190, 255)
+        elif camera_views:
+            status = "FINAL FUSED" if joints_source == "refined" else "RAW FUSED"
+            status_color = (70, 220, 70)
+        else:
+            status, status_color = "NO TRUSTED 3D", (0, 190, 255)
     elif not camera_views:
         status, status_color = "INACTIVE", (180, 180, 180)
     elif inlier_joints == 0:
@@ -954,6 +1948,26 @@ def _render_camera_tile(
 
 def main() -> int:
     args = parse_args()
+    if args.short_gap_max_frames < 0:
+        raise ValueError("--short-gap-max-frames must be non-negative")
+    if args.short_gap_max_step_m <= 0.0:
+        raise ValueError("--short-gap-max-step-m must be positive")
+    if args.all_gap_max_frames < 0:
+        raise ValueError("--all-gap-max-frames must be non-negative")
+    if args.all_gap_max_step_m < 0.0:
+        raise ValueError("--all-gap-max-step-m must be non-negative")
+    if not 1 <= args.final_min_valid_joints <= 21:
+        raise ValueError("--final-min-valid-joints must be in [1, 21]")
+    if args.final_min_joint_inlier_views < 0:
+        raise ValueError("--final-min-joint-inlier-views must be non-negative")
+    if args.final_require_local_view not in (0, 1):
+        raise ValueError("--final-require-local-view must be 0 or 1")
+    if args.final_2d_residual_fallback_px < 0.0:
+        raise ValueError("--final-2d-residual-fallback-px must be non-negative")
+    if args.final_wrist_residual_fallback_px < 0.0:
+        raise ValueError("--final-wrist-residual-fallback-px must be non-negative")
+    if not 0.0 <= args.final_2d_residual_percentile <= 100.0:
+        raise ValueError("--final-2d-residual-percentile must be in [0, 100]")
     dataset = args.dataset.resolve()
     fusion = args.fusion.resolve()
     manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
@@ -1031,6 +2045,40 @@ def main() -> int:
     rows = rows[: args.max_frames or None]
     accepted = _load_jsonl(fusion / "accepted.jsonl")
     rejected = _load_jsonl(fusion / "rejected.jsonl")
+    display_accepted = accepted
+    interpolated_results: dict[int, dict] = {}
+    if args.interpolate_all_gaps and args.overlay_mode in ("diagnostic", "final-only"):
+        interpolated_results = _interpolate_all_gap_results(
+            rows,
+            accepted,
+            max_gap_frames=args.all_gap_max_frames,
+            max_step_m=args.all_gap_max_step_m,
+            min_hand_joints=args.final_min_valid_joints,
+            prediction_mode=args.all_gap_prediction_mode,
+        )
+        if interpolated_results:
+            display_accepted = dict(accepted)
+            display_accepted.update(interpolated_results)
+        print(
+            "all-gap display prediction: "
+            f"{len(interpolated_results)} frames",
+            flush=True,
+        )
+    elif args.interpolate_short_gaps and args.overlay_mode in ("diagnostic", "final-only"):
+        interpolated_results = _interpolate_short_gap_results(
+            rows,
+            accepted,
+            max_gap_frames=args.short_gap_max_frames,
+            max_step_m=args.short_gap_max_step_m,
+        )
+        if interpolated_results:
+            display_accepted = dict(accepted)
+            display_accepted.update(interpolated_results)
+        print(
+            "short-gap display interpolation: "
+            f"{len(interpolated_results)} frames",
+            flush=True,
+        )
     raw_fallback_results = {}
     if args.cam3_raw_fallback:
         prediction_root = fusion.parent / "wilor_multiview"
@@ -1045,16 +2093,41 @@ def main() -> int:
             f"cam3 raw fallback: {len(raw_fallback_results)} frames available",
             flush=True,
         )
-    stabilized_views = (
-        _build_2d_stabilized_views(
-            rows, accepted, cameras,
+    if args.overlay_mode == "wilor-2d-stabilized":
+        stabilized_views = _build_2d_stabilized_views(
+            rows, display_accepted, cameras,
             args.wilor_2d_smoothing_radius,
             args.wilor_2d_smoothing_strength,
             args.wilor_2d_outlier_threshold_px,
             args.wilor_2d_wrist_outlier_threshold_px,
         )
-        if args.overlay_mode == "wilor-2d-stabilized" else None
-    )
+    elif args.overlay_mode in ("diagnostic", "sam3-2d-only"):
+        stabilized_views = _build_2d_stabilized_views(
+            rows, display_accepted, cameras,
+            args.wilor_2d_smoothing_radius,
+            args.wilor_2d_smoothing_strength,
+            args.wilor_2d_outlier_threshold_px,
+            args.wilor_2d_wrist_outlier_threshold_px,
+            point_key="joints_2d",
+            temporal_view_guard=True,
+            hide_sparse_3d=True,
+        )
+    elif args.overlay_mode == "final-only" and args.final_predicted_2d_fallback:
+        # Build this track from the real accepted rows.  A hand may fail
+        # triangulation while its current image-plane observations remain
+        # usable; display interpolation must not replace those observations.
+        stabilized_views = _build_2d_stabilized_views(
+            rows, accepted, cameras,
+            args.wilor_2d_smoothing_radius,
+            args.wilor_2d_smoothing_strength,
+            args.wilor_2d_outlier_threshold_px,
+            args.wilor_2d_wrist_outlier_threshold_px,
+            point_key="joints_2d",
+            temporal_view_guard=True,
+            hide_sparse_3d=False,
+        )
+    else:
+        stabilized_views = None
     image_size = tuple(manifest["image_size"])
     tile_width = args.tile_width
     tile_height = int(round(tile_width * image_size[1] / image_size[0]))
@@ -1152,7 +2225,7 @@ def main() -> int:
                     if ordinal + 1 < len(rows) else {}
                 )
                 sync_index = int(row["sync_index"])
-                result = accepted.get(sync_index)
+                result = display_accepted.get(sync_index)
                 tile_futures = {mode: [] for mode, _ in jobs}
                 for camera in cameras:
                     source_frame = source_frames[camera]
@@ -1171,6 +2244,14 @@ def main() -> int:
                             args.cam3_camera,
                             (tile_width, tile_height),
                             raw_fallback_results.get(sync_index),
+                            args.final_min_valid_joints,
+                            accepted.get(sync_index),
+                            bool(args.final_predicted_2d_fallback),
+                            float(args.final_2d_residual_fallback_px),
+                            float(args.final_2d_residual_percentile),
+                            float(args.final_wrist_residual_fallback_px),
+                            int(args.final_min_joint_inlier_views),
+                            bool(args.final_require_local_view),
                         ))
                 for mode, _ in jobs:
                     tiles = [future.result() for future in tile_futures[mode]]

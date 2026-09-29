@@ -33,7 +33,7 @@ from ego_data.dataset import SequentialVideoReader  # noqa: E402
 
 DEFAULT_TOOL_ROOT = Path("/home/p3/data_sda1/tool/auto-obb-annotator")
 DEFAULT_MODEL = DEFAULT_TOOL_ROOT / "models/sam3.pt"
-DEFAULT_PROMPT = "hand wearing a gray and black protective work glove"
+DEFAULT_PROMPT = "hand wearing a black protective work glove"
 HAND_EDGES = (
     (0, 1), (1, 2), (2, 3), (3, 4),
     (0, 5), (5, 6), (6, 7), (7, 8),

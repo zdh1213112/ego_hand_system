@@ -15,6 +15,13 @@ FUSION_NAME="fusion_multiview"
 LABEL_DIR_NAME="wilor_labels_camera2_complete21"
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
+GPU_PROFILE="compatible"
+LABEL_WORKERS=""
+FIT_POSE_WINDOW=""
+FIT_POSE_OVERLAP=""
+CUDA_MATMUL_PRECISION=""
+CHECK_BATCH_SIZE=""
+MANO_REPLAY_TOLERANCE=""
 VIEW_FILTER="complete21"
 MAX_SAMPLES=0
 SAMPLE_STRIDE=0
@@ -52,6 +59,13 @@ Options:
   --label-dir-name NAME           In-place label directory name
   --conda-env NAME                Default ego-hand
   --device cuda|cpu|auto          Default cuda
+  --gpu-profile PROFILE           compatible|rtx5090d (default compatible)
+  --workers N                     Concurrent recording exports (default 1; 2+ experimental)
+  --fit-pose-window N             Override profile MANO pose window
+  --fit-pose-overlap N            Override profile MANO pose overlap
+  --cuda-matmul-precision P       highest|high|medium
+  --check-batch-size N            MANO replay batch (profile default: 256|2048)
+  --mano-replay-tolerance-m X     MANO replay tolerance (profile default: 1e-5|2e-4 m)
   --export-camera CAMERA          Repeat for multiple views (default camera2+camera3)
   --view-filter legacy|complete21 Default complete21
   --max-samples N                 Default 0
@@ -77,6 +91,13 @@ while (($#)); do
     --label-dir-name) LABEL_DIR_NAME="$2"; shift 2 ;;
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
+    --workers) LABEL_WORKERS="$2"; shift 2 ;;
+    --fit-pose-window) FIT_POSE_WINDOW="$2"; shift 2 ;;
+    --fit-pose-overlap) FIT_POSE_OVERLAP="$2"; shift 2 ;;
+    --cuda-matmul-precision) CUDA_MATMUL_PRECISION="$2"; shift 2 ;;
+    --check-batch-size) CHECK_BATCH_SIZE="$2"; shift 2 ;;
+    --mano-replay-tolerance-m) MANO_REPLAY_TOLERANCE="$2"; shift 2 ;;
     --export-camera) EXPORT_CAMERAS+=("$2"); shift 2 ;;
     --view-filter) VIEW_FILTER="$2"; shift 2 ;;
     --max-samples) MAX_SAMPLES="$2"; shift 2 ;;
@@ -93,6 +114,29 @@ while (($#)); do
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+case "$GPU_PROFILE" in
+  compatible)
+    LABEL_WORKERS="${LABEL_WORKERS:-1}"
+    FIT_POSE_WINDOW="${FIT_POSE_WINDOW:-48}"
+    FIT_POSE_OVERLAP="${FIT_POSE_OVERLAP:-16}"
+    CUDA_MATMUL_PRECISION="${CUDA_MATMUL_PRECISION:-highest}"
+    CHECK_BATCH_SIZE="${CHECK_BATCH_SIZE:-256}"
+    MANO_REPLAY_TOLERANCE="${MANO_REPLAY_TOLERANCE:-0.00001}"
+    ;;
+  rtx5090d)
+    LABEL_WORKERS="${LABEL_WORKERS:-1}"
+    FIT_POSE_WINDOW="${FIT_POSE_WINDOW:-48}"
+    FIT_POSE_OVERLAP="${FIT_POSE_OVERLAP:-16}"
+    CUDA_MATMUL_PRECISION="${CUDA_MATMUL_PRECISION:-highest}"
+    CHECK_BATCH_SIZE="${CHECK_BATCH_SIZE:-2048}"
+    MANO_REPLAY_TOLERANCE="${MANO_REPLAY_TOLERANCE:-0.00001}"
+    ;;
+  *)
+    echo "--gpu-profile must be compatible or rtx5090d: $GPU_PROFILE" >&2
+    exit 2
+    ;;
+esac
 
 [[ -n "$EXPERIMENT_ROOT" && -d "$EXPERIMENT_ROOT" ]] || {
   echo "Missing --experiment-root: $EXPERIMENT_ROOT" >&2; exit 2;
@@ -112,6 +156,35 @@ done
 [[ "$VISUALIZATION_SAMPLES" =~ ^[1-9][0-9]*$ && "$VISUALIZATION_SEED" =~ ^[0-9]+$ ]] || {
   echo "invalid visualization samples/seed" >&2; exit 2;
 }
+[[ "$FIT_POSE_WINDOW" =~ ^[1-9][0-9]*$ && "$FIT_POSE_OVERLAP" =~ ^[0-9]+$ ]] || {
+  echo "fit pose window must be positive and overlap must be non-negative" >&2; exit 2;
+}
+[[ "$LABEL_WORKERS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "--workers must be a positive integer" >&2; exit 2;
+}
+[[ "$CHECK_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+  echo "--check-batch-size must be a positive integer" >&2; exit 2;
+}
+python3 - "$MANO_REPLAY_TOLERANCE" <<'PY'
+import math
+import sys
+try:
+    value = float(sys.argv[1])
+except ValueError as error:
+    raise SystemExit("--mano-replay-tolerance-m must be numeric") from error
+if not math.isfinite(value) or value <= 0.0:
+    raise SystemExit("--mano-replay-tolerance-m must be finite and positive")
+PY
+((FIT_POSE_OVERLAP < FIT_POSE_WINDOW)) || {
+  echo "--fit-pose-overlap must be smaller than --fit-pose-window" >&2; exit 2;
+}
+[[ "$CUDA_MATMUL_PRECISION" == "highest" || "$CUDA_MATMUL_PRECISION" == "high" || "$CUDA_MATMUL_PRECISION" == "medium" ]] || {
+  echo "--cuda-matmul-precision must be highest, high, or medium" >&2; exit 2;
+}
+if [[ "$GPU_PROFILE" == "rtx5090d" && "$DEVICE" == "cpu" ]]; then
+  echo "--gpu-profile rtx5090d requires --device cuda or auto" >&2
+  exit 2
+fi
 if [[ "$LAYOUT" == "merged" && -z "$OUTPUT_ROOT" ]]; then
   echo "--layout merged requires --output-root" >&2
   exit 2
@@ -170,6 +243,43 @@ PY
 
 DATASETS=()
 FAILED=0
+PIDS=()
+
+run_label_export() {
+  local experiment="$1"
+  local label_output="$2"
+  shift 2
+  local exit_code
+  if "$@"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  if ((exit_code == 0)); then
+    append_status "$experiment" "$label_output" "success" 0
+  else
+    append_status "$experiment" "$label_output" "failed" "$exit_code"
+  fi
+  return "$exit_code"
+}
+
+wait_for_one_export() {
+  local completed_pid=""
+  local exit_code
+  local -a remaining=()
+  if wait -n -p completed_pid "${PIDS[@]}"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  for pid in "${PIDS[@]}"; do
+    [[ "$pid" == "$completed_pid" ]] || remaining+=("$pid")
+  done
+  PIDS=("${remaining[@]}")
+  ((exit_code == 0)) || FAILED=1
+}
+
+echo "[label-batch] GPU profile=$GPU_PROFILE workers=$LABEL_WORKERS pose_window=$FIT_POSE_WINDOW matmul_precision=$CUDA_MATMUL_PRECISION"
 for EXPERIMENT in "${EXPERIMENTS[@]}"; do
   NAME="$(basename "$EXPERIMENT")"
   if [[ "$LAYOUT" == "merged" ]]; then
@@ -183,6 +293,11 @@ for EXPERIMENT in "${EXPERIMENTS[@]}"; do
   CMD=(
     "$SINGLE" --experiment "$EXPERIMENT" --fusion "$FUSION"
     --output "$LABEL_OUTPUT" --conda-env "$CONDA_ENV" --device "$DEVICE"
+    --gpu-profile "$GPU_PROFILE" --fit-pose-window "$FIT_POSE_WINDOW"
+    --fit-pose-overlap "$FIT_POSE_OVERLAP"
+    --cuda-matmul-precision "$CUDA_MATMUL_PRECISION"
+    --check-batch-size "$CHECK_BATCH_SIZE"
+    --mano-replay-tolerance-m "$MANO_REPLAY_TOLERANCE"
     --view-filter "$VIEW_FILTER" --max-samples "$MAX_SAMPLES"
     --sample-stride "$SAMPLE_STRIDE"
     --visualization-samples "$VISUALIZATION_SAMPLES"
@@ -203,27 +318,60 @@ for EXPERIMENT in "${EXPERIMENTS[@]}"; do
     append_status "$EXPERIMENT" "$LABEL_OUTPUT" "dry_run" 0
     continue
   fi
-  set +e
-  "${CMD[@]}"
-  EXIT_CODE=$?
-  set -e
-  if ((EXIT_CODE == 0)); then
-    append_status "$EXPERIMENT" "$LABEL_OUTPUT" "success" 0
-    DATASETS+=("$LABEL_OUTPUT/dataset")
+  if ((LABEL_WORKERS == 1)); then
+    if run_label_export "$EXPERIMENT" "$LABEL_OUTPUT" "${CMD[@]}"; then
+      EXIT_CODE=0
+    else
+      EXIT_CODE=$?
+    fi
+    if ((EXIT_CODE != 0)); then
+      FAILED=1
+      if ((CONTINUE_ON_ERROR == 0)); then break; fi
+    fi
   else
-    append_status "$EXPERIMENT" "$LABEL_OUTPUT" "failed" "$EXIT_CODE"
-    FAILED=1
-    if ((CONTINUE_ON_ERROR == 0)); then break; fi
+    run_label_export "$EXPERIMENT" "$LABEL_OUTPUT" "${CMD[@]}" &
+    PIDS+=("$!")
+    if ((${#PIDS[@]} >= LABEL_WORKERS)); then
+      wait_for_one_export
+      if ((FAILED && CONTINUE_ON_ERROR == 0)); then break; fi
+    fi
   fi
 done
 
-if [[ "$LAYOUT" == "merged" && "$DRY_RUN" == 0 && "$FAILED" == 0 && ${#DATASETS[@]} -gt 0 ]]; then
+while ((${#PIDS[@]})); do
+  wait_for_one_export
+done
+
+if [[ "$LAYOUT" == "merged" && "$DRY_RUN" == 0 ]]; then
+  while IFS= read -r -d '' dataset; do
+    DATASETS+=("$dataset")
+  done < <(python3 - "$STATUS_JSONL" <<'PY'
+import json
+from pathlib import Path
+import sys
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    dataset = Path(row["output"]) / "dataset"
+    if row.get("status") == "success" and (dataset / "summary.json").is_file():
+        sys.stdout.buffer.write(str(dataset).encode() + b"\0")
+PY
+  )
+fi
+
+if [[ "$LAYOUT" == "merged" && "$DRY_RUN" == 0 && ${#DATASETS[@]} -gt 0 ]]; then
   MERGED_DATASET="$OUTPUT_ROOT/dataset"
-  echo "[label-batch] merge ${#DATASETS[@]} datasets -> $MERGED_DATASET"
+  if ((FAILED)); then
+    echo "[label-batch] warning: some recordings failed; merge ${#DATASETS[@]} successful datasets"
+  fi
+  echo "[label-batch] merge ${#DATASETS[@]} successful datasets -> $MERGED_DATASET"
   run_python "$MERGER" --inputs "${DATASETS[@]}" --output "$MERGED_DATASET"
   CHECK_ARGS=(
     "$CHECKER" "$MERGED_DATASET" --mano-source "$MANO_SOURCE"
-    --mano-model-dir "$MANO_MODEL_DIR"
+    --mano-model-dir "$MANO_MODEL_DIR" --device "$DEVICE"
+    --batch-size "$CHECK_BATCH_SIZE"
+    --mano-reconstruction-tolerance-m "$MANO_REPLAY_TOLERANCE"
   )
   [[ -f "$REFERENCE_NPY" ]] && CHECK_ARGS+=(--reference "$REFERENCE_NPY")
   run_python "${CHECK_ARGS[@]}"

@@ -63,7 +63,7 @@ DEFAULT_OUTPUT = (
     "sam3_pilot_cam3"
 )
 DEFAULT_TOOL_ROOT = Path("/home/p3/data_sda1/tool/auto-obb-annotator")
-DEFAULT_PROMPT = "hand wearing a gray and black protective work glove"
+DEFAULT_PROMPT = "hand wearing a black protective work glove"
 
 
 def parse_args() -> argparse.Namespace:

@@ -193,15 +193,16 @@ def camera_from_genrobot_message(camera_id: str, message) -> CameraCalibration:
     )
 
 
-def stereo_from_ego_yaml(path: Path) -> StereoCalibration:
+def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
+    """Load every KB camera in an EGO export, indexed by its source ID."""
     calibration = yaml.safe_load(path.read_text(encoding="utf-8"))
     cameras = calibration["cameras"]
-    if len(cameras) != 2:
-        raise ValueError("expected two cameras in EGO calibration")
-    result = []
+    if not cameras:
+        raise ValueError("EGO calibration has no cameras")
+    result: dict[str, CameraCalibration] = {}
     for camera in cameras:
         if str(camera["distortion_model"]).upper() != "KB":
-            raise ValueError("legacy EGO loader only supports KB cameras")
+            raise ValueError("EGO loader only supports KB cameras")
         intr = camera["intrinsics"]
         dist = camera["distortion"]
         K = np.asarray([
@@ -221,13 +222,23 @@ def stereo_from_ego_yaml(path: Path) -> StereoCalibration:
         transform = np.eye(4)
         transform[:3, :3] = rotation_reference_camera.T
         transform[:3, 3] = -rotation_reference_camera.T @ translation_reference_camera
-        result.append(CameraCalibration(
-            camera_id=str(camera.get("id", camera.get("name", f"camera{len(result)}"))),
+        source_id = str(camera.get("id", camera.get("name", f"camera{len(result)}")))
+        if source_id in result:
+            raise ValueError(f"duplicate EGO camera ID: {source_id}")
+        result[source_id] = CameraCalibration(
+            camera_id=source_id,
             frame_id=str(camera.get("name", "")),
             model="KB",
             image_size=(int(camera["image_width"]), int(camera["image_height"])),
             K=K,
             distortion=D,
             T_base_camera=transform,
-        ))
-    return StereoCalibration.from_cameras(result[0], result[1])
+        )
+    return result
+
+
+def stereo_from_ego_yaml(path: Path) -> StereoCalibration:
+    cameras = list(cameras_from_ego_yaml(path).values())
+    if len(cameras) != 2:
+        raise ValueError("expected two cameras in EGO calibration")
+    return StereoCalibration.from_cameras(cameras[0], cameras[1])

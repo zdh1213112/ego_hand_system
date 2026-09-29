@@ -11,12 +11,51 @@ import numpy as np
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from camera_models import RectificationOptions, create_stereo_rectification
+from camera_models import RectificationOptions, create_stereo_rectification, project_points, unproject_points
+from camera_models.double_sphere import unproject as unproject_double_sphere
 from ego_data.calibration import CameraCalibration, StereoCalibration
 from ego_data.calibration import stereo_from_ego_yaml
 
 
 class CameraModelTests(unittest.TestCase):
+    def test_kb_unprojection_roundtrip_and_invalid_pixels(self):
+        K = np.asarray([[505.0, 0.0, 800.0], [0.0, 505.0, 600.0], [0.0, 0.0, 1.0]])
+        D = np.asarray([0.076, -0.015, 0.0027, -0.00009])
+        camera = CameraCalibration("camera0", "left", "KB", (1600, 1200), K, D, np.eye(4))
+        points = np.asarray([[0.0, 0.0, 1.0], [0.4, -0.2, 0.8], [-0.5, 0.3, 1.2]])
+        pixels, projected_valid = project_points(camera, points)
+        self.assertTrue(projected_valid.all())
+        pixels = np.concatenate((pixels, [[np.nan, 10.0]]))
+        rays, valid = unproject_points(camera, pixels)
+        self.assertEqual(rays.shape, (4, 3))
+        np.testing.assert_array_equal(valid, [True, True, True, False])
+        np.testing.assert_allclose(rays[:3], points / np.linalg.norm(points, axis=1)[:, None], atol=1e-6)
+        self.assertTrue(np.isnan(rays[3]).all())
+
+    def test_ds_unprojection_dispatch_keeps_existing_values(self):
+        K = np.asarray([[200.0, 0.0, 160.0], [0.0, 200.0, 120.0], [0.0, 0.0, 1.0]])
+        camera = CameraCalibration("camera0", "ds", "DS", (320, 240), K,
+                                   np.asarray([200.0, 200.0, 160.0, 120.0, 0.5, 0.5]), np.eye(4))
+        pixels = np.asarray([[160.0, 120.0], [175.0, 130.0]])
+        expected, expected_valid = unproject_double_sphere(camera, pixels)
+        actual, actual_valid = unproject_points(camera, pixels)
+        np.testing.assert_array_equal(actual_valid, expected_valid)
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_mano_kb_rectification_matches_opencv(self):
+        from prepare_multiview_mano_input import _rectify_view_pixels
+        K = np.asarray([[505.0, 0.0, 800.0], [0.0, 505.0, 600.0], [0.0, 0.0, 1.0]])
+        D = np.asarray([0.076, -0.015, 0.0027, -0.00009])
+        camera = CameraCalibration("camera0", "left", "KB", (1600, 1200), K, D, np.eye(4))
+        rotation, _ = cv2.Rodrigues(np.asarray([0.02, -0.01, 0.005]))
+        projection = np.column_stack((K, np.asarray([[-50.0], [0.0], [0.0]])))
+        pixels = np.asarray([[800.0 + i * 7, 600.0 - i * 4] for i in range(21)])
+        actual, valid = _rectify_view_pixels(camera, pixels, rotation, projection)
+        expected = cv2.fisheye.undistortPoints(pixels.reshape(-1, 1, 2), K, D,
+                                               R=rotation, P=projection[:, :3])[:, 0]
+        self.assertTrue(valid.all())
+        np.testing.assert_allclose(actual, expected, atol=1e-6)
+
     def test_kb_dispatch_matches_opencv_contract(self):
         K = np.asarray([[220.0, 0.0, 160.0], [0.0, 221.0, 120.0], [0.0, 0.0, 1.0]])
         D = np.asarray([-0.01, 0.002, -0.0002, 0.00001])

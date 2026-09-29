@@ -18,7 +18,8 @@ from fuse_multiview_wilor import (
     _intersect_rays, _ray_in_base, triangulate_ransac,
 )
 from fuse_multiview_wilor_guided import (
-    _fuse_primary_frame, _marker_assist_cost, _match_camera,
+    _anchor_pair_tiers, _fuse_primary_frame, _fuse_single_hand_frame,
+    _marker_assist_cost, _match_camera, _prefer_usable_anchor_pair,
     _nearest_reference_row, _ordered_hand_pairs,
 )
 from normalize_multiview_recording import synchronize_rows
@@ -36,6 +37,43 @@ def ds_camera(camera_id: str, center_x: float) -> CameraCalibration:
 
 
 class MultiviewWilorTests(unittest.TestCase):
+    def test_preferred_pair_wins_over_cheaper_other_camera1_pair(self):
+        alternatives = [
+            {"anchor_cameras": ["camera1", "camera2"], "cost": 1.0},
+            {"anchor_cameras": ["camera0", "camera1"], "cost": 100.0},
+        ]
+        chosen = _prefer_usable_anchor_pair(
+            alternatives, ("camera1", "camera0"), "camera1"
+        )
+        self.assertEqual(chosen, [alternatives[1]])
+        self.assertEqual(
+            _prefer_usable_anchor_pair(alternatives, ("camera1", "camera3"), "camera1"),
+            alternatives,
+        )
+
+    def test_single_preferred_anchor_camera_uses_any_available_partner(self):
+        cameras = ("camera0", "camera1", "camera2", "camera3")
+        detections = {camera: [0, 1] for camera in cameras}
+        preferred, fallback = _anchor_pair_tiers(
+            cameras, detections, ("camera1", "camera2"), "camera1", 2
+        )
+        self.assertEqual(preferred, [
+            ("camera0", "camera1"), ("camera1", "camera2"),
+            ("camera1", "camera3"),
+        ])
+        self.assertTrue(all("camera1" not in pair for pair in fallback))
+        detections["camera2"] = []
+        preferred, _ = _anchor_pair_tiers(
+            cameras, detections, ("camera1", "camera2"), "camera1", 2
+        )
+        self.assertEqual(preferred, [("camera0", "camera1"), ("camera1", "camera3")])
+        detections["camera1"] = []
+        preferred, fallback = _anchor_pair_tiers(
+            cameras, detections, ("camera1", "camera2"), "camera1", 2
+        )
+        self.assertEqual(preferred, [])
+        self.assertEqual(fallback, [("camera0", "camera3")])
+
     def test_nearest_reference_uses_binary_neighbors_and_earlier_tie(self):
         references = [{"sync_index": value} for value in (2, 100, 205, 900)]
         reference, distance = _nearest_reference_row(
@@ -73,6 +111,64 @@ class MultiviewWilorTests(unittest.TestCase):
         np.testing.assert_allclose(recovered, expected, atol=1e-10)
         self.assertTrue(inliers.all())
         self.assertLess(float(errors.max()), 1e-9)
+
+    def test_four_kb_views_triangulate_in_shared_base_frame(self):
+        K = np.asarray([[505.0, 0.0, 800.0], [0.0, 505.0, 600.0], [0.0, 0.0, 1.0]])
+        D = np.asarray([0.076, -0.015, 0.0027, -0.00009])
+        expected = np.asarray([0.0, 0.0, 0.5])
+        observations = []
+        for index, center_x in enumerate((0.0, 0.1, 0.135, -0.035)):
+            transform = np.eye(4)
+            transform[0, 3] = center_x
+            camera = CameraCalibration(f"camera{index}", f"view{index}", "KB",
+                                       (1600, 1200), K, D, transform)
+            point_camera = transform[:3, :3].T @ (expected - transform[:3, 3])
+            pixel, valid = project_points(camera, point_camera[None])
+            self.assertTrue(bool(valid[0]))
+            observations.append((camera.camera_id, camera, pixel[0]))
+        recovered, errors, inliers = triangulate_ransac(observations, 0.01)
+        np.testing.assert_allclose(recovered, expected, atol=1e-9)
+        self.assertTrue(inliers.all())
+        self.assertLess(float(errors.max()), 1e-6)
+
+    def test_single_kb_hand_uses_two_calibrated_views(self):
+        K = np.asarray([[505.0, 0.0, 800.0], [0.0, 505.0, 600.0], [0.0, 0.0, 1.0]])
+        D = np.asarray([0.076, -0.015, 0.0027, -0.00009])
+        points = np.asarray([
+            [0.005 * (joint % 5), -0.004 * (joint // 5), 0.5]
+            for joint in range(21)
+        ])
+        calibrations = {}
+        groups = {}
+        for index, center_x in enumerate((0.0, 0.1)):
+            camera_id = f"camera{index}"
+            transform = np.eye(4)
+            transform[0, 3] = center_x
+            calibration = CameraCalibration(camera_id, camera_id, "KB", (1600, 1200), K, D, transform)
+            calibrations[camera_id] = calibration
+            projected, valid = project_points(calibration, points - transform[:3, 3])
+            self.assertTrue(valid.all())
+            hand = {
+                "detection_index": 0, "bbox_xyxy": [700, 500, 900, 700],
+                "confidence": 0.9, "detector_is_right": 1,
+                "joints_2d": projected.tolist(),
+            }
+            groups[camera_id] = {0: {0: hand, 1: hand}}
+        args = argparse.Namespace(
+            detector_handedness="strict", anchor_threshold_px=60.0,
+            association_threshold_px=55.0, ransac_threshold_px=20.0,
+            min_valid_joints=12, min_joint_inlier_views=3, allow_stereo_final=1,
+            max_reprojection_median_px=15.0, max_reprojection_p95_px=40.0,
+            condition_hard_threshold=150.0, sam3_gate=0,
+        )
+        accepted, row = _fuse_single_hand_frame(
+            7, groups, {camera: [0] for camera in calibrations}, calibrations,
+            tuple(calibrations), ("camera0", "camera1"), args,
+        )
+        self.assertTrue(accepted, row)
+        self.assertEqual(len(row["hands"]), 1)
+        self.assertEqual(row["hands"][0]["side"], 1)
+        np.testing.assert_allclose(row["hands"][0]["joints_base_m"], points, atol=1e-8)
 
     def test_vectorized_ransac_matches_scalar_candidate_search(self):
         cameras = [

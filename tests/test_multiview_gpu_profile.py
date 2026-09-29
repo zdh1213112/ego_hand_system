@@ -37,7 +37,7 @@ class MultiviewGpuProfileTests(unittest.TestCase):
         )
         self.assertIn('COMPILE_BACKBONE="${COMPILE_BACKBONE:-0}"', runner)
         self.assertIn('FUSION_WORKERS="${FUSION_WORKERS:-1}"', runner)
-        self.assertIn('SAM3_REFINE_2D="${EGO_SAM3_REFINE_2D:-1}"', runner)
+        self.assertIn('SAM3_REFINE_2D="${EGO_SAM3_REFINE_2D:-0}"', runner)
 
     def test_5090d_defaults_enable_cross_frame_amp_path(self):
         runner = RUNNER.read_text(encoding="utf-8")

@@ -23,6 +23,38 @@ def project(camera: CameraCalibration, points: np.ndarray) -> tuple[np.ndarray, 
     return pixels.reshape(points.shape[:-1] + (2,)), valid.reshape(points.shape[:-1])
 
 
+def unproject(camera: CameraCalibration, pixels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Convert native KB image pixels to unit rays in the camera optical frame."""
+    if camera.model != "KB":
+        raise ValueError("KB unprojection requires a KB camera")
+    pixels = np.asarray(pixels, dtype=np.float64)
+    if pixels.shape[-1] != 2:
+        raise ValueError("pixels must have a final dimension of two")
+    flat = pixels.reshape(-1, 2)
+    valid = np.isfinite(flat).all(axis=1)
+    rays = np.full((len(flat), 3), np.nan, dtype=np.float64)
+    if np.any(valid):
+        indices = np.flatnonzero(valid)
+        normalized = cv2.fisheye.undistortPoints(
+            flat[indices].reshape(-1, 1, 2), camera.K, camera.distortion
+        )[:, 0]
+        candidates = np.column_stack((normalized, np.ones(len(indices))))
+        norms = np.linalg.norm(candidates, axis=1)
+        good = np.isfinite(candidates).all(axis=1) & np.isfinite(norms) & (norms > 1e-12)
+        if np.any(good):
+            candidates[good] /= norms[good, None]
+            projected, projectable = project(camera, candidates[good])
+            residual = np.linalg.norm(projected - flat[indices[good]], axis=1)
+            good_indices = indices[good]
+            roundtrip = projectable & np.isfinite(residual) & (residual <= 0.5)
+            rays[good_indices[roundtrip]] = candidates[good][roundtrip]
+            valid[:] = False
+            valid[good_indices[roundtrip]] = True
+        else:
+            valid[:] = False
+    return rays.reshape(pixels.shape[:-1] + (3,)), valid.reshape(pixels.shape[:-1])
+
+
 def create_rectification(
     calibration: StereoCalibration, options: RectificationOptions
 ) -> RectificationResult:

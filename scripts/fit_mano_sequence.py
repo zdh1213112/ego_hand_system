@@ -107,6 +107,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-alignment-max-m", type=float, default=0.025)
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="auto")
     parser.add_argument(
+        "--cuda-matmul-precision", choices=("highest", "high", "medium"),
+        default="highest",
+        help=(
+            "float32 CUDA matmul precision; high enables TF32-style throughput "
+            "on supported NVIDIA GPUs"
+        ),
+    )
+    parser.add_argument(
         "--rigid-initialization", action=argparse.BooleanOptionalAction, default=True,
         help="initialize each supported frame with Kabsch before nonlinear fitting",
     )
@@ -1020,6 +1028,14 @@ def main() -> int:
         device = "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
+    if device == "cuda":
+        torch.set_float32_matmul_precision(args.cuda_matmul_precision)
+        properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+        print(
+            f"[mano-fit] CUDA device={properties.name} "
+            f"matmul_precision={args.cuda_matmul_precision}",
+            flush=True,
+        )
     data = load_input(args.input.resolve())
     selected_pairs = select_pair_range(data, args)
     if not len(selected_pairs):

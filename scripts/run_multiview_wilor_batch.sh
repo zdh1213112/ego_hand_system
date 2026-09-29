@@ -15,6 +15,7 @@ DRY_RUN=0
 PIPELINE=""
 CONDA_ENV=""
 DEVICE=""
+DETECTOR="${EGO_WILOR_DETECTOR:-}"
 GPU_PROFILE=""
 REFERENCE_CAMERA=""
 MAX_FRAMES=""
@@ -77,6 +78,7 @@ Options:
   --pipeline 0|1                 Overlap next GPU inference with prior CPU postprocess
   --conda-env NAME                Forward to single-recording script
   --device cuda|cpu|auto          Forward to single-recording script
+  --detector FILE                 WiLoR detector checkpoint
   --gpu-profile compatible|rtx5090d
   --cameras CAMERA ...            Forward camera list until the next --option
   --reference-camera CAMERA
@@ -135,6 +137,7 @@ while (($#)); do
     --pipeline) PIPELINE="$2"; shift 2 ;;
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --detector) DETECTOR="$2"; shift 2 ;;
     --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
     --cameras)
       CAMERAS=()
@@ -322,6 +325,7 @@ for MCAP in "${MCAPS[@]}"; do
   CMD=("$SINGLE" --mcap "$MCAP" --output "$RECORD_OUTPUT")
   [[ -n "$CONDA_ENV" ]] && CMD+=(--conda-env "$CONDA_ENV")
   [[ -n "$DEVICE" ]] && CMD+=(--device "$DEVICE")
+  [[ -n "$DETECTOR" ]] && CMD+=(--detector "$DETECTOR")
   [[ -n "$GPU_PROFILE" ]] && CMD+=(--gpu-profile "$GPU_PROFILE")
   [[ -n "$REFERENCE_CAMERA" ]] && CMD+=(--reference-camera "$REFERENCE_CAMERA")
   [[ -n "$MAX_FRAMES" ]] && CMD+=(--max-frames "$MAX_FRAMES")

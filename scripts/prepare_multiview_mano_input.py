@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert strict six-view fusion into the shared MANO sequence-fit contract."""
+"""Convert calibrated multiview fusion into the shared MANO sequence-fit contract."""
 
 from __future__ import annotations
 
@@ -8,11 +8,9 @@ import csv
 import json
 from pathlib import Path
 
-import cv2
 import numpy as np
 
-from camera_models import RectificationOptions, create_stereo_rectification
-from camera_models.double_sphere import unproject as unproject_double_sphere
+from camera_models import RectificationOptions, create_stereo_rectification, unproject_points
 from ego_data.calibration import CameraCalibration, StereoCalibration
 from stabilize_hand_3d import (
     acceleration_metric,
@@ -93,26 +91,14 @@ def _rectify_view_pixels(
     pixels = np.asarray(pixels, dtype=np.float64)
     if pixels.shape != (21, 2):
         raise ValueError(f"expected 21x2 image joints, got {pixels.shape}")
-    if camera.model == "DS":
-        rays, valid = unproject_double_sphere(camera, pixels)
-        rectified = (rectification_rotation @ rays.T).T
-        valid &= np.isfinite(rectified).all(axis=1) & (rectified[:, 2] > 1e-8)
-        output = np.full((21, 2), np.nan, dtype=np.float64)
-        projected = (projection[:, :3] @ rectified.T).T
-        output[valid] = projected[valid, :2] / projected[valid, 2:3]
-        return output, valid
-    if camera.model == "KB":
-        output = cv2.fisheye.undistortPoints(
-            pixels.reshape(-1, 1, 2),
-            camera.K,
-            camera.distortion,
-            R=rectification_rotation,
-            P=projection[:, :3],
-        )[:, 0]
-        valid = np.isfinite(output).all(axis=1)
-        output[~valid] = np.nan
-        return output, valid
-    raise ValueError(f"unsupported camera model for rectification: {camera.model}")
+    rays, valid = unproject_points(camera, pixels)
+    rectified = (rectification_rotation @ rays.T).T
+    valid &= np.isfinite(rectified).all(axis=1) & (rectified[:, 2] > 1e-8)
+    output = np.full((21, 2), np.nan, dtype=np.float64)
+    projected = (projection[:, :3] @ rectified.T).T
+    valid &= np.isfinite(projected).all(axis=1) & (projected[:, 2] > 1e-8)
+    output[valid] = projected[valid, :2] / projected[valid, 2:3]
+    return output, valid
 
 
 def _load_rows(path: Path) -> list[dict]:
@@ -420,7 +406,10 @@ def main() -> int:
     )
     summary = {
         "schema_version": 1,
-        "stage": "six_view_fusion_to_mano_input",
+        "stage": (
+            "six_view_fusion_to_mano_input" if len(camera_ids) == 6
+            else "multiview_fusion_to_mano_input"
+        ),
         "fusion": str(fusion),
         "dataset": str(dataset),
         "pair_count": pair_count,

@@ -36,6 +36,14 @@ def parse_args() -> argparse.Namespace:
         "--mano-model-dir", type=Path,
         help="directory containing the exact MANO_RIGHT.pkl asset",
     )
+    parser.add_argument(
+        "--device", choices=("cpu", "cuda", "auto"), default="cpu",
+        help="device used for batched MANO replay validation",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=256,
+        help="MANO replay batch size",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +107,7 @@ def _sha256(path: Path) -> str:
 def _replay_mano(
     records: list[tuple[Path, dict[str, Any]]], source: Path, model_dir: Path,
     model_by_side: dict[str, str], tolerance_m: float,
+    device: str = "cpu", batch_size: int = 256,
 ) -> tuple[float, float]:
     """Replay right-canonical parameters against physical-side label geometry."""
     import torch
@@ -117,10 +126,10 @@ def _replay_mano(
     model = mano.load(
         model_path=str(model_dir), is_rhand=True, use_pca=False,
         num_pca_comps=45, batch_size=1, flat_hand_mean=True,
-    ).eval()
-    order = torch.as_tensor(MANO_TO_MEDIAPIPE, dtype=torch.long)
-    for start in range(0, len(records), 256):
-        chunk = records[start:start + 256]
+    ).to(device).eval()
+    order = torch.as_tensor(MANO_TO_MEDIAPIPE, dtype=torch.long, device=device)
+    for start in range(0, len(records), batch_size):
+        chunk = records[start:start + batch_size]
         global_matrices = np.concatenate(
             [sample["mano"]["global_orient"] for _, sample in chunk], axis=0
         )
@@ -136,10 +145,12 @@ def _replay_mano(
         )
         with torch.no_grad():
             output = model(
-                betas=torch.from_numpy(betas).float(),
-                global_orient=torch.from_numpy(global_axis_angle).float(),
-                hand_pose=torch.from_numpy(hand_axis_angle).float(),
-                transl=torch.zeros((len(chunk), 3), dtype=torch.float32),
+                betas=torch.from_numpy(betas).float().to(device),
+                global_orient=torch.from_numpy(global_axis_angle).float().to(device),
+                hand_pose=torch.from_numpy(hand_axis_angle).float().to(device),
+                transl=torch.zeros(
+                    (len(chunk), 3), dtype=torch.float32, device=device
+                ),
                 return_verts=True, return_tips=True,
             )
             vertices = output.vertices.cpu().numpy()
@@ -167,8 +178,11 @@ def _replay_mano(
 def main() -> int:
     args = parse_args()
     if (args.max_samples < 0 or args.projection_tolerance_px <= 0
-            or args.mano_reconstruction_tolerance_m <= 0):
-        raise ValueError("max-samples must be non-negative and tolerance positive")
+            or args.mano_reconstruction_tolerance_m <= 0
+            or args.batch_size <= 0):
+        raise ValueError(
+            "max-samples must be non-negative; tolerances and batch-size must be positive"
+        )
     root = args.dataset.resolve()
     image_root = root / "images"
     label_root = root / "labels"
@@ -195,6 +209,17 @@ def main() -> int:
         raise ValueError("index.jsonl contains duplicate label names")
 
     import torch
+    device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
+    if device == "auto":
+        device = "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested for MANO validation but unavailable")
+    if device == "cuda":
+        print(
+            f"[dataset-check] CUDA device={torch.cuda.get_device_name()} "
+            f"MANO batch_size={args.batch_size}",
+            flush=True,
+        )
     reference_signature = None
     if args.reference is not None:
         reference = np.load(args.reference.resolve(), allow_pickle=True).item()
@@ -291,7 +316,7 @@ def main() -> int:
                 raise ValueError(f"{asset}: SHA-256 differs from export asset")
         maximum_mano_vertex_error, maximum_mano_joint_error = _replay_mano(
             records, source, model_dir, mano_model_by_side,
-            args.mano_reconstruction_tolerance_m,
+            args.mano_reconstruction_tolerance_m, device, args.batch_size,
         )
     result = {
         "validated_sample_count": len(selected),

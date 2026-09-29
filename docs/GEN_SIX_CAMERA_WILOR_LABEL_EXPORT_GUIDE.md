@@ -160,6 +160,20 @@ dataset/visualization/
 关节编号、手框、左右手身份和目标相机内点数。使用 `--visualization-samples 20` 可调整数量，
 `--visualization-seed 42` 控制可复现的随机结果，`--render-visualization 0` 可关闭。可视化不会修改标签。
 
+需要按来源录制检查完整导出标签序列时，使用：
+
+```bash
+PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
+  python scripts/render_wilor_training_videos.py \
+  --dataset /path/to/wilor_labels_merged/dataset \
+  --output /path/to/wilor_labels_merged/dataset/visualization_videos \
+  --cameras camera2 --fps 10 --workers 2 --video-codec auto
+```
+
+合并数据集会按 `source_experiment` 分开输出 MP4，不会把不同录制串在同一个视频中。同一
+`sync_index` 的左右手画在同一帧。`auto` 优先使用 `h264_nvenc`，不可用时回退 `mp4v`。
+这里播放的是按时间排序的已导出样本序列；运动自适应采样没有保留的中间帧不会被伪造。
+
 该命令不会重新运行六路 WiLoR。它只执行：
 
 1. 六目 3D 转换为 MANO 拟合输入；
@@ -484,10 +498,25 @@ MCAP 都会写入独立的 `<output-root>/<文件名去掉扩展名>/`，不会�
   --experiment-root /path/to/gen6_batch_5090d \
   --output-root /path/to/wilor_labels_merged \
   --layout merged \
-  --conda-env ego-hand --device cuda \
+  --conda-env ego-hand --device cuda --gpu-profile rtx5090d \
   --export-camera camera2 --view-filter complete21 \
   --max-samples 0
 ```
+
+`--gpu-profile rtx5090d` 使用 CUDA 进行 MANO 拟合，并把最终 MANO 回放校验批次提高到
+2048（可用 `--check-batch-size` 覆盖）。真实批次测试表明，同时运行多个拟合进程会争用
+GPU、反而拉长总耗时，因此默认保持 `--workers 1`；`--workers 2` 以上仅作为独占 GPU
+时的实验选项。每个录制内部仍使用经过验证的 48 帧姿态窗口；`--fit-pose-window` 和
+`--fit-pose-overlap` 可显式覆盖，但增大窗口不保证更快。
+
+拟合默认保持 `highest` float32 精度及 0.01 mm MANO 重放容差。若显式使用
+`--cuda-matmul-precision high`，PCA 拟合与完整姿态回放可能出现约 0.1 mm 的浮点路径差异；
+这类已有结果可用 `--mano-replay-tolerance-m 0.0002` 校验。
+图片解码、JPEG/NPY 写入、最终校验和合并仍是 CPU/磁盘阶段，因此这些阶段 GPU 利用率低
+属于正常现象。
+
+默认 `--continue-on-error 1` 时，个别录制若没有样本通过 `complete21`，批处理仍会合并
+其余校验成功的数据集，并在最终状态中保留失败记录；进程仍返回非零状态以提醒存在遗漏。
 
 输出结构：
 

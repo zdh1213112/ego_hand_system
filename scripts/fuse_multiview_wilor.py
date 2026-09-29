@@ -16,8 +16,7 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-from camera_models import project_points  # noqa: E402
-from camera_models.double_sphere import unproject  # noqa: E402
+from camera_models import project_points, unproject_points  # noqa: E402
 from ego_data.calibration import CameraCalibration  # noqa: E402
 
 
@@ -60,7 +59,7 @@ def _groups(row: dict[str, Any]) -> dict[int, dict[int, dict[str, Any]]]:
 
 
 def _ray_in_base(camera: CameraCalibration, pixel: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
-    ray_camera, valid = unproject(camera, np.asarray(pixel, dtype=np.float64)[None])
+    ray_camera, valid = unproject_points(camera, np.asarray(pixel, dtype=np.float64)[None])
     if not bool(valid[0]):
         return None
     rotation = camera.T_base_camera[:3, :3]
@@ -70,14 +69,68 @@ def _ray_in_base(camera: CameraCalibration, pixel: np.ndarray) -> tuple[np.ndarr
     return center, direction
 
 
-def _intersect_rays(rays: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray | None:
+def _ray_geometry_weights(
+    rays: list[tuple[np.ndarray, np.ndarray]],
+    reference_angle_degrees: float = 25.0,
+    floor: float = 0.20,
+) -> np.ndarray:
+    """Down-weight rays that have no useful angular baseline.
+
+    The weight is based on the largest axis angle to another ray.  A camera
+    with at least one wide-baseline partner remains fully useful; a cluster of
+    nearly parallel views contributes only a small amount and cannot dominate
+    the depth solve.  This is deliberately independent of image confidence,
+    so the calibration geometry remains the source of the decision.
+    """
+    if not rays:
+        return np.empty(0, dtype=np.float64)
+    if len(rays) == 1:
+        return np.ones(1, dtype=np.float64)
+    reference = max(float(np.sin(np.deg2rad(reference_angle_degrees))), 1e-6)
+    values = []
+    for index, (_, direction) in enumerate(rays):
+        direction = np.asarray(direction, dtype=np.float64)
+        diversity = 0.0
+        for other_index, (_, other_direction) in enumerate(rays):
+            if other_index == index:
+                continue
+            diversity = max(
+                diversity,
+                float(np.linalg.norm(np.cross(direction, other_direction))),
+            )
+        values.append(np.clip(diversity / reference, floor, 1.0))
+    return np.asarray(values, dtype=np.float64)
+
+
+def _ray_condition_number(rays: list[tuple[np.ndarray, np.ndarray]]) -> float:
+    if len(rays) < 2:
+        return float("inf")
+    identity = np.eye(3, dtype=np.float64)
+    matrix = np.zeros((3, 3), dtype=np.float64)
+    for _center, direction in rays:
+        matrix += identity - np.outer(direction, direction)
+    try:
+        eigenvalues = np.linalg.eigvalsh(matrix)
+    except np.linalg.LinAlgError:
+        return float("inf")
+    smallest = max(float(eigenvalues[0]), 1e-9)
+    return float(max(eigenvalues[-1], 0.0) / smallest)
+
+
+def _intersect_rays(
+    rays: list[tuple[np.ndarray, np.ndarray]],
+    weights: np.ndarray | None = None,
+) -> np.ndarray | None:
     matrix = np.zeros((3, 3), dtype=np.float64)
     target = np.zeros(3, dtype=np.float64)
     identity = np.eye(3)
-    for center, direction in rays:
+    if weights is None or len(weights) != len(rays):
+        weights = np.ones(len(rays), dtype=np.float64)
+    for ray_index, (center, direction) in enumerate(rays):
+        weight = max(float(weights[ray_index]), 1e-6)
         projector = identity - np.outer(direction, direction)
-        matrix += projector
-        target += projector @ center
+        matrix += weight * projector
+        target += weight * (projector @ center)
     if np.linalg.cond(matrix) > 1e8:
         return None
     return np.linalg.solve(matrix, target)
@@ -128,6 +181,7 @@ def _errors_many(
 def triangulate_ransac(
     observations: list[tuple[str, CameraCalibration, np.ndarray]],
     threshold_px: float,
+    ray_angle_weighting: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rays = [_ray_in_base(camera, pixel) for _, camera, pixel in observations]
     candidate_points = []
@@ -167,7 +221,14 @@ def triangulate_ransac(
         for index in np.flatnonzero(best_inliers)
         if rays[index] is not None
     ]
-    point = _intersect_rays(inlier_rays)
+    inlier_indices = [
+        index for index in np.flatnonzero(best_inliers) if rays[index] is not None
+    ]
+    weights = (
+        _ray_geometry_weights([rays[index] for index in inlier_indices])
+        if ray_angle_weighting else None
+    )
+    point = _intersect_rays(inlier_rays, weights=weights)
     if point is None:
         point = best_point
     errors = _errors(point, observations, rays)
@@ -182,12 +243,15 @@ def _triangulate_hand(
     threshold_px: float,
     min_views: int,
     sam3_gate: bool = False,
+    ray_angle_weighting: bool = False,
 ) -> dict[str, Any]:
     cameras = tuple(selected)
     points = np.full((21, 3), np.nan, dtype=np.float64)
     errors = np.full((21, len(cameras)), np.inf, dtype=np.float64)
     inlier_mask = np.zeros((21, len(cameras)), dtype=bool)
     inlier_counts = np.zeros(21, dtype=np.int32)
+    ray_condition_numbers = np.full(21, np.inf, dtype=np.float64)
+    ray_min_angles_degrees = np.full(21, np.nan, dtype=np.float64)
     for joint in range(21):
         observations = [
             (
@@ -201,12 +265,28 @@ def _triangulate_hand(
             )
             for camera in cameras
         ]
-        point, joint_errors, inliers = triangulate_ransac(observations, threshold_px)
+        point, joint_errors, inliers = triangulate_ransac(
+            observations, threshold_px, ray_angle_weighting=ray_angle_weighting,
+        )
         errors[joint] = joint_errors
         inlier_mask[joint] = inliers
         inlier_counts[joint] = int(inliers.sum())
         if inlier_counts[joint] >= min_views:
             points[joint] = point
+        joint_rays = [
+            ray for ray in (_ray_in_base(camera, pixel) for _, camera, pixel in observations)
+            if ray is not None
+        ]
+        if len(joint_rays) >= 2:
+            ray_condition_numbers[joint] = _ray_condition_number(joint_rays)
+            pair_angles = [
+                float(np.degrees(np.arccos(np.clip(
+                    abs(float(np.dot(first[1], second[1]))), 0.0, 1.0
+                ))))
+                for first, second in itertools.combinations(joint_rays, 2)
+            ]
+            if pair_angles:
+                ray_min_angles_degrees[joint] = min(pair_angles)
     finite_errors = errors[np.isfinite(errors)]
     inlier_errors = errors[inlier_mask & np.isfinite(errors)]
     valid_joints = int(np.count_nonzero(np.isfinite(points).all(axis=1)))
@@ -219,6 +299,9 @@ def _triangulate_hand(
         "errors": errors,
         "inlier_mask": inlier_mask,
         "inlier_counts": inlier_counts,
+        "ray_condition_numbers": ray_condition_numbers,
+        "ray_min_angles_degrees": ray_min_angles_degrees,
+        "ray_angle_weighting": bool(ray_angle_weighting),
         "valid_joints": valid_joints,
         "median_px": median,
         "p95_px": p95,
@@ -308,6 +391,11 @@ def _serialize_hand(
             "confidence": hand["confidence"],
             "detector_is_right": hand.get("detector_is_right"),
             "joints_2d": hand["joints_2d"],
+            # Keep an explicit native-WiLoR channel even when the input
+            # prediction tree did not come through SAM3/marker assist.  The
+            # renderer can then make a safe per-camera 2D fallback instead
+            # of projecting an untrusted depth branch.
+            "wilor_joints_2d": hand.get("wilor_joints_2d", hand["joints_2d"]),
             "inlier_joint_count": int(
                 result["inlier_mask"][:, result["cameras"].index(camera)].sum()
             ),
@@ -331,6 +419,14 @@ def _serialize_hand(
             "multiview_reprojection_p95_px": result["p95_px"],
             "all_view_reprojection_median_px": result["all_view_median_px"],
             "all_view_reprojection_p95_px": result["all_view_p95_px"],
+            "ray_condition_numbers": result.get("ray_condition_numbers", []).tolist()
+            if isinstance(result.get("ray_condition_numbers"), np.ndarray) else [],
+            "ray_min_angles_degrees": result.get("ray_min_angles_degrees", []).tolist()
+            if isinstance(result.get("ray_min_angles_degrees"), np.ndarray) else [],
+            "ray_angle_weighting": bool(result.get("ray_angle_weighting", False)),
+            "condition_rejected_joint_count": int(
+                result.get("condition_rejected_joint_count", 0)
+            ),
         },
         "stereo_baseline_comparison": _baseline_comparison(
             result, selected, calibrations, baseline_cameras

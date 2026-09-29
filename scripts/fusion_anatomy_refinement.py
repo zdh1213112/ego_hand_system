@@ -64,6 +64,12 @@ class FusionAnatomyConfig:
     temporal_spike_palm_step_m: float = 0.20
     temporal_spike_max_spread_m: float = 0.08
     correction_threshold_m: float = 0.002
+    # A target camera can be more important than the global median when the
+    # final product is explicitly judged in that view.  Keep its projection
+    # close to the original calibrated observation while still allowing the
+    # other cameras to provide the 3-D depth estimate.
+    protected_camera_ids: tuple[str, ...] = ()
+    protected_camera_shift_px: float = 35.0
 
     def validate(self) -> None:
         if min(
@@ -95,6 +101,7 @@ class FusionAnatomyConfig:
             self.temporal_spike_palm_step_m,
             self.temporal_spike_max_spread_m,
             self.correction_threshold_m,
+            self.protected_camera_shift_px,
         ) <= 0.0:
             raise ValueError("anatomy thresholds must be positive")
         for name, value in (
@@ -814,7 +821,11 @@ def _apply_reprojection_guard(
     reverted_count = 0
     for (frame, side), hand in hands.items():
         views = [
-            (calibrations[camera_id], np.asarray(view["joints_2d"], dtype=np.float64))
+            (
+                camera_id,
+                calibrations[camera_id],
+                np.asarray(view["joints_2d"], dtype=np.float64),
+            )
             for camera_id, view in hand.get("views", {}).items()
             if camera_id in calibrations
             and int(view.get("inlier_joint_count", 0)) > 0
@@ -851,9 +862,9 @@ def _apply_reprojection_guard(
         view_count = len(views)
         raw_pixels = np.full((view_count, 21, 2), np.nan, dtype=np.float64)
         raw_valid = np.zeros((view_count, 21), dtype=bool)
-        observations = np.stack([view[1] for view in views])
+        observations = np.stack([view[2] for view in views])
         observation_valid = np.isfinite(observations).all(axis=2)
-        for view_index, (camera, _observations) in enumerate(views):
+        for view_index, (_camera_id, camera, _observations) in enumerate(views):
             raw_pixels[view_index], raw_valid[view_index] = (
                 _project_base_points(camera, start)
             )
@@ -889,7 +900,7 @@ def _apply_reprojection_guard(
             )
             residuals = np.full_like(shifts, np.nan)
             complete = np.ones(len(joint_indices), dtype=bool)
-            for view_index, (camera, _observations) in enumerate(views):
+            for view_index, (_camera_id, camera, _observations) in enumerate(views):
                 active = evidence[view_index, joint_indices]
                 if not np.any(active):
                     continue
@@ -905,6 +916,33 @@ def _apply_reprojection_guard(
                 )
             shift_max = np.nanmax(shifts, axis=0)
             residual_median = np.nanmedian(residuals, axis=0)
+            protected_ids = set(config.protected_camera_ids)
+            protected_indices = [
+                index for index, (camera_id, _camera, _observations) in enumerate(views)
+                if camera_id in protected_ids
+            ]
+            if protected_indices:
+                protected_shift_max = np.zeros(len(joint_indices), dtype=np.float64)
+                protected_evidence = np.zeros(len(joint_indices), dtype=bool)
+                for view_index in protected_indices:
+                    active = evidence[view_index, joint_indices]
+                    finite_shift = active & np.isfinite(shifts[view_index])
+                    if not np.any(finite_shift):
+                        continue
+                    protected_shift_max[finite_shift] = np.maximum(
+                        protected_shift_max[finite_shift],
+                        shifts[view_index, finite_shift],
+                    )
+                    protected_evidence |= finite_shift
+                protected_ok = (
+                    ~protected_evidence
+                    | (
+                        protected_shift_max
+                        <= float(config.protected_camera_shift_px)
+                    )
+                )
+            else:
+                protected_ok = np.ones(len(joint_indices), dtype=bool)
             strongly_supported = (
                 residual_median
                 <= config.large_reprojection_improvement_ratio
@@ -912,6 +950,7 @@ def _apply_reprojection_guard(
             )
             return (
                 complete
+                & protected_ok
                 & (
                     (shift_max <= config.max_reprojection_shift_px)
                     | strongly_supported

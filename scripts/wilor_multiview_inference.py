@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import cv2
@@ -35,6 +36,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=PROJECT_ROOT / "models/wilor/wilor_final.ckpt")
     parser.add_argument("--model-config", type=Path, default=PROJECT_ROOT / "models/wilor/model_config.yaml")
     parser.add_argument("--detector", type=Path, default=PROJECT_ROOT / "models/wilor/detector.pt")
+    parser.add_argument(
+        "--external-boxes", type=Path, default=None,
+        help=(
+            "optional proposal tree (root/camera/predictions.jsonl). When set, "
+            "these boxes are sent to WiLoR instead of calling YOLO; each row "
+            "is keyed by sync_index and contains a boxes list"
+        ),
+    )
     parser.add_argument("--mano-model-dir", type=Path, default=PROJECT_ROOT / "models/mano")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -69,13 +78,107 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _external_detection(row: dict[str, Any] | None):
+    """Build the tiny Ultralytics-like object needed by the crop path.
+
+    SAM3 proposals intentionally have no handedness class.  They are marked
+    ``-1`` and WiLoR still evaluates both handedness hypotheses for every
+    proposal, exactly like the normal dual-hypothesis detector path.
+    """
+    import torch
+
+    boxes = [] if row is None else row.get("boxes", [])
+    xyxy: list[list[float]] = []
+    confidence: list[float] = []
+    sides: list[float] = []
+    sources: list[str] = []
+    for item in boxes:
+        if not isinstance(item, dict):
+            continue
+        box = item.get("bbox_xyxy", item.get("box", []))
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            values = [float(value) for value in box]
+            score = float(item.get("confidence", item.get("score", 0.0)))
+            side = item.get("detector_is_right", item.get("is_right", -1))
+            side = float(side) if side in (0, 1, 0.0, 1.0) else -1.0
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(values).all() or not np.isfinite(score):
+            continue
+        if values[2] <= values[0] or values[3] <= values[1]:
+            continue
+        xyxy.append(values)
+        confidence.append(max(0.0, min(1.0, score)))
+        sides.append(side)
+        sources.append(str(item.get("source", "external")))
+    class _Boxes(SimpleNamespace):
+        def __len__(self) -> int:
+            return int(self.xyxy.shape[0])
+
+    return SimpleNamespace(
+        proposal_sources=sources,
+        boxes=_Boxes(
+            xyxy=torch.as_tensor(xyxy, dtype=torch.float32).reshape(-1, 4),
+            conf=torch.as_tensor(confidence, dtype=torch.float32),
+            cls=torch.as_tensor(sides, dtype=torch.float32),
+        )
+    )
+
+
+def _load_external_boxes(
+    root: Path, cameras: tuple[str, ...], sync_rows: list[dict[str, str]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Load proposal rows and align them to the normalized sync table."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for camera in cameras:
+        path = root / camera / "predictions.jsonl"
+        if not path.is_file():
+            raise FileNotFoundError(f"external proposal file is missing: {path}")
+        by_sync: dict[int, dict[str, Any]] = {}
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if "sync_index" not in row:
+                    continue
+                by_sync[int(row["sync_index"])] = row
+        missing = [
+            int(row["sync_index"]) for row in sync_rows
+            if int(row["sync_index"]) not in by_sync
+        ]
+        if missing:
+            raise ValueError(
+                f"external proposals for {camera} do not cover "
+                f"{len(missing)} synchronized frames (first={missing[:3]})"
+            )
+        result[camera] = [by_sync[int(row["sync_index"])] for row in sync_rows]
+    return result
+
+
+def _json_detector_side(value: Any) -> int | None:
+    """Keep unknown proposal handedness explicit in the JSON contract."""
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric in (0, 1) else None
+
+
 def infer_dual(
     frame, detector, model, model_cfg, device, confidence: float,
     iou: float, rescale_factor: float, batch_size: int,
+    external_boxes: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     import torch
 
-    detection = detector(frame, conf=confidence, iou=iou, verbose=False)[0]
+    detection = (
+        _external_detection(external_boxes)
+        if external_boxes is not None
+        else detector(frame, conf=confidence, iou=iou, verbose=False)[0]
+    )
     if detection.boxes is None or len(detection.boxes) == 0:
         return []
     boxes = detection.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
@@ -124,7 +227,12 @@ def infer_dual(
                 "hypothesis_index": hypothesis_index,
                 "bbox_xyxy": boxes[detection_index].tolist(),
                 "confidence": float(confidences[detection_index]),
-                "detector_is_right": int(detector_sides[detection_index]),
+                "detector_is_right": _json_detector_side(
+                    detector_sides[detection_index]
+                ),
+                "proposal_source": getattr(detection, "proposal_sources", ["detector"] * len(boxes))[
+                    detection_index
+                ],
                 "is_right": is_right,
                 "camera_translation": camera.tolist(),
                 "joints_2d": joints2d.tolist(),
@@ -215,14 +323,23 @@ def _prepare_dual_batched(
     iou: float, rescale_factor: float, preprocess_workers: int,
     max_detections_per_class: int,
     preprocess_executor: ThreadPoolExecutor | None = None,
+    external_boxes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run detection and CPU crop preparation for one frame chunk."""
     import torch
 
-    with torch.inference_mode():
-        detections = detector(
-            frames, conf=confidence, iou=iou, verbose=False, half=True,
-        )
+    if external_boxes is None:
+        with torch.inference_mode():
+            detections = detector(
+                frames, conf=confidence, iou=iou, verbose=False, half=True,
+            )
+    else:
+        if len(external_boxes) != len(frames):
+            raise ValueError(
+                "external proposal chunk length does not match decoded frames: "
+                f"{len(external_boxes)} != {len(frames)}"
+            )
+        detections = [_external_detection(row) for row in external_boxes]
     states: list[dict[str, Any]] = []
     datasets = []
     for frame_batch_index, (frame, detection) in enumerate(zip(frames, detections)):
@@ -232,12 +349,16 @@ def _prepare_dual_batched(
         boxes = detection.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
         confidences = detection.boxes.conf.detach().cpu().numpy().astype(np.float32)
         detector_sides = detection.boxes.cls.detach().cpu().numpy().astype(np.int8)
+        proposal_sources = list(
+            getattr(detection, "proposal_sources", ["detector"] * len(boxes))
+        )
         selected = _top_detections_per_class(
             confidences, detector_sides, max_detections_per_class,
         )
         boxes = boxes[selected]
         confidences = confidences[selected]
         detector_sides = detector_sides[selected]
+        proposal_sources = [proposal_sources[int(index)] for index in selected]
         hypothesis_boxes = np.repeat(boxes, 2, axis=0)
         hypothesis_sides = np.tile(
             np.asarray([0.0, 1.0], dtype=np.float32), len(boxes)
@@ -251,6 +372,7 @@ def _prepare_dual_batched(
             "boxes": boxes,
             "confidences": confidences,
             "detector_sides": detector_sides,
+            "proposal_sources": proposal_sources,
             "source_indices": source_indices,
             "records": [None] * len(crop_dataset),
         })
@@ -361,7 +483,12 @@ def _infer_prepared_batched(
                 "hypothesis_index": int(hypothesis_index),
                 "bbox_xyxy": state["boxes"][detection_index].tolist(),
                 "confidence": float(state["confidences"][detection_index]),
-                "detector_is_right": int(state["detector_sides"][detection_index]),
+                "detector_is_right": _json_detector_side(
+                    state["detector_sides"][detection_index]
+                ),
+                "proposal_source": state.get("proposal_sources", ["detector"] * len(state["boxes"]))[
+                    detection_index
+                ],
                 "is_right": is_right,
                 "camera_translation": cameras[index].astype(np.float32).tolist(),
                 "joints_2d": joints2d.tolist(),
@@ -380,11 +507,13 @@ def infer_dual_batched(
     max_detections_per_class: int,
     preprocess_executor: ThreadPoolExecutor | None = None,
     runtime_stats: dict[str, int] | None = None,
+    external_boxes: list[dict[str, Any]] | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Run a complete detector/crop/WiLoR batch without pipeline scheduling."""
     prepared = _prepare_dual_batched(
         frames, detector, model_cfg, confidence, iou, rescale_factor,
         preprocess_workers, max_detections_per_class, preprocess_executor,
+        external_boxes,
     )
     return _infer_prepared_batched(
         prepared, model, model_cfg, device, batch_size, runtime_stats
@@ -444,6 +573,10 @@ def main() -> int:
     if not rows:
         raise ValueError("multiview dataset contains no selected frames")
     cameras = tuple(manifest["camera_ids"])
+    external_by_camera = (
+        _load_external_boxes(args.external_boxes.resolve(), cameras, rows)
+        if args.external_boxes is not None else None
+    )
     camera_confidences = {camera: args.confidence for camera in cameras}
     for value in args.camera_confidence:
         try:
@@ -495,7 +628,16 @@ def main() -> int:
                 "about one minute; later batches reuse the compiled graph.",
                 flush=True,
             )
-    detector = base.load_detector(args.detector, device)
+    detector = (
+        None if external_by_camera is not None
+        else base.load_detector(args.detector, device)
+    )
+    if external_by_camera is not None:
+        print(
+            f"Using external hand proposals from {args.external_boxes.resolve()} "
+            "(YOLO detector bypassed)",
+            flush=True,
+        )
     camera_summaries = {}
     runtime_stats = {
         "effective_hypothesis_batch_size": args.batch_size,
@@ -529,6 +671,9 @@ def main() -> int:
                                     preprocess_workers,
                                     args.max_detections_per_class,
                                     preprocess_executor, runtime_stats,
+                                    external_boxes=external_by_camera[camera][
+                                        chunk_start:chunk_start + len(frames)
+                                    ] if external_by_camera is not None else None,
                                 ),
                             )
                             for chunk_start, chunk, frames
@@ -547,8 +692,12 @@ def main() -> int:
                                         device, camera_confidences[camera],
                                         args.iou, args.rescale_factor,
                                         args.batch_size,
+                                        external_boxes=external_by_camera[camera][ordinal]
+                                        if external_by_camera is not None else None,
                                     )
-                                    for frame in frames
+                                    for ordinal, frame in enumerate(
+                                        frames, start=chunk_start
+                                    )
                                 ],
                             )
                             for chunk_start, chunk, frames
@@ -617,6 +766,10 @@ def main() -> int:
         "schema_version": 1,
         "stage": "wilor_multiview_dual_hypothesis",
         "dataset": str(dataset),
+        "external_boxes": (
+            str(args.external_boxes.resolve())
+            if args.external_boxes is not None else None
+        ),
         "camera_ids": list(cameras),
         "frame_count": len(rows),
         "hypotheses_per_detection": 2,
