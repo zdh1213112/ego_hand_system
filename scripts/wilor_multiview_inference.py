@@ -305,6 +305,57 @@ class _FastViTDetDataset(base.ViTDetDataset):
         }
 
 
+def _gpu_crop_samples(frames, datasets, model_cfg, device):
+    """Crop all hand proposals on CUDA without CPU warp and HWC->CHW copies."""
+    import torch
+    import torch.nn.functional as functional
+
+    size = int(model_cfg.MODEL.IMAGE_SIZE)
+    coordinate = torch.arange(size, device=device, dtype=torch.float32) - size / 2.0
+    y_axis, x_axis = torch.meshgrid(coordinate, coordinate, indexing="ij")
+    mean = torch.as_tensor(model_cfg.MODEL.IMAGE_MEAN, device=device, dtype=torch.float16)
+    std = torch.as_tensor(model_cfg.MODEL.IMAGE_STD, device=device, dtype=torch.float16)
+    samples = []
+    for wrapper in datasets:
+        dataset = wrapper.dataset
+        frame_index = wrapper.frame_batch_index
+        frame = frames[frame_index]
+        height, width = frame.shape[:2]
+        image = torch.from_numpy(frame).to(device).permute(2, 0, 1).unsqueeze(0).float()
+        center = torch.as_tensor(dataset.center, device=device, dtype=torch.float32)
+        sizes = np.asarray([
+            float(expand_to_aspect_ratio(
+                scale * 200, target_aspect_ratio=model_cfg.MODEL.get("BBOX_SHAPE", None),
+            ).max())
+            for scale in dataset.scale
+        ], dtype=np.float32)
+        size_tensor = torch.as_tensor(sizes, device=device)
+        sides = torch.as_tensor(dataset.right, device=device)
+        x = center[:, 0, None, None] + torch.where(
+            sides[:, None, None] == 0, -1.0, 1.0,
+        ) * x_axis[None] * size_tensor[:, None, None] / size
+        y = center[:, 1, None, None] + y_axis[None] * size_tensor[:, None, None] / size
+        grid = torch.stack((2 * x / (width - 1) - 1,
+                            2 * y / (height - 1) - 1), dim=-1)
+        crops = functional.grid_sample(
+            image.expand(len(dataset), -1, -1, -1), grid,
+            mode="bilinear", padding_mode="zeros", align_corners=True,
+        )
+        crops = crops[:, [2, 1, 0]].half()
+        crops = (crops / 255.0 - mean[None, :, None, None]) / std[None, :, None, None]
+        for index in range(len(dataset)):
+            samples.append({
+                "img": crops[index],
+                "personid": int(dataset.personid[index]),
+                "box_center": dataset.center[index],
+                "box_size": sizes[index],
+                "img_size": np.asarray([width, height], dtype=np.float32),
+                "right": dataset.right[index],
+                "frame_batch_index": frame_index,
+            })
+    return samples
+
+
 def _top_detections_per_class(
     confidences: np.ndarray, detector_sides: np.ndarray, limit: int,
 ) -> np.ndarray:
@@ -324,6 +375,9 @@ def _prepare_dual_batched(
     max_detections_per_class: int,
     preprocess_executor: ThreadPoolExecutor | None = None,
     external_boxes: list[dict[str, Any]] | None = None,
+    dual_hypothesis: bool = True,
+    max_box_area_ratio: float = 0.0,
+    gpu_crop_device=None,
 ) -> dict[str, Any]:
     """Run detection and CPU crop preparation for one frame chunk."""
     import torch
@@ -352,6 +406,17 @@ def _prepare_dual_batched(
         proposal_sources = list(
             getattr(detection, "proposal_sources", ["detector"] * len(boxes))
         )
+        if max_box_area_ratio > 0:
+            frame_area = float(frame.shape[0] * frame.shape[1])
+            areas = np.maximum(0, boxes[:, 2] - boxes[:, 0]) * np.maximum(0, boxes[:, 3] - boxes[:, 1])
+            keep = areas <= max_box_area_ratio * frame_area
+            boxes = boxes[keep]
+            confidences = confidences[keep]
+            detector_sides = detector_sides[keep]
+            proposal_sources = [value for value, accepted in zip(proposal_sources, keep) if accepted]
+        if len(boxes) == 0:
+            states.append({"records": []})
+            continue
         selected = _top_detections_per_class(
             confidences, detector_sides, max_detections_per_class,
         )
@@ -359,11 +424,17 @@ def _prepare_dual_batched(
         confidences = confidences[selected]
         detector_sides = detector_sides[selected]
         proposal_sources = [proposal_sources[int(index)] for index in selected]
-        hypothesis_boxes = np.repeat(boxes, 2, axis=0)
-        hypothesis_sides = np.tile(
-            np.asarray([0.0, 1.0], dtype=np.float32), len(boxes)
-        )
-        source_indices = np.repeat(np.arange(len(boxes), dtype=np.int32), 2)
+        if dual_hypothesis:
+            hypothesis_boxes = np.repeat(boxes, 2, axis=0)
+            hypothesis_sides = np.tile(
+                np.asarray([0.0, 1.0], dtype=np.float32), len(boxes)
+            )
+            source_indices = np.repeat(np.arange(len(boxes), dtype=np.int32), 2)
+        else:
+            valid = np.flatnonzero((detector_sides == 0) | (detector_sides == 1))
+            hypothesis_boxes = boxes[valid]
+            hypothesis_sides = detector_sides[valid].astype(np.float32)
+            source_indices = valid.astype(np.int32)
         crop_dataset = _FastViTDetDataset(
             model_cfg, frame, hypothesis_boxes, hypothesis_sides,
             rescale_factor=rescale_factor, fp16=True,
@@ -378,7 +449,9 @@ def _prepare_dual_batched(
         })
         datasets.append(_FrameHypothesisDataset(crop_dataset, frame_batch_index))
 
-    if datasets:
+    if datasets and gpu_crop_device is not None:
+        samples = _gpu_crop_samples(frames, datasets, model_cfg, gpu_crop_device)
+    elif datasets:
         combined = torch.utils.data.ConcatDataset(datasets)
         if preprocess_executor is None:
             with ThreadPoolExecutor(max_workers=preprocess_workers) as executor:
@@ -397,6 +470,7 @@ def _prepare_dual_batched(
 def _infer_prepared_batched(
     prepared: dict[str, Any], model, model_cfg, device, batch_size: int,
     runtime_stats: dict[str, int] | None = None,
+    full_output: bool = False,
 ) -> list[list[dict[str, Any]]]:
     """Run WiLoR on crops that may have been prepared beside a prior batch."""
     import torch
@@ -421,7 +495,7 @@ def _infer_prepared_batched(
             # Pinned host tensors let CUDA use its asynchronous copy engine.
             batch = {
                 key: (
-                    value.pin_memory().to(device, non_blocking=True)
+                    (value if value.device.type == device.type else value.pin_memory().to(device, non_blocking=True))
                     if isinstance(value, torch.Tensor) else value
                 )
                 for key, value in batch.items()
@@ -469,6 +543,11 @@ def _infer_prepared_batched(
         cameras = camera_full.detach().float().cpu().numpy()
         joints = result["pred_keypoints_3d"].detach().float().cpu().numpy()
         joints[:, :, 0] *= (2 * rights - 1)[:, None]
+        if full_output:
+            mano_params = {
+                key: value.detach().float().cpu().numpy()
+                for key, value in result["pred_mano_params"].items()
+            }
         for index, (frame_batch_index, hypothesis_index) in enumerate(
             zip(frame_indices, hypothesis_indices)
         ):
@@ -478,7 +557,7 @@ def _infer_prepared_batched(
             joints2d = base.project_points(
                 joints[index], cameras[index], focal_length, image_sizes[index],
             )
-            state["records"][int(hypothesis_index)] = {
+            record = {
                 "detection_index": detection_index,
                 "hypothesis_index": int(hypothesis_index),
                 "bbox_xyxy": state["boxes"][detection_index].tolist(),
@@ -493,6 +572,13 @@ def _infer_prepared_batched(
                 "camera_translation": cameras[index].astype(np.float32).tolist(),
                 "joints_2d": joints2d.tolist(),
             }
+            if full_output:
+                record["joints_3d_camera_relative"] = joints[index].tolist()
+                record["mano"] = {
+                    key: value[index].tolist()
+                    for key, value in mano_params.items()
+                }
+            state["records"][int(hypothesis_index)] = record
         batch_start = batch_end
 
     return [

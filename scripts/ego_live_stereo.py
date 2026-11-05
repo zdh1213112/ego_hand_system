@@ -628,9 +628,13 @@ def left_fisheye_calibration(path: Path) -> tuple[np.ndarray, np.ndarray]:
     with path.open("r", encoding="utf-8") as stream:
         calibration = yaml.safe_load(stream)
     cameras = calibration.get("cameras", [])
-    if len(cameras) != 2:
-        raise RuntimeError("expected two cameras in EGO calibration YAML")
-    return camera_matrices(cameras[0])
+    if len(cameras) == 2:
+        return camera_matrices(cameras[0])
+    if len(cameras) == 4:
+        left = next((camera for camera in cameras if camera.get("id") == "cam_0"), None)
+        if left is not None:
+            return camera_matrices(left)
+    raise RuntimeError("expected EGO stereo calibration or EGO4 cam_0")
 
 
 def compose_live_mano(
@@ -811,6 +815,10 @@ def main() -> int:
     frame_count = 0
     inference_count = 0
     dropped_count = 0
+    left_detected_frames = 0
+    right_detected_frames = 0
+    matched_frames = 0
+    mano_fit_times_ms: list[float] = []
     started = time.perf_counter()
     inference_time = 0.0
     latency_samples: list[float] = []
@@ -893,6 +901,8 @@ def main() -> int:
                 )
                 left_hands = left_future.result()
                 right_hands = right_future.result()
+                left_detected_frames += bool(left_hands)
+                right_detected_frames += bool(right_hands)
                 timing_totals["detect"] += time.perf_counter() - stage_started
                 stage_started = time.perf_counter()
                 matching_images = (
@@ -903,6 +913,7 @@ def main() -> int:
                     triangulate(candidate, rectification, args, matching_images)
                     for candidate in associate_hands(left_hands, right_hands)
                 ]
+                matched_frames += bool(matches)
                 timing_totals["refine_triangulate"] += time.perf_counter() - stage_started
                 stage_started = time.perf_counter()
                 timestamp_s = 0.5e-6 * (packet["left_timestamp_us"] + packet["right_timestamp_us"])
@@ -936,6 +947,8 @@ def main() -> int:
                     for match in matches:
                         result = mano_fitter.update(match)
                         if result is not None:
+                            if result.get("observed", True):
+                                mano_fit_times_ms.append(float(result["fit_ms"]))
                             current_mano_results[int(match["track_id"])] = result
                             all_mano_results[int(match["track_id"])] = result
                             angle_row = {
@@ -1006,16 +1019,18 @@ def main() -> int:
                 }
                 latency_samples.append(stats["latency_ms"])
                 stage_started = time.perf_counter()
-                if mano_fitter is not None:
-                    preview = compose_live_mano(
-                        packet["left"], current_mano_results, all_mano_results,
-                        fisheye_camera, fisheye_distortion, args,
-                        frame_count - 1, int(packet["left_index"]), stats,
-                    )
-                else:
-                    preview = compose_preview(
-                        left_rectified, right_rectified, matches, rectification, stats, args.display_width
-                    )
+                preview = None
+                if not args.no_display or args.record:
+                    if mano_fitter is not None:
+                        preview = compose_live_mano(
+                            packet["left"], current_mano_results, all_mano_results,
+                            fisheye_camera, fisheye_distortion, args,
+                            frame_count - 1, int(packet["left_index"]), stats,
+                        )
+                    else:
+                        preview = compose_preview(
+                            left_rectified, right_rectified, matches, rectification, stats, args.display_width
+                        )
                 timing_totals["render"] += time.perf_counter() - stage_started
                 stage_started = time.perf_counter()
                 if args.record:
@@ -1048,6 +1063,14 @@ def main() -> int:
     print(f"Captured pairs: {frame_count}")
     print(f"Inference pairs: {inference_count}")
     print(f"Dropped stale pairs: {dropped_count}")
+    print(f"Frames with left/right detections: {left_detected_frames}/{right_detected_frames}")
+    print(f"Frames with stereo matches: {matched_frames}")
+    if mano_fit_times_ms:
+        print(
+            f"Observed MANO fits: {len(mano_fit_times_ms)}, "
+            f"fit time median/P95: {np.median(mano_fit_times_ms):.1f}/"
+            f"{np.percentile(mano_fit_times_ms, 95):.1f} ms"
+        )
     print(f"Elapsed: {elapsed:.2f} s")
     if elapsed > 0:
         print(f"End-to-end throughput: {inference_count / elapsed:.2f} FPS")

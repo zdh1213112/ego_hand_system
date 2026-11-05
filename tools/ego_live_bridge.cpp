@@ -35,23 +35,43 @@ struct StereoPacketHeader {
     uint64_t rightIndex;
     uint64_t hostMonotonicNs;
 };
+struct FourPacketFrameInfo {
+    uint32_t size;
+    uint64_t timestampUs;
+    uint64_t index;
+};
+struct FourPacketHeader {
+    char magic[4];
+    uint16_t version;
+    uint16_t headerSize;
+    uint32_t count;
+    uint32_t width;
+    uint32_t height;
+    uint64_t hostMonotonicNs;
+    FourPacketFrameInfo frames[4];
+};
 #pragma pack(pop)
 
 struct Options {
     std::string sdkConfig;
     std::string calibrationOut;
-    uint32_t    width      = 1600;
-    uint32_t    height     = 1300;
+    uint32_t    width      = 0;
+    uint32_t    height     = 0;
     uint32_t    fps        = 30;
     uint64_t    maxFrames  = 0;
     uint32_t    timeoutMs  = 100;
     bool        calibrationOnly = false;
+    bool        fourView = false;
 };
 
 struct EncodedStereoPacket {
     StereoPacketHeader header{};
     std::vector<uint8_t> left;
     std::vector<uint8_t> right;
+};
+struct EncodedFourPacket {
+    FourPacketHeader header{};
+    std::vector<uint8_t> images[4];
 };
 
 uint64_t parseUnsigned(const char *value, const char *name) {
@@ -102,19 +122,23 @@ Options parseArgs(int argc, char **argv) {
         else if(arg == "--calibration-only") {
             options.calibrationOnly = true;
         }
+        else if(arg == "--four-view") {
+            options.fourView = true;
+        }
         else if(arg == "--help" || arg == "-h") {
             std::cerr
                 << "Usage: ego_live_bridge [--sdk-config FILE] [--calibration-out FILE]\n"
-                << "       [--calibration-only] [--width 1600] [--height 1300] [--fps 30]\n"
-                << "       [--max-frames N] [--timeout-ms 100]\n";
+                << "       [--calibration-only] [--width N] [--height N] [--fps 30]\n"
+                << "       width/height default to 1600x1300 for 1201 or 1920x1200 for 1204\n"
+                << "       [--max-frames N] [--timeout-ms 100] [--four-view]\n";
             std::exit(EXIT_SUCCESS);
         }
         else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
     }
-    if(options.width == 0 || options.height == 0 || options.fps == 0 || options.timeoutMs == 0) {
-        throw std::invalid_argument("width, height, fps and timeout must be positive");
+    if(options.fps == 0 || options.timeoutMs == 0) {
+        throw std::invalid_argument("fps and timeout must be positive");
     }
     if(options.calibrationOnly && options.calibrationOut.empty()) {
         throw std::invalid_argument("--calibration-only requires --calibration-out");
@@ -228,6 +252,46 @@ void writePacket(const EncodedStereoPacket &packet) {
     }
 }
 
+std::shared_ptr<EncodedFourPacket> copyFourPacket(
+    const std::shared_ptr<ob::Frame> (&frames)[4]) {
+    auto packet = std::make_shared<EncodedFourPacket>();
+    std::memcpy(packet->header.magic, "EGO4", 4);
+    packet->header.version = 2;
+    packet->header.headerSize = sizeof(FourPacketHeader);
+    packet->header.count = 4;
+    packet->header.width = frames[0]->as<ob::VideoFrame>()->getWidth();
+    packet->header.height = frames[0]->as<ob::VideoFrame>()->getHeight();
+    packet->header.hostMonotonicNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    for(size_t i = 0; i < 4; ++i) {
+        if(frames[i]->getFormat() != OB_FORMAT_MJPG || frames[i]->getDataSize() > UINT32_MAX) {
+            throw std::runtime_error("EGO4 requires MJPG frames smaller than 4 GiB");
+        }
+        auto video = frames[i]->as<ob::VideoFrame>();
+        if(video->getWidth() != packet->header.width || video->getHeight() != packet->header.height) {
+            throw std::runtime_error("EGO4 frame dimensions disagree");
+        }
+        packet->header.frames[i] = {
+            static_cast<uint32_t>(frames[i]->getDataSize()),
+            frames[i]->getTimeStampUs(), frames[i]->getIndex()
+        };
+        const auto *data = static_cast<const uint8_t *>(frames[i]->getData());
+        packet->images[i].assign(data, data + frames[i]->getDataSize());
+    }
+    return packet;
+}
+
+void writePacket(const EncodedFourPacket &packet) {
+    std::cout.write(reinterpret_cast<const char *>(&packet.header), sizeof(packet.header));
+    for(const auto &image : packet.images) {
+        std::cout.write(reinterpret_cast<const char *>(image.data()), static_cast<std::streamsize>(image.size()));
+    }
+    std::cout.flush();
+    if(!std::cout) {
+        throw std::runtime_error("live bridge output pipe was closed");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char **argv) try {
@@ -244,15 +308,15 @@ int main(int argc, char **argv) try {
     std::cerr << "Device: " << info->getName() << " serial=" << info->getSerialNumber()
               << " vid=0x" << std::hex << info->getVid() << " pid=0x" << info->getPid() << std::dec
               << " connection=" << info->getConnectionType() << "\n";
-    if(std::string(info->getConnectionType()).find("USB2") != std::string::npos) {
-        std::cerr << "WARNING: EGO is connected through USB2; dual 1600x1300 MJPG "
-                     "throughput may be limited. Use a direct USB3 port/cable when available.\n";
-    }
-    if(info->getVid() != 0x2bc5 || info->getPid() != 0x1201) {
-        throw std::runtime_error("connected device is not the supported EGO 2bc5:1201");
+    if(info->getVid() != 0x2bc5 || (info->getPid() != 0x1201 && info->getPid() != 0x1204)) {
+        throw std::runtime_error("connected device is not a supported EGO 2bc5:1201/1204");
     }
     if(!hasSensor(device, OB_SENSOR_COLOR_LEFT) || !hasSensor(device, OB_SENSOR_COLOR_RIGHT)) {
         throw std::runtime_error("EGO does not expose both COLOR_LEFT and COLOR_RIGHT sensors");
+    }
+    if(options.fourView && (!hasSensor(device, OB_SENSOR_COLOR_SIDE_LEFT) ||
+                            !hasSensor(device, OB_SENSOR_COLOR_SIDE_RIGHT))) {
+        throw std::runtime_error("--four-view requires both side color sensors");
     }
 
     saveCalibration(device, options.calibrationOut);
@@ -260,16 +324,26 @@ int main(int argc, char **argv) try {
         return EXIT_SUCCESS;
     }
 
+    const uint32_t width = options.width ? options.width : (info->getPid() == 0x1204 ? 1920 : 1600);
+    const uint32_t height = options.height ? options.height : (info->getPid() == 0x1204 ? 1200 : 1300);
+    if(std::string(info->getConnectionType()).find("USB2") != std::string::npos) {
+        std::cerr << "WARNING: EGO is connected through USB2; measure actual frame throughput.\n";
+    }
     auto config = std::make_shared<ob::Config>();
-    config->enableVideoStream(OB_STREAM_COLOR_LEFT, options.width, options.height, options.fps, OB_FORMAT_MJPG);
-    config->enableVideoStream(OB_STREAM_COLOR_RIGHT, options.width, options.height, options.fps, OB_FORMAT_MJPG);
+    config->enableVideoStream(OB_STREAM_COLOR_LEFT, width, height, options.fps, OB_FORMAT_MJPG);
+    config->enableVideoStream(OB_STREAM_COLOR_RIGHT, width, height, options.fps, OB_FORMAT_MJPG);
+    if(options.fourView) {
+        config->enableVideoStream(OB_STREAM_COLOR_SIDE_LEFT, width, height, options.fps, OB_FORMAT_MJPG);
+        config->enableVideoStream(OB_STREAM_COLOR_SIDE_RIGHT, width, height, options.fps, OB_FORMAT_MJPG);
+    }
     pipeline.start(config);
-    std::cerr << "Streaming EGO stereo MJPG " << options.width << "x" << options.height
+    std::cerr << "Streaming EGO " << (options.fourView ? "four-view" : "stereo") << " MJPG " << width << "x" << height
               << " @ " << options.fps << " FPS\n";
 
     std::mutex packetMutex;
     std::condition_variable packetReady;
     std::shared_ptr<EncodedStereoPacket> latestPacket;
+    std::shared_ptr<EncodedFourPacket> latestFourPacket;
     uint64_t generation = 0;
     bool stopping = false;
     std::exception_ptr writerError;
@@ -279,6 +353,7 @@ int main(int argc, char **argv) try {
         try {
             while(true) {
                 std::shared_ptr<EncodedStereoPacket> packet;
+                std::shared_ptr<EncodedFourPacket> fourPacket;
                 uint64_t selectedGeneration = 0;
                 {
                     std::unique_lock<std::mutex> lock(packetMutex);
@@ -289,9 +364,15 @@ int main(int argc, char **argv) try {
                         break;
                     }
                     packet = latestPacket;
+                    fourPacket = latestFourPacket;
                     selectedGeneration = generation;
                 }
-                writePacket(*packet);
+                if(options.fourView) {
+                    writePacket(*fourPacket);
+                }
+                else {
+                    writePacket(*packet);
+                }
                 writtenGeneration = selectedGeneration;
                 ++emitted;
             }
@@ -327,10 +408,27 @@ int main(int argc, char **argv) try {
             ++missing;
             continue;
         }
-        auto packet = copyPacket(left, right);
+        std::shared_ptr<EncodedStereoPacket> packet;
+        std::shared_ptr<EncodedFourPacket> fourPacket;
+        if(options.fourView) {
+            std::shared_ptr<ob::Frame> fourFrames[4] = {
+                left, right,
+                frameOfType(frames, OB_FRAME_COLOR_SIDE_RIGHT),
+                frameOfType(frames, OB_FRAME_COLOR_SIDE_LEFT),
+            };
+            if(!fourFrames[2] || !fourFrames[3]) {
+                ++missing;
+                continue;
+            }
+            fourPacket = copyFourPacket(fourFrames);
+        }
+        else {
+            packet = copyPacket(left, right);
+        }
         {
             std::lock_guard<std::mutex> lock(packetMutex);
             latestPacket = std::move(packet);
+            latestFourPacket = std::move(fourPacket);
             ++generation;
         }
         ++captured;
@@ -346,7 +444,7 @@ int main(int argc, char **argv) try {
     if(writerError) {
         std::rethrow_exception(writerError);
     }
-    std::cerr << "Stereo packets captured/emitted/dropped: " << captured << "/"
+    std::cerr << (options.fourView ? "Four-view" : "Stereo") << " packets captured/emitted/dropped: " << captured << "/"
               << emitted.load() << "/" << (captured - emitted.load()) << "\n";
     return EXIT_SUCCESS;
 }

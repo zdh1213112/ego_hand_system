@@ -40,9 +40,10 @@ from ego_data.genrobot_mcap import H264MatroskaWriter  # noqa: E402
 
 DEFAULT_TOPICS = {
     "camera0": "/camera/left",
-    "camera1": "/camera/left_side",
-    "camera2": "/camera/right",
-    "camera3": "/camera/right_side",
+    # Keep MCAP and four-MP4 exports in the same calibration ID order.
+    "camera1": "/camera/right",
+    "camera2": "/camera/right_side",
+    "camera3": "/camera/left_side",
 }
 
 
@@ -200,7 +201,7 @@ def synchronize_rows(
 
 
 def _copy_calibration(
-    source: Path | None, temporary: Path, cameras: tuple[str, ...],
+    source: Path | None, temporary: Path, cameras: tuple[str, ...], image_size: tuple[int, int],
 ) -> tuple[bool, dict[str, str]]:
     if source is None:
         return False, {}
@@ -214,6 +215,11 @@ def _copy_calibration(
         path = source / f"{camera}.json"
         if not path.is_file():
             raise FileNotFoundError(f"missing calibration file: {path}")
+        calibration = json.loads(path.read_text(encoding="utf-8"))
+        if calibration.get("camera_id") != camera:
+            raise ValueError(f"{path}: camera_id does not match {camera}")
+        if tuple(calibration.get("image_size", ())) != image_size:
+            raise ValueError(f"{path}: image_size does not match MCAP {image_size}")
         shutil.copy2(path, destination / path.name)
         hashes[camera] = sha256_file(path)
     return True, hashes
@@ -301,7 +307,7 @@ def normalize(args: argparse.Namespace) -> Path:
         _write_csv(temporary / "multiview_frames.csv", fields, synchronized)
 
         calibration_available, calibration_hashes = _copy_calibration(
-            args.calibration_dir, temporary, cameras
+            args.calibration_dir, temporary, cameras, image_size
         )
         deltas = [
             abs(float(row[f"{camera}_delta_us"]))

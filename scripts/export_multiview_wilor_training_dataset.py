@@ -43,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-camera-inlier-joints", type=int, default=12)
     parser.add_argument("--max-reprojection-median-px", type=float, default=25.0)
     parser.add_argument("--max-reprojection-p95-px", type=float, default=60.0)
+    parser.add_argument("--max-nokov-fit-median-mm", type=float, default=10.0,
+                        help="maximum median MANO-to-NOKOV 3D joint error per frame")
+    parser.add_argument("--max-nokov-fit-p95-mm", type=float, default=20.0,
+                        help="maximum p95 MANO-to-NOKOV 3D joint error per frame")
     parser.add_argument("--bbox-margin", type=float, default=0.10)
     parser.add_argument("--min-visible-vertex-fraction", type=float, default=0.50)
     parser.add_argument("--jpeg-quality", type=int, default=95)
@@ -436,11 +440,20 @@ def main() -> int:
     }
     sync_rows = _load_sync_rows(dataset / "multiview_frames.csv")
     fusion_rows = _load_fusion(fusion / "accepted.jsonl")
+    fusion_summary = json.loads((fusion / "summary.json").read_text(encoding="utf-8"))
+    nokov_reference = fusion_summary.get("stage") == "nokov21_aligned_reference"
+    if nokov_reference and args.view_filter != "complete21":
+        raise ValueError("NOKOV truth export requires --view-filter complete21")
     tracks = {}
     track_lookup = {}
+    required_sides = {
+        int(hand["side"]) for row in fusion_rows for hand in row["hands"]
+    }
     for side in (0, 1):
         path = fit_root / f"track_{side}.npz"
         if not path.is_file():
+            if nokov_reference and side not in required_sides:
+                continue
             raise FileNotFoundError(path)
         tracks[side] = _load_track(path)
         track_convention = (
@@ -476,6 +489,28 @@ def main() -> int:
                     "sync_index": sync_index, "side": side, "reason": "mano_fit_not_render_valid",
                 })
                 continue
+            fit_joint_median_mm = float("nan")
+            fit_joint_p95_mm = float("nan")
+            if nokov_reference:
+                joint_errors = np.asarray(track["joint_error_m"][frame_index], dtype=np.float64)
+                joint_errors = joint_errors[np.isfinite(joint_errors)] * 1000.0
+                if len(joint_errors) != 21:
+                    rejected.append({
+                        "sync_index": sync_index, "side": side,
+                        "reason": "incomplete_nokov_joint_fit",
+                    })
+                    continue
+                fit_joint_median_mm = float(np.median(joint_errors))
+                fit_joint_p95_mm = float(np.percentile(joint_errors, 95))
+                if (fit_joint_median_mm > args.max_nokov_fit_median_mm
+                        or fit_joint_p95_mm > args.max_nokov_fit_p95_mm):
+                    rejected.append({
+                        "sync_index": sync_index, "side": side,
+                        "reason": "mano_nokov_3d_fit_error",
+                        "median_mm": fit_joint_median_mm,
+                        "p95_mm": fit_joint_p95_mm,
+                    })
+                    continue
             translation = track["translation"][frame_index].astype(np.float32)
             local_vertices = (
                 track["vertices"][frame_index].astype(np.float32) - translation[None]
@@ -617,6 +652,8 @@ def main() -> int:
                         "camera_inlier_joint_count": inlier_joint_count,
                         "fit_reprojection_median_px": median_error,
                         "fit_reprojection_p95_px": p95_error,
+                        "fit_nokov_joint_median_mm": fit_joint_median_mm if nokov_reference else None,
+                        "fit_nokov_joint_p95_mm": fit_joint_p95_mm if nokov_reference else None,
                         "fusion_mode": hand.get("fusion_mode"),
                         "mano_root_offset_m": root_offset.tolist(),
                     },
@@ -650,6 +687,12 @@ def main() -> int:
             "sampling_mode": sampling["mode"],
             "sample_stride": args.sample_stride,
         })
+        if nokov_reference:
+            item["metadata"]["source_group"] = fusion_summary["source_group"]
+            item["metadata"]["supervision_source"] = "nokov21_mano_fit"
+            item["metadata"]["camera_support_semantics"] = (
+                "observed NOKOV joints projected inside native camera image"
+            )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
@@ -750,7 +793,13 @@ def main() -> int:
             "K": K.tolist(),
             "cameras": list(cameras),
             "view_filter": args.view_filter,
-            "source": "strict six-view WiLoR fusion + shared MANO sequence fit",
+            "source": (
+                "aligned NOKOV 21-point reference + shared MANO sequence fit"
+                if nokov_reference else
+                "strict multiview WiLoR fusion + shared MANO sequence fit"
+            ),
+            "nokov_reference": nokov_reference,
+            "source_group": fusion_summary.get("source_group") if nokov_reference else None,
             "mano_model_by_side": {
                 "left": "MANO_RIGHT.pkl",
                 "right": "MANO_RIGHT.pkl",
@@ -769,6 +818,8 @@ def main() -> int:
                 "max_reprojection_p95_px": args.max_reprojection_p95_px,
                 "min_visible_vertex_fraction": args.min_visible_vertex_fraction,
                 "require_complete_camera_joints": args.view_filter == "complete21",
+                "max_nokov_fit_median_mm": args.max_nokov_fit_median_mm if nokov_reference else None,
+                "max_nokov_fit_p95_mm": args.max_nokov_fit_p95_mm if nokov_reference else None,
             },
         }
         if summary["image_count"] != len(pending) or summary["label_count"] != len(pending):

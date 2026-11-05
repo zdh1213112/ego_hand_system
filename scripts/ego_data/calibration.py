@@ -238,7 +238,11 @@ def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
 
 
 def stereo_from_ego_yaml(path: Path) -> StereoCalibration:
-    cameras = list(cameras_from_ego_yaml(path).values())
-    if len(cameras) != 2:
-        raise ValueError("expected two cameras in EGO calibration")
-    return StereoCalibration.from_cameras(cameras[0], cameras[1])
+    cameras = cameras_from_ego_yaml(path)
+    if len(cameras) == 2:
+        left, right = list(cameras.values())
+    elif len(cameras) == 4 and {"cam_0", "cam_1"}.issubset(cameras):
+        left, right = cameras["cam_0"], cameras["cam_1"]
+    else:
+        raise ValueError("expected EGO stereo calibration or EGO4 cam_0/cam_1")
+    return StereoCalibration.from_cameras(left, right)

@@ -16,10 +16,37 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from normalize_orbbec_ego4_session import CAMERA_SOURCES, normalize
+from normalize_orbbec_multiview_mcap import DEFAULT_TOPICS, _copy_calibration
 from ego_data.calibration import CameraCalibration
 
 
 class NormalizeOrbbecEgo4Tests(unittest.TestCase):
+    def test_external_calibration_rejects_wrong_camera_or_image_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "calibration"
+            source.mkdir()
+            destination = root / "output"
+            destination.mkdir()
+            path = source / "camera0.json"
+            path.write_text(json.dumps({"camera_id": "camera1", "image_size": [64, 48]}))
+            with self.assertRaisesRegex(ValueError, "camera_id"):
+                _copy_calibration(source, destination, ("camera0",), (64, 48))
+            path.write_text(json.dumps({"camera_id": "camera0", "image_size": [1920, 1200]}))
+            other_destination = root / "other_output"
+            other_destination.mkdir()
+            with self.assertRaisesRegex(ValueError, "image_size"):
+                _copy_calibration(source, other_destination, ("camera0",), (64, 48))
+
+    def test_mcap_topics_match_four_video_calibration_ids(self):
+        self.assertEqual(DEFAULT_TOPICS, {
+            "camera0": "/camera/left",
+            "camera1": "/camera/right",
+            "camera2": "/camera/right_side",
+            "camera3": "/camera/left_side",
+        })
+        self.assertEqual(tuple(DEFAULT_TOPICS), tuple(CAMERA_SOURCES))
+
     def test_four_video_export_maps_calibration_and_syncs_frames(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

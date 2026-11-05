@@ -244,12 +244,13 @@ RTX 5060 保持默认的
   --optimized-video
 ```
 
-它把 `/camera/left`、`left_side`、`right`、`right_side` 无损 remux 为
-`camera0..camera3`，按设备时间戳同步，然后逐路运行双假设 WiLoR。输出的
+它把 `/camera/left`、`right`、`right_side`、`left_side` 无损 remux 为
+`camera0..camera3`，与四路 MP4 导出的 `cam_0..cam_3` 顺序一致；按设备时间戳同步，
+然后逐路运行双假设 WiLoR。输出的
 `fusion_multiview/raw_wilor_2d_4view.mp4` 只画原始相机内 2D 框和 21 点骨架，不启用
 SAM3、三角化、3D 融合或时序修正。这个 MCAP 没有 `camera_info`，因此适配器不会伪造
 标定；要做 3D 融合，需另行提供每路内参/畸变和统一坐标系外参，可通过
-`--calibration-dir` 传入 `camera0.json` ... `camera3.json`。增加 `--optimized-video` 后还会
+`--calibration-dir` 传入 `camera0.json` ... `camera3.json`，并核对相同设备序列号和安装状态。增加 `--optimized-video` 后还会
 生成 `fusion_multiview/optimized_wilor_2d_dedup_quality15_4view.mp4`：它只应用之前验证过的
 二维身份锁定、重复框合并、短时序保持和可见关节质量门控，不改变原始预测文件。
 
