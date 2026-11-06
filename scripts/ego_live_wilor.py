@@ -271,6 +271,7 @@ def main() -> int:
     device = torch.device("cuda")
     model, config = base.load_wilor_model(args.checkpoint, args.model_config, args.mano_model_dir)
     model = model.to(device).eval().half()
+    mesh_faces = np.asarray(model.mano.faces, dtype=np.int32).copy()
     detector = base.load_detector(args.detector, device)
     print(f"WiLoR loaded; detector={args.detector.name}, hypotheses={args.hypotheses}", flush=True)
 
@@ -288,6 +289,7 @@ def main() -> int:
         prepared_at = time.perf_counter()
         predictions = multi._infer_prepared_batched(
             prepared, model, config, device, batch_size=8, full_output=True,
+            include_vertices=preview_enabled,
         )
         return predictions, {
             "detector_and_crop": round((prepared_at - prep_started) * 1000, 2),
@@ -435,6 +437,17 @@ def main() -> int:
                     by_camera = state["by_camera"]
                     fused = state["fused"]
                     need_side = state["need_side"]
+                    preview_meshes = {}
+                    for camera_name, camera_hands in by_camera.items():
+                        for side, hand in camera_hands.items():
+                            vertices = hand.pop("mano_vertices_camera_relative", None)
+                            if (preview_enabled and batch_index == len(batch) - 1
+                                    and vertices is not None and side not in preview_meshes):
+                                preview_meshes[side] = {
+                                    "camera": camera_name,
+                                    "vertices": vertices,
+                                    "joints": hand["joints_3d_camera_relative"],
+                                }
                     ended = time.perf_counter()
                     row = {
                         "sequence": sequence,
@@ -489,7 +502,8 @@ def main() -> int:
                     if preview_enabled and batch_index == len(batch) - 1:
                         if preview is None:
                             preview = LivePreview(args.preview_camera,
-                                                  cameras[args.preview_camera])
+                                                  cameras[args.preview_camera],
+                                                  cameras, mesh_faces)
                         recent_span_s = (recent_frames[-1][0] - recent_frames[0][0]) / 1e6
                         output_fps = ((len(recent_frames) - 1) / recent_span_s
                                       if recent_span_s > 0 else 0.0)
@@ -498,7 +512,8 @@ def main() -> int:
                         if not preview.show():
                             stop_requested = True
                             break
-                        preview.submit(packet, _frames, row, output_fps, skipped)
+                        preview.submit(packet, _frames, row, output_fps, skipped,
+                                       preview_meshes)
                 if stop_requested:
                     break
         except KeyboardInterrupt:

@@ -471,6 +471,7 @@ def _infer_prepared_batched(
     prepared: dict[str, Any], model, model_cfg, device, batch_size: int,
     runtime_stats: dict[str, int] | None = None,
     full_output: bool = False,
+    include_vertices: bool = False,
 ) -> list[list[dict[str, Any]]]:
     """Run WiLoR on crops that may have been prepared beside a prior batch."""
     import torch
@@ -548,6 +549,9 @@ def _infer_prepared_batched(
                 key: value.detach().float().cpu().numpy()
                 for key, value in result["pred_mano_params"].items()
             }
+            if include_vertices:
+                vertices = result["pred_vertices"].detach().float().cpu().numpy()
+                vertices[:, :, 0] *= (2 * rights - 1)[:, None]
         for index, (frame_batch_index, hypothesis_index) in enumerate(
             zip(frame_indices, hypothesis_indices)
         ):
@@ -578,6 +582,8 @@ def _infer_prepared_batched(
                     key: value[index].tolist()
                     for key, value in mano_params.items()
                 }
+                if include_vertices:
+                    record["mano_vertices_camera_relative"] = vertices[index]
             state["records"][int(hypothesis_index)] = record
         batch_start = batch_end
 

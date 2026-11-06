@@ -1,4 +1,4 @@
-"""Single-camera preview with a shared metric stereo 3D hand scene."""
+"""Single-camera preview with a shaded MANO hand-mesh panel."""
 
 from __future__ import annotations
 
@@ -36,12 +36,10 @@ TITLE = "EGO-4B Live WiLoR"
 WORLD_CENTER_M = np.asarray((0.0, 0.30, 0.30), dtype=np.float32)
 WORLD_SCALE_PX_PER_M = 1050.0
 WORLD_CENTER_PX = np.asarray((CANVAS_WIDTH / 2, 280.0), dtype=np.float32)
-_YAW = np.deg2rad(30.0)
-_PITCH = np.deg2rad(25.0)
-WORLD_RIGHT = np.asarray((np.cos(_YAW), 0.0, -np.sin(_YAW)), dtype=np.float32)
-WORLD_DOWN = np.asarray((np.sin(_PITCH) * np.sin(_YAW),
-                         np.cos(_PITCH),
-                         np.sin(_PITCH) * np.cos(_YAW)), dtype=np.float32)
+WORLD_RIGHT = np.asarray((1.0, 0.0, 0.0), dtype=np.float32)
+WORLD_DOWN = np.asarray((0.0, 1.0, 0.0), dtype=np.float32)
+MESH_LIGHT = np.asarray((-0.30, -0.55, -0.78), dtype=np.float32)
+MESH_LIGHT /= np.linalg.norm(MESH_LIGHT)
 
 
 def _text(image, value, position, color=(238, 242, 245), scale=0.55, thickness=1):
@@ -70,7 +68,7 @@ def geometric_bend_degrees(joints):
 
 
 def project_metric_scene(points):
-    """Fixed orthographic view of cam_0 metric coordinates, with no per-hand fit."""
+    """Fixed frontal projection of cam_0 metric coordinates."""
     world = np.asarray(points, dtype=np.float32)
     if world.ndim != 2 or world.shape[1] != 3:
         raise ValueError("expected N x 3 metric points")
@@ -102,6 +100,43 @@ def reproject_metric_joints(joints, camera):
 def _display_joints(hand):
     """Use the low-lag metric pose in every panel, including the image overlay."""
     return hand.get("joints_3d_base_m_display", hand.get("joints_3d_base_m"))
+
+
+def fit_mano_mesh_to_stereo(vertices, model_joints, stereo_joints, camera):
+    """Rigidly align a WiLoR MANO mesh with the current stereo hand pose.
+
+    WiLoR and stereo have different depth orientation, so wrist translation
+    alone can misplace fingertips by several centimetres. No mesh scaling or
+    per-joint warping is applied.
+    """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    model_joints = np.asarray(model_joints, dtype=np.float64)
+    stereo_joints = np.asarray(stereo_joints, dtype=np.float64)
+    if (vertices.shape != (778, 3) or model_joints.shape != (21, 3)
+            or stereo_joints.shape != (21, 3)
+            or not np.isfinite(vertices).all()):
+        return None, float("inf")
+    valid = np.isfinite(model_joints).all(axis=1) & np.isfinite(stereo_joints).all(axis=1)
+    if valid.sum() < 8 or not valid[0]:
+        return None, float("inf")
+    camera_rotation = camera.T_base_camera[:3, :3]
+    source_joints = model_joints @ camera_rotation.T
+    source_vertices = vertices @ camera_rotation.T
+    source_center = source_joints[valid].mean(axis=0)
+    target_center = stereo_joints[valid].mean(axis=0)
+    covariance = (source_joints[valid] - source_center).T @ (
+        stereo_joints[valid] - target_center
+    )
+    left, _, right = np.linalg.svd(covariance)
+    correction = np.eye(3)
+    correction[-1, -1] = np.sign(np.linalg.det(left @ right))
+    rotation = left @ correction @ right
+    fitted_joints = (source_joints[valid] - source_center) @ rotation + target_center
+    error_m = float(np.median(np.linalg.norm(fitted_joints - stereo_joints[valid], axis=1)))
+    if error_m > 0.030:
+        return None, error_m
+    fitted_vertices = (source_vertices - source_center) @ rotation + target_center
+    return fitted_vertices.astype(np.float32), error_m
 
 
 def _draw_camera(frame, hands, camera, frame_index, fused, calibration):
@@ -167,73 +202,87 @@ def _draw_angles_card(panel, side, top, joints, source, fused_valid):
                               color, -1)
 
 
-def _draw_world_pose(panel, fused):
-    """Draw both hands in one cam_0 metric frame at a fixed scale."""
+def _draw_mano_mesh(panel, fused, mesh_sources, mesh_faces, cameras):
+    """Show shaded MANO surfaces in one frontal view, without a bone overlay."""
     height, width = panel.shape[:2]
     panel[:] = (29, 35, 44)
-    for y in np.arange(0.10, 0.46, 0.10):
-        line = project_metric_scene(np.asarray(((-0.60, y, 0.30),
-                                                (0.60, y, 0.30))))
-        cv2.line(panel, tuple(np.rint(line[0]).astype(int)),
-                 tuple(np.rint(line[1]).astype(int)), (43, 51, 60), 1, cv2.LINE_AA)
-    for x in np.arange(-0.60, 0.61, 0.10):
-        line = project_metric_scene(np.asarray(((x, 0.10, 0.30),
-                                                (x, 0.45, 0.30))))
-        cv2.line(panel, tuple(np.rint(line[0]).astype(int)),
-                 tuple(np.rint(line[1]).astype(int)), (43, 51, 60), 1, cv2.LINE_AA)
-    clip = (12, 60, width - 24, height - 92)
-    wrist_labels = []
+    faces = np.asarray(mesh_faces, dtype=np.int32) if mesh_faces is not None else np.empty((0, 3), np.int32)
+    if faces.ndim != 2 or faces.shape[1] != 3 or (len(faces) and (faces.min() < 0 or faces.max() >= 778)):
+        raise ValueError("MANO faces must index 778 vertices")
+    triangles = []
+    labels = []
+    captions = []
     for side in (0, 1):
-        hand = fused.get(side, {})
-        joints = _display_joints(hand)
-        if joints is None:
-            wrist_labels.append(f"{'L' if side == 0 else 'R'}: no stereo 3D")
-            continue
-        points = np.asarray(joints, dtype=np.float32)
-        if points.shape != (21, 3):
-            wrist_labels.append(f"{'L' if side == 0 else 'R'}: no stereo 3D")
-            continue
-        finite = np.isfinite(points).all(axis=1)
-        mapped = np.rint(project_metric_scene(np.where(finite[:, None], points, 0)))
-        mapped = mapped.astype(np.int32)
-        color = COLORS[side]
-        for first, second in EDGES:
-            if finite[first] and finite[second]:
-                visible, start, end = cv2.clipLine(
-                    clip, tuple(mapped[first]), tuple(mapped[second]))
-                if visible:
-                    cv2.line(panel, start, end, color, 4, cv2.LINE_AA)
-        for index, point in enumerate(mapped):
-            if finite[index] and (clip[0] <= point[0] < clip[0] + clip[2]
-                                  and clip[1] <= point[1] < clip[1] + clip[3]):
-                cv2.circle(panel, tuple(point), 5 if index == 0 else 4,
-                           (245, 248, 250), -1, cv2.LINE_AA)
         label = "L" if side == 0 else "R"
-        if finite[0]:
-            wrist = points[0]
-            _text(panel, label, tuple(mapped[0] + (-14, 20)), color, 0.65, 2)
-            wrist_labels.append(
-                f"{label} wrist ({wrist[0]:+.2f}, {wrist[1]:+.2f}, {wrist[2]:+.2f}) m"
-            )
-        else:
-            wrist_labels.append(f"{label}: wrist invalid")
+        hand = fused.get(side, {})
+        source = (mesh_sources or {}).get(side)
+        joints = _display_joints(hand)
+        if source is None or joints is None or not len(faces):
+            captions.append(f"{label}: MANO mesh unavailable")
+            continue
+        camera = (cameras or {}).get(source["camera"])
+        if camera is None:
+            captions.append(f"{label}: camera calibration unavailable")
+            continue
+        vertices, error_m = fit_mano_mesh_to_stereo(
+            source["vertices"], source["joints"], joints, camera,
+        )
+        if vertices is None:
+            captions.append(f"{label}: mesh fit unavailable")
+            continue
+        pixels = np.rint(project_metric_scene(vertices)).astype(np.int32)
+        face_points = vertices[faces]
+        polygons = pixels[faces]
+        normals = np.cross(face_points[:, 1] - face_points[:, 0],
+                           face_points[:, 2] - face_points[:, 0])
+        lengths = np.linalg.norm(normals, axis=1)
+        lighting = np.divide(
+            np.abs(normals @ MESH_LIGHT), lengths,
+            out=np.zeros_like(lengths), where=lengths > 1e-10,
+        )
+        brightness = 0.38 + 0.62 * lighting
+        shaded = np.clip(np.asarray(COLORS[side]) * brightness[:, None] + 12,
+                         0, 255).astype(np.uint8)
+        visible = (
+            (polygons[:, :, 0].max(axis=1) >= 0)
+            & (polygons[:, :, 0].min(axis=1) < width)
+            & (polygons[:, :, 1].max(axis=1) >= 55)
+            & (polygons[:, :, 1].min(axis=1) < height - 35)
+            & (lengths > 1e-10)
+        )
+        depth = face_points[:, :, 2].mean(axis=1)
+        for index in np.flatnonzero(visible):
+            triangles.append((float(depth[index]), polygons[index],
+                              tuple(int(value) for value in shaded[index]),
+                              index % 9 == 0))
+        wrist = np.asarray(joints, dtype=np.float32)[0:1]
+        labels.append((label, tuple(np.rint(project_metric_scene(wrist)[0]).astype(int)),
+                       COLORS[side]))
+        captions.append(f"{label}: MANO mesh  |  stereo fit {error_m * 1000:.1f} mm")
+    # Far surfaces first, so nearer triangles cover them. This also handles
+    # overlap between left and right hands without a separate depth buffer.
+    triangles.sort(key=lambda item: item[0], reverse=True)
+    for _, polygon, color, wire in triangles:
+        cv2.fillConvexPoly(panel, polygon, color, cv2.LINE_AA)
+        if wire:
+            cv2.polylines(panel, [polygon], True, tuple(int(value * 0.72) for value in color),
+                          1, cv2.LINE_AA)
+    for label, point, color in labels:
+        _text(panel, label, (point[0] - 12, point[1] + 18), color, 0.65, 2)
     cv2.rectangle(panel, (8, 8), (width - 8, 56), (29, 35, 44), -1)
     cv2.rectangle(panel, (8, height - 35), (width - 8, height - 8), (29, 35, 44), -1)
     cv2.rectangle(panel, (8, 8), (width - 8, height - 8), (61, 71, 82), 1)
-    _text(panel, "STEREO 3D  |  ONE METRIC SPACE", (20, 32), scale=0.71, thickness=2)
-    _text(panel, "cam_0 frame: X right, Y down, Z forward  |  oblique view, 1050 px/m",
+    _text(panel, "MANO MESH  |  FRONT VIEW", (20, 32), scale=0.71, thickness=2)
+    _text(panel, "WiLoR surface aligned to stereo joints  |  no bone overlay",
           (20, 51), (165, 181, 194), 0.48)
-    _text(panel, f"LEFT {fused.get(0, {}).get('valid_joints', 0)}/21",
-          (width - 280, 30), COLORS[0], 0.56, 2)
-    _text(panel, f"RIGHT {fused.get(1, {}).get('valid_joints', 0)}/21",
-          (width - 145, 30), COLORS[1], 0.56, 2)
-    for side, label in enumerate(wrist_labels):
-        _text(panel, label, (20 + side * (width // 2), height - 16),
+    for side, caption in enumerate(captions):
+        _text(panel, caption, (20 + side * (width // 2), height - 16),
               COLORS[side], 0.51)
 
 
 def render_preview(packet, frames, row, output_fps, skipped, camera="cam_0",
-                   calibration=None):
+                   calibration=None, mesh_sources=None, mesh_faces=None,
+                   cameras=None):
     """Render one result; this function runs off the inference thread."""
     if camera not in MAIN_CAMERAS:
         raise ValueError(f"preview camera must be one of {MAIN_CAMERAS}")
@@ -261,28 +310,33 @@ def render_preview(packet, frames, row, output_fps, skipped, camera="cam_0",
         fused_points = _display_joints(fused_hand)
         valid = int(fused_hand.get("valid_joints", 0))
         _draw_angles_card(angle_panel, side, top, fused_points, "stereo 3D", valid)
-    _draw_world_pose(canvas[HEADER_HEIGHT + CAMERA_HEIGHT:], fused)
+    _draw_mano_mesh(canvas[HEADER_HEIGHT + CAMERA_HEIGHT:], fused,
+                    mesh_sources, mesh_faces, cameras)
     return canvas
 
 
 class LivePreview:
     """Keep one pending render and display it from the OpenCV GUI thread."""
 
-    def __init__(self, camera="cam_0", calibration=None):
+    def __init__(self, camera="cam_0", calibration=None, cameras=None,
+                 mesh_faces=None):
         if camera not in MAIN_CAMERAS:
             raise ValueError(f"preview camera must be one of {MAIN_CAMERAS}")
         self.camera = camera
         self.calibration = calibration
+        self.cameras = cameras or {camera: calibration}
+        self.mesh_faces = mesh_faces
         cv2.namedWindow(TITLE, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(TITLE, CANVAS_WIDTH, CANVAS_HEIGHT)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ego-preview")
         self.future = None
 
-    def submit(self, packet, frames, row, output_fps, skipped):
+    def submit(self, packet, frames, row, output_fps, skipped, mesh_sources=None):
         if self.future is None:
             self.future = self.executor.submit(
                 render_preview, packet, frames, row, output_fps, skipped,
-                self.camera, self.calibration,
+                self.camera, self.calibration, mesh_sources, self.mesh_faces,
+                self.cameras,
             )
 
     def show(self):
