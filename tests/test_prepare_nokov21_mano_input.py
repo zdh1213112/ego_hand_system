@@ -60,6 +60,19 @@ class PrepareNokov21ManoInputTests(unittest.TestCase):
             )
             fitted_input = load_input(root / "mano_input.npz")
             self.assertEqual(fitted_input["positions_left_camera_m"].shape, (2, 2, 21, 3))
+            # Independent right-camera projection: R2 rotates camera3 points,
+            # and the intrinsic 3x3 block has no baseline translation. This must
+            # agree with P2 acting on the LEFT rectified coordinates. A second
+            # baseline application used to shift this target by f * B / Z.
+            with np.load(root / "rectification.npz") as rectification:
+                point_right = np.asarray([-0.03, 0.0, 0.5])
+                expected = (rectification["P2"][:, :3]
+                            @ rectification["R2"] @ point_right)
+                expected = expected[:2] / expected[2]
+            np.testing.assert_allclose(
+                fitted_input["right_rectified_px"][1, 0],
+                np.broadcast_to(expected, (21, 2)), atol=1e-5,
+            )
             self.assertEqual(summary["accepted_frames"], 2)
             row = json.loads((root / "observations" / "accepted.jsonl").read_text().splitlines()[0])
             self.assertEqual(row["hands"][0]["side"], 1)

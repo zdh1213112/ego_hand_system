@@ -15,6 +15,9 @@ import numpy as np
 
 
 HEADER = struct.Struct("<4sHHIIIQ" + "IQQ" * 4)
+PREFIX = struct.Struct("<4sHH")
+IMU_COUNT = struct.Struct("<I")
+IMU_SAMPLE = struct.Struct("<BQfff")
 CAMERAS = ("cam_0", "cam_1", "cam_2", "cam_3")
 
 
@@ -29,19 +32,26 @@ def read_exact(stream, size: int) -> bytes:
 
 
 class FourBridge:
-    def __init__(self, executable: Path, sdk_config: Path):
+    def __init__(self, executable: Path, sdk_config: Path, imu: bool = False):
         self.process = subprocess.Popen(
-            [str(executable), "--sdk-config", str(sdk_config), "--four-view"],
+            [str(executable), "--sdk-config", str(sdk_config), "--four-view"] + (["--imu"] if imu else []),
             stdout=subprocess.PIPE, bufsize=0,
         )
         if self.process.stdout is None:
             raise RuntimeError("failed to open EGO4 bridge output")
 
     def read(self) -> dict:
-        fields = HEADER.unpack(read_exact(self.process.stdout, HEADER.size))
-        magic, version, header_size, count, width, height, host_ns = fields[:7]
-        if (magic, version, header_size, count) != (b"EGO4", 2, HEADER.size, 4):
+        prefix = read_exact(self.process.stdout, PREFIX.size)
+        magic, version, header_size = PREFIX.unpack(prefix)
+        if magic != b"EGO4" or version not in (2, 3) or header_size != HEADER.size + (4 if version == 3 else 0):
             raise ValueError("invalid EGO4 bridge header")
+        fields = HEADER.unpack(prefix + read_exact(self.process.stdout, HEADER.size - PREFIX.size))
+        magic, version, header_size, count, width, height, host_ns = fields[:7]
+        if count != 4:
+            raise ValueError("invalid EGO4 bridge header")
+        imu_count = IMU_COUNT.unpack(read_exact(self.process.stdout, 4))[0] if version == 3 else 0
+        if imu_count > 4096:
+            raise ValueError("invalid EGO4 IMU sample count")
         if not (0 < width <= 8192 and 0 < height <= 8192):
             raise ValueError("invalid EGO4 frame dimensions")
         entries = [fields[7 + 3 * i:10 + 3 * i] for i in range(4)]
@@ -49,9 +59,16 @@ class FourBridge:
             raise ValueError("invalid EGO4 JPEG size")
         images = {camera: read_exact(self.process.stdout, entry[0])
                   for camera, entry in zip(CAMERAS, entries)}
+        imu = {"accel": [], "gyro": []}
+        for _ in range(imu_count):
+            kind, timestamp_us, x, y, z = IMU_SAMPLE.unpack(read_exact(self.process.stdout, IMU_SAMPLE.size))
+            if kind not in (0, 1):
+                raise ValueError("invalid EGO4 IMU sample type")
+            imu[("accel", "gyro")[kind]].append({"timestamp_us": timestamp_us, "xyz": [x, y, z]})
         return {
             "jpeg": images, "width": width, "height": height,
             "host_ns": host_ns,
+            "imu": imu,
             "timestamp_us": {camera: entry[1] for camera, entry in zip(CAMERAS, entries)},
             "index": {camera: entry[2] for camera, entry in zip(CAMERAS, entries)},
         }
@@ -73,11 +90,21 @@ def decode_camera(packet: dict, camera: str) -> np.ndarray:
     return image
 
 
+def merge_imu(older: dict, newer: dict) -> None:
+    """Keep IMU samples when a video frame is discarded by a latest-frame queue."""
+    source, target = older.get("imu", {}), newer.get("imu", {})
+    for kind in ("accel", "gyro"):
+        if source.get(kind):
+            target[kind] = (source[kind] + target.get(kind, []))[-4096:]
+    newer["imu"] = target
+
+
 class LatestFourReader:
-    def __init__(self, bridge: FourBridge, capacity: int = 1):
+    def __init__(self, bridge: FourBridge, capacity: int = 1, on_packet=None):
         if capacity < 1:
             raise ValueError("capacity must be positive")
         self.bridge = bridge
+        self.on_packet = on_packet
         self.capacity = capacity
         self.queue = deque()
         self.condition = threading.Condition()
@@ -93,10 +120,13 @@ class LatestFourReader:
         try:
             while not self.closing:
                 packet = self.bridge.read()
+                if self.on_packet is not None:
+                    self.on_packet(packet)
                 with self.condition:
                     self.sequence += 1
                     if len(self.queue) == self.capacity:
-                        self.queue.popleft()
+                        _, old = self.queue.popleft()
+                        merge_imu(old, packet)
                         self.dropped += 1
                     self.queue.append((self.sequence, packet))
                     self.condition.notify_all()
@@ -172,7 +202,8 @@ class DecodedFourReader:
                     packet["decoded_ns"] = time.monotonic_ns()
                     with self.condition:
                         if len(self.queue) == self.capacity:
-                            self.queue.popleft()
+                            _, old, _ = self.queue.popleft()
+                            merge_imu(old, packet)
                             self.dropped_decoded += 1
                         self.queue.append((sequence, packet, frames))
                         self.condition.notify_all()

@@ -379,6 +379,12 @@ def main() -> int:
     if not fit_summary_path.is_file():
         raise FileNotFoundError(fit_summary_path)
     fit_summary = json.loads(fit_summary_path.read_text(encoding="utf-8"))
+    fit_target = fit_summary.get("fit_target", "mano_joints")
+    if fit_target != "mano_joints":
+        raise ValueError("this exporter uses joint-to-target gates; surface-marker fits need separate validated observation gates")
+    rgb_parameters = fit_summary.get("parameters", {})
+    rgb_refined = float(rgb_parameters.get("w_silhouette", 0.0)) > 0
+
     if fit_summary.get("mano_convention") != WILOR_RIGHT_CANONICAL:
         raise ValueError(
             f"MANO fit must use {WILOR_RIGHT_CANONICAL}, got "
@@ -689,7 +695,9 @@ def main() -> int:
         })
         if nokov_reference:
             item["metadata"]["source_group"] = fusion_summary["source_group"]
-            item["metadata"]["supervision_source"] = "nokov21_mano_fit"
+            item["metadata"]["supervision_source"] = (
+                "nokov21_rgb_silhouette_mano_fit" if rgb_refined else "nokov21_mano_fit"
+            )
             item["metadata"]["camera_support_semantics"] = (
                 "observed NOKOV joints projected inside native camera image"
             )
@@ -781,6 +789,13 @@ def main() -> int:
             "schema_version": 4,
             "stage": "six_view_refined_wilor_training_dataset",
             "schema_reference": "000865.npy",
+            "fit_target_semantics": fit_target,
+            "rgb_silhouette_refinement": {
+                "enabled": rgb_refined,
+                "weight": float(rgb_parameters.get("w_silhouette", 0.0)),
+                "source": rgb_parameters.get("silhouette_input"),
+                "mask_semantics": "automatic native RGB white-glove contours" if rgb_refined else None,
+            },
             "sample_count": len(pending),
             "sampling": sampling,
             "max_samples": args.max_samples,
@@ -794,7 +809,7 @@ def main() -> int:
             "cameras": list(cameras),
             "view_filter": args.view_filter,
             "source": (
-                "aligned NOKOV 21-point reference + shared MANO sequence fit"
+                "aligned NOKOV 21-point reference + shared MANO sequence fit" + (" + native RGB contour refinement" if rgb_refined else "")
                 if nokov_reference else
                 "strict multiview WiLoR fusion + shared MANO sequence fit"
             ),

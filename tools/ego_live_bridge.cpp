@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -50,11 +51,23 @@ struct FourPacketHeader {
     uint64_t hostMonotonicNs;
     FourPacketFrameInfo frames[4];
 };
+struct FourPacketHeaderV3 {
+    FourPacketHeader base;
+    uint32_t imuCount;
+};
+struct ImuSample {
+    uint8_t kind;  // 0 = accelerometer (m/s²), 1 = gyroscope (rad/s)
+    uint64_t timestampUs;
+    float x;
+    float y;
+    float z;
+};
 #pragma pack(pop)
 
 struct Options {
     std::string sdkConfig;
     std::string calibrationOut;
+    std::string imuCalibrationOut;
     uint32_t    width      = 0;
     uint32_t    height     = 0;
     uint32_t    fps        = 30;
@@ -62,6 +75,7 @@ struct Options {
     uint32_t    timeoutMs  = 100;
     bool        calibrationOnly = false;
     bool        fourView = false;
+    bool        imu = false;
 };
 
 struct EncodedStereoPacket {
@@ -104,6 +118,9 @@ Options parseArgs(int argc, char **argv) {
         else if(arg == "--calibration-out") {
             options.calibrationOut = requireValue("--calibration-out");
         }
+        else if(arg == "--imu-calibration-out") {
+            options.imuCalibrationOut = requireValue("--imu-calibration-out");
+        }
         else if(arg == "--width") {
             options.width = static_cast<uint32_t>(parseUnsigned(requireValue("--width"), "width"));
         }
@@ -125,12 +142,15 @@ Options parseArgs(int argc, char **argv) {
         else if(arg == "--four-view") {
             options.fourView = true;
         }
+        else if(arg == "--imu") {
+            options.imu = true;
+        }
         else if(arg == "--help" || arg == "-h") {
             std::cerr
-                << "Usage: ego_live_bridge [--sdk-config FILE] [--calibration-out FILE]\n"
+                << "Usage: ego_live_bridge [--sdk-config FILE] [--calibration-out FILE] [--imu-calibration-out FILE]\n"
                 << "       [--calibration-only] [--width N] [--height N] [--fps 30]\n"
                 << "       width/height default to 1600x1300 for 1201 or 1920x1200 for 1204\n"
-                << "       [--max-frames N] [--timeout-ms 100] [--four-view]\n";
+                << "       [--max-frames N] [--timeout-ms 100] [--four-view] [--imu]\n";
             std::exit(EXIT_SUCCESS);
         }
         else {
@@ -140,8 +160,11 @@ Options parseArgs(int argc, char **argv) {
     if(options.fps == 0 || options.timeoutMs == 0) {
         throw std::invalid_argument("fps and timeout must be positive");
     }
-    if(options.calibrationOnly && options.calibrationOut.empty()) {
-        throw std::invalid_argument("--calibration-only requires --calibration-out");
+    if(options.calibrationOnly && options.calibrationOut.empty() && options.imuCalibrationOut.empty()) {
+        throw std::invalid_argument("--calibration-only requires a calibration output path");
+    }
+    if(options.imu && !options.fourView) {
+        throw std::invalid_argument("--imu requires --four-view");
     }
     return options;
 }
@@ -156,14 +179,14 @@ bool hasSensor(const std::shared_ptr<ob::Device> &device, OBSensorType type) {
     return false;
 }
 
-void saveCalibration(const std::shared_ptr<ob::Device> &device, const std::string &path) {
+void saveCalibration(const std::shared_ptr<ob::Device> &device, const std::string &path, OBPropertyID type) {
     if(path.empty()) {
         return;
     }
     std::vector<uint8_t> bytes;
     bool completed = false;
     int transferState = DATA_TRAN_STAT_TRANSFERRING;
-    device->getRawData(OB_RAW_DATA_ALIGN_CALIB_YAML, [&](OBDataTranState state, OBDataChunk *chunk) {
+    device->getRawData(type, [&](OBDataTranState state, OBDataChunk *chunk) {
         transferState = static_cast<int>(state);
         if(chunk != nullptr && chunk->data != nullptr && chunk->size > 0) {
             const size_t needed = static_cast<size_t>(chunk->offset) + chunk->size;
@@ -281,10 +304,22 @@ std::shared_ptr<EncodedFourPacket> copyFourPacket(
     return packet;
 }
 
-void writePacket(const EncodedFourPacket &packet) {
-    std::cout.write(reinterpret_cast<const char *>(&packet.header), sizeof(packet.header));
+void writePacket(const EncodedFourPacket &packet, const std::vector<ImuSample> &imu, bool withImu) {
+    if(withImu) {
+        FourPacketHeaderV3 header{packet.header, static_cast<uint32_t>(imu.size())};
+        header.base.version = 3;
+        header.base.headerSize = sizeof(header);
+        std::cout.write(reinterpret_cast<const char *>(&header), sizeof(header));
+    }
+    else {
+        std::cout.write(reinterpret_cast<const char *>(&packet.header), sizeof(packet.header));
+    }
     for(const auto &image : packet.images) {
         std::cout.write(reinterpret_cast<const char *>(image.data()), static_cast<std::streamsize>(image.size()));
+    }
+    if(withImu && !imu.empty()) {
+        std::cout.write(reinterpret_cast<const char *>(imu.data()),
+                        static_cast<std::streamsize>(imu.size() * sizeof(ImuSample)));
     }
     std::cout.flush();
     if(!std::cout) {
@@ -319,7 +354,8 @@ int main(int argc, char **argv) try {
         throw std::runtime_error("--four-view requires both side color sensors");
     }
 
-    saveCalibration(device, options.calibrationOut);
+    saveCalibration(device, options.calibrationOut, OB_RAW_DATA_ALIGN_CALIB_YAML);
+    saveCalibration(device, options.imuCalibrationOut, OB_RAW_DATA_IMU_CALIB_YAML);
     if(options.calibrationOnly) {
         return EXIT_SUCCESS;
     }
@@ -339,6 +375,41 @@ int main(int argc, char **argv) try {
     pipeline.start(config);
     std::cerr << "Streaming EGO " << (options.fourView ? "four-view" : "stereo") << " MJPG " << width << "x" << height
               << " @ " << options.fps << " FPS\n";
+
+    std::mutex imuMutex;
+    std::deque<ImuSample> imuSamples;
+    std::shared_ptr<ob::Pipeline> imuPipe;
+    if(options.imu) {
+        if(!hasSensor(device, OB_SENSOR_ACCEL) || !hasSensor(device, OB_SENSOR_GYRO)) {
+            std::cerr << "WARNING: accelerometer/gyroscope sensor missing; video continues without IMU.\n";
+        }
+        else {
+            try {
+                imuPipe = std::make_shared<ob::Pipeline>(device);
+                auto imuConfig = std::make_shared<ob::Config>();
+                imuConfig->enableAccelStream();
+                imuConfig->enableGyroStream();
+                imuPipe->start(imuConfig, [&](std::shared_ptr<ob::FrameSet> frames) {
+                    if(!frames) return;
+                    auto append = [&](const std::shared_ptr<ob::Frame> &frame, uint8_t kind) {
+                        if(!frame) return;
+                        OBFloat3D value = kind == 0 ? frame->as<ob::AccelFrame>()->getValue()
+                                                    : frame->as<ob::GyroFrame>()->getValue();
+                        std::lock_guard<std::mutex> lock(imuMutex);
+                        if(imuSamples.size() >= 4096) imuSamples.pop_front();
+                        imuSamples.push_back({kind, frame->getTimeStampUs(), value.x, value.y, value.z});
+                    };
+                    append(frames->getFrame(OB_FRAME_ACCEL), 0);
+                    append(frames->getFrame(OB_FRAME_GYRO), 1);
+                });
+                std::cerr << "EGO IMU streaming started.\n";
+            }
+            catch(const ob::Error &error) {
+                std::cerr << "WARNING: EGO IMU unavailable: " << error.what() << "\n";
+                imuPipe.reset();
+            }
+        }
+    }
 
     std::mutex packetMutex;
     std::condition_variable packetReady;
@@ -368,7 +439,18 @@ int main(int argc, char **argv) try {
                     selectedGeneration = generation;
                 }
                 if(options.fourView) {
-                    writePacket(*fourPacket);
+                    std::vector<ImuSample> samples;
+                    if(options.imu) {
+                        std::lock_guard<std::mutex> lock(imuMutex);
+                        samples.assign(imuSamples.begin(), imuSamples.end());
+                        imuSamples.clear();
+                    }
+                    // SDK accel/gyro callbacks can arrive out of timestamp order.
+                    // Keep each emitted camera packet chronological for consumers.
+                    std::stable_sort(samples.begin(), samples.end(), [](const ImuSample &a, const ImuSample &b) {
+                        return a.timestampUs < b.timestampUs;
+                    });
+                    writePacket(*fourPacket, samples, options.imu);
                 }
                 else {
                     writePacket(*packet);
@@ -435,6 +517,7 @@ int main(int argc, char **argv) try {
         packetReady.notify_one();
     }
     pipeline.stop();
+    if(imuPipe) imuPipe->stop();
     {
         std::lock_guard<std::mutex> lock(packetMutex);
         stopping = true;

@@ -282,7 +282,7 @@ def _draw_mano_mesh(panel, fused, mesh_sources, mesh_faces, cameras):
 
 def render_preview(packet, frames, row, output_fps, skipped, camera="cam_0",
                    calibration=None, mesh_sources=None, mesh_faces=None,
-                   cameras=None):
+                   cameras=None, show_exit_hint=True):
     """Render one result; this function runs off the inference thread."""
     if camera not in MAIN_CAMERAS:
         raise ValueError(f"preview camera must be one of {MAIN_CAMERAS}")
@@ -293,8 +293,9 @@ def render_preview(packet, frames, row, output_fps, skipped, camera="cam_0",
               f"{row['latency_ms']:.0f} ms data latency  |  "
               f"skipped {skipped}  |  side {'ON' if row['side_inferred'] else 'idle'}")
     _text(canvas, status, (16, 51), (164, 204, 217), 0.54)
-    _text(canvas, "q / Esc: quit", (CANVAS_WIDTH - 150, 43),
-          (165, 180, 190), 0.48)
+    if show_exit_hint:
+        _text(canvas, "q / Esc: quit", (CANVAS_WIDTH - 150, 43),
+              (165, 180, 190), 0.48)
     fused = {int(hand["is_right"]): hand for hand in row["hands"]}
     canvas[HEADER_HEIGHT:HEADER_HEIGHT + CAMERA_HEIGHT, :CAMERA_WIDTH] = _draw_camera(
         frames[camera], row["camera_hands"].get(camera, {}),

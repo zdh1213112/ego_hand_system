@@ -118,6 +118,11 @@ def parse_args() -> argparse.Namespace:
         "--rigid-initialization", action=argparse.BooleanOptionalAction, default=True,
         help="initialize each supported frame with Kabsch before nonlinear fitting",
     )
+    parser.add_argument("--surface-marker-anchors", type=Path,
+                        help="optional physical-left aligned NPZ containing normal_anchor_vertex_indices; requires a warm start")
+    parser.add_argument("--silhouette-input", type=Path,
+                        help="optional native RGB contour and visible-boundary constraints NPZ")
+    parser.add_argument("--w-silhouette", type=float, default=0.0)
     parser.add_argument("--no-video", action="store_true")
     return parser.parse_args()
 
@@ -586,6 +591,11 @@ def initialize_rigid_parameters(model, target, valid, confidence, pca_components
     return orientation_tensor, translation
 
 
+def sample_observation_points(vertices, joints, surface_marker_indices=None):
+    """Choose surface attachments for physical markers, preserving MANO joints."""
+    return joints if surface_marker_indices is None else vertices[:, surface_marker_indices]
+
+
 def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     import torch
 
@@ -613,6 +623,17 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     p1 = torch.as_tensor(observations["p1"], dtype=torch.float32, device=device)
     p2 = torch.as_tensor(observations["p2"], dtype=torch.float32, device=device)
     frame_count = target.shape[0]
+    marker_indices = observations.get("surface_marker_vertex_indices")
+    marker_indices = (torch.as_tensor(marker_indices, dtype=torch.long, device=device)
+                      if marker_indices is not None else None)
+
+    rgb = observations.get("rgb_silhouette")
+    if rgb is not None:
+        from rgb_silhouette_constraints import contour_loss
+        rgb = {key: torch.as_tensor(value, device=device,
+               dtype=(torch.bool if key.endswith("valid") else
+                      torch.long if key == "boundary_vertex_indices" else torch.float32))
+               for key, value in rgb.items()}
 
     fit_valid_np = fit_valid.detach().cpu().numpy()
     transition_profile_np = observation_transition_profile(
@@ -680,10 +701,11 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         )
         mask = fit_valid[ids]
         weights3d = confidence[ids] * mask
-        loss3d = robust_weighted_loss(joints - target[ids], weights3d, 0.006)
+        fit_points = sample_observation_points(vertices, joints, marker_indices)
+        loss3d = robust_weighted_loss(fit_points - target[ids], weights3d, 0.006)
 
-        left_prediction = project_rectified(joints, rotation, p1)
-        right_prediction = project_rectified(joints, rotation, p2)
+        left_prediction = project_rectified(fit_points, rotation, p1)
+        right_prediction = project_rectified(fit_points, rotation, p2)
         weights2d_left = image_observation_weights(
             confidence[ids], left_px[ids], left_px_valid[ids] & fit_valid[ids]
         )
@@ -693,15 +715,17 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         loss2d = robust_weighted_loss((left_prediction - left_px[ids]) / 100.0, weights2d_left, 0.02)
         loss2d += robust_weighted_loss((right_prediction - right_px[ids]) / 100.0, weights2d_right, 0.02)
         pinch_loss = pinch_distance_loss(
-            joints, target[ids], mask, confidence[ids],
+            fit_points, target[ids], mask, confidence[ids],
             getattr(args, "pinch_threshold_m", 0.025),
         )
         contact_tip_loss = contact_tip_alignment_loss(
-            joints, target[ids], mask, confidence[ids],
+            fit_points, target[ids], mask, confidence[ids],
             left_prediction, right_prediction, left_px[ids], right_px[ids],
             left_px_valid[ids] & fit_valid[ids], right_px_valid[ids] & fit_valid[ids],
             getattr(args, "contact_tip_threshold_m", 0.035),
         )
+        silhouette_loss = (contour_loss(vertices, ids, rgb)
+                           if rgb is not None else vertices.sum() * 0.)
         pose_prior = pose[ids].square().mean()
         shape_prior = betas.square().mean()
         pose_temporal = torch.tensor(0.0, device=device)
@@ -751,6 +775,7 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             + getattr(args, "w_pinch", 0.0) * pinch_loss
             + getattr(args, "w_contact_tips", 0.0) * contact_tip_loss
             + args.w_pose * pose_prior + args.w_shape * shape_prior + temporal
+            + getattr(args, "w_silhouette", 0.0) * silhouette_loss
         )
         return total, (loss3d, loss2d, pinch_loss, contact_tip_loss, pose_prior, shape_prior, temporal), vertices, joints
 
@@ -853,8 +878,11 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         total, terms, _, _ = objective(all_ids, True)
         errors = torch.linalg.vector_norm(joints - target, dim=-1)
         errors = torch.where(fit_valid, errors, torch.nan)
-        left_prediction = project_rectified(joints, rotation, p1)
-        right_prediction = project_rectified(joints, rotation, p2)
+        fit_points = sample_observation_points(vertices, joints, marker_indices)
+        observation_errors = torch.linalg.vector_norm(fit_points - target, dim=-1)
+        observation_errors = torch.where(fit_valid, observation_errors, torch.nan)
+        left_prediction = project_rectified(fit_points, rotation, p1)
+        right_prediction = project_rectified(fit_points, rotation, p2)
         left_pixel_error = torch.linalg.vector_norm(left_prediction - left_px, dim=-1)
         right_pixel_error = torch.linalg.vector_norm(right_prediction - right_px, dim=-1)
         left_pixel_error = torch.where(torch.isfinite(left_px).all(dim=-1), left_pixel_error, torch.nan)
@@ -869,9 +897,15 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             "hand_pose_pca": pose.cpu().numpy(),
             "translation": transl.cpu().numpy(),
             "joint_error_m": errors.cpu().numpy(),
+            "observation_error_m": observation_errors.cpu().numpy(),
+            "observation_points": fit_points.cpu().numpy(),
+            "fit_target": np.asarray("surface_marker_anchors" if marker_indices is not None else "mano_joints"),
+            "surface_marker_vertex_indices": (marker_indices.cpu().numpy() if marker_indices is not None else np.asarray([], dtype=np.int64)),
             "left_reprojection_error_px": left_pixel_error.cpu().numpy(),
             "right_reprojection_error_px": right_pixel_error.cpu().numpy(),
             "loss": float(total.cpu()),
+            "silhouette_loss": (float(contour_loss(vertices, all_ids, rgb).cpu())
+                                if rgb is not None else 0.0),
             "loss_terms": [float(term.cpu()) for term in terms],
             "observation_quality": transition_profile_np["quality"],
             "image_motion_px": transition_profile_np["image_motion_px"],
@@ -1017,6 +1051,22 @@ def main() -> int:
         raise ValueError("--min-fit-observed-points must be between 1 and 21")
     if args.max_unobserved_gap < 0:
         raise ValueError("--max-unobserved-gap must be non-negative")
+    surface_anchors = None
+    if args.surface_marker_anchors is not None:
+        if args.initial_output is None:
+            raise ValueError("surface-marker fitting requires --initial-output")
+        if args.image_rigid_alignment:
+            raise ValueError("image-rigid-alignment is not supported for surface markers")
+        with np.load(args.surface_marker_anchors, allow_pickle=False) as anchor_file:
+            surface_anchors = anchor_file["normal_anchor_vertex_indices"].astype(np.int64)
+        if surface_anchors.shape != (21,) or np.any((surface_anchors < 0) | (surface_anchors >= 778)):
+            raise ValueError("expected 21 valid MANO surface vertex anchors")
+    silhouette_data = None
+    if args.w_silhouette < 0 or (args.w_silhouette > 0 and args.silhouette_input is None):
+        raise ValueError("positive --w-silhouette requires --silhouette-input")
+    if args.silhouette_input is not None:
+        with np.load(args.silhouette_input, allow_pickle=False) as rgb:
+            silhouette_data = {key: rgb[key].copy() for key in rgb.files}
     source = args.mano_source.resolve()
     model_dir = args.model_dir.resolve()
     revision = validate_source_and_assets(source, model_dir, args.mano_convention)
@@ -1095,7 +1145,21 @@ def main() -> int:
             "p1": data["projection_left_rectified"],
             "p2": data["projection_right_rectified"],
         }
+        if surface_anchors is not None:
+            if handedness.lower() != "left":
+                raise ValueError("these verified surface anchors belong to the physical left hand")
+            observations["surface_marker_vertex_indices"] = surface_anchors
         observations = canonicalize_observations(observations, handedness)
+        if silhouette_data is not None:
+            np.testing.assert_array_equal(silhouette_data["pair_indices"], data["pair_indices"])
+            rgb = {key: silhouette_data[key].copy() for key in
+                   ("rotation", "translation", "K", "distortion")}
+            for key in ("boundary_vertex_indices", "boundary_valid", "contour_px", "contour_valid"):
+                rgb[key] = silhouette_data[key][:, track_pairs].copy()
+            if handedness.lower() == "left":
+                rgb["rotation"] = rgb["rotation"] @ np.diag([-1., 1., 1.])
+            observations["rgb_silhouette"] = rgb
+
         if initial_output is not None:
             initial_path = initial_output / f"track_{track_id}.npz"
             if not initial_path.is_file():
@@ -1172,6 +1236,10 @@ def main() -> int:
             if np.any(result["fit_segment_id"] >= 0) else 0,
             "pair_range": [int(data["pair_indices"][track_pairs[0]]), int(data["pair_indices"][track_pairs[-1]])],
             "loss": result["loss"],
+            "silhouette_loss": result["silhouette_loss"],
+            "fit_target": str(result["fit_target"]),
+            "observation_error_median_mm": float(np.nanmedian(result["observation_error_m"]) * 1000),
+            "observation_error_p95_mm": float(np.nanpercentile(result["observation_error_m"], 95) * 1000),
             "joint_error_median_mm": float(np.median(finite_errors)),
             "joint_error_p95_mm": float(np.percentile(finite_errors, 95)),
             "left_reprojection_error_median_px": float(np.median(left_errors)),
@@ -1187,6 +1255,7 @@ def main() -> int:
         "stage": "mano_sequence_fitting", "input": str(args.input.resolve()),
         "mano_source": str(source), "mano_revision": revision, "model_dir": str(model_dir),
         "mano_convention": args.mano_convention,
+        "fit_target": "surface_marker_anchors" if surface_anchors is not None else "mano_joints",
         "mano_model": "MANO_RIGHT.pkl",
         "mano_model_by_side": {
             "left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl",

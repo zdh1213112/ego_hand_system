@@ -4,6 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SDK_ROOT="${ORBBEC_SDK_ROOT:-${PROJECT_DIR}/third_party/orbbec_sdk}"
+if [[ -z "${ORBBEC_SDK_ROOT:-}" && ! -f "${SDK_ROOT}/lib/OrbbecSDKConfig.cmake" ]]; then
+    for SDK_CANDIDATE in "${PROJECT_DIR}"/../OrbbecSDK* "${PROJECT_DIR}"/../EGO_glove/OrbbecSDK*; do
+        if [[ -f "${SDK_CANDIDATE}/lib/OrbbecSDKConfig.cmake" ]]; then
+            SDK_ROOT="${SDK_CANDIDATE}"
+            break
+        fi
+    done
+fi
 if [[ ! -f "${SDK_ROOT}/lib/OrbbecSDKConfig.cmake" ]]; then
     echo "Orbbec SDK not found at ${SDK_ROOT}; set ORBBEC_SDK_ROOT." >&2
     exit 1

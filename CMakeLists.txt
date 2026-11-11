@@ -10,6 +10,7 @@ find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs videoio calib3d
 find_package(yaml-cpp REQUIRED)
 
 option(EGO_HAND_BUILD_LIVE "Build the Orbbec EGO real-time bridge" ON)
+option(EGO_HAND_BUILD_BASALT_LIVE "Build the continuous Basalt stereo/IMU adapter" OFF)
 set(ORBBEC_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/orbbec_sdk" CACHE PATH
     "Path to the bundled OrbbecSDK runtime")
 
@@ -58,6 +59,33 @@ if(EGO_HAND_BUILD_LIVE)
             "Copy the Linux x86_64 SDK to third_party/orbbec_sdk or set ORBBEC_SDK_ROOT."
         )
     endif()
+endif()
+
+if(EGO_HAND_BUILD_BASALT_LIVE)
+    set(BASALT_LIVE_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/basalt_live_deps" CACHE PATH
+        "Pinned header-only dependencies installed by scripts/install_basalt_live_headers.py")
+    set(BASALT_RUNTIME "${CMAKE_CURRENT_SOURCE_DIR}/third_party/basalt_runtime" CACHE PATH
+        "Verified Basalt 0.1.7 runtime")
+    if(NOT EXISTS "${BASALT_LIVE_DEPS}/basalt-headers/include/basalt/calibration/calibration.hpp"
+       OR NOT EXISTS "${BASALT_RUNTIME}/lib/libbasalt.so")
+        message(FATAL_ERROR "Install the Basalt runtime and run scripts/install_basalt_live_headers.py first")
+    endif()
+    find_package(Eigen3 REQUIRED)
+    find_package(TBB REQUIRED)
+    find_package(fmt REQUIRED)
+    find_package(Threads REQUIRED)
+    add_executable(ego_basalt_live tools/ego_basalt_live.cpp)
+    target_include_directories(ego_basalt_live SYSTEM PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/basalt/include"
+        "${BASALT_LIVE_DEPS}/basalt-headers/include"
+        "${BASALT_LIVE_DEPS}/Sophus"
+        "${BASALT_LIVE_DEPS}/cereal/include")
+    target_link_libraries(ego_basalt_live PRIVATE
+        "${BASALT_RUNTIME}/lib/libbasalt.so" Eigen3::Eigen TBB::tbb fmt::fmt
+        Threads::Threads)
+    target_compile_options(ego_basalt_live PRIVATE -Wall -Wextra -Wpedantic -march=native)
+    set_target_properties(ego_basalt_live PROPERTIES BUILD_RPATH "${BASALT_RUNTIME}/lib"
+        INSTALL_RPATH "$ORIGIN/../third_party/basalt_runtime/lib")
 endif()
 
 include(CTest)

@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from ego_four_bridge import CAMERAS, DecodedFourReader, FourBridge, HEADER, read_exact
+from ego_four_bridge import CAMERAS, DecodedFourReader, FourBridge, HEADER, IMU_SAMPLE, merge_imu, read_exact
 
 
 class FourBridgeProtocolTest(unittest.TestCase):
@@ -31,6 +31,21 @@ class FourBridgeProtocolTest(unittest.TestCase):
         fake.process = type("Process", (), {"stdout": io.BytesIO(header + b"1234")})()
         with self.assertRaisesRegex(ValueError, "invalid EGO4 bridge header"):
             fake.read()
+
+    def test_reads_v3_imu_after_four_images(self):
+        images = [b"first", b"second", b"third", b"fourth"]
+        entries = [value for i, data in enumerate(images) for value in (len(data), 1000 + i, 20 + i)]
+        header = HEADER.pack(b"EGO4", 3, HEADER.size + 4, 4, 1920, 1200, 123456, *entries)
+        samples = IMU_SAMPLE.pack(0, 1010, 1., 2., 3.) + IMU_SAMPLE.pack(1, 1011, 4., 5., 6.)
+        fake = FourBridge.__new__(FourBridge)
+        fake.process = type("Process", (), {"stdout": io.BytesIO(header + (2).to_bytes(4, "little")
+                                                              + b"".join(images) + samples)})()
+        packet = fake.read()
+        self.assertEqual(packet["imu"]["accel"], [{"timestamp_us": 1010, "xyz": [1., 2., 3.]}])
+        self.assertEqual(packet["imu"]["gyro"], [{"timestamp_us": 1011, "xyz": [4., 5., 6.]}])
+        newer = {"imu": {"accel": [{"timestamp_us": 1030, "xyz": [0., 0., 0.]}]}}
+        merge_imu(packet, newer)
+        self.assertEqual([x["timestamp_us"] for x in newer["imu"]["accel"]], [1010, 1030])
 
     def test_short_read_fails(self):
         with self.assertRaises(EOFError):

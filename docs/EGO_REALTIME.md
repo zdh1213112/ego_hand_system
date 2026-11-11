@@ -301,7 +301,7 @@ MANO拆为异步流水线，或接入训练好的 MANO 参数回归网络。
 3D 点标为有效。
 
 ```bash
-cd /home/p3/data_sda1/ego_hand_system
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
 export ORBBEC_SDK_ROOT=/home/p3/data_sda1/EGO_glove/OrbbecSDK_v2.9.0_202610120915_6f302abc_linux_x86_64
 scripts/run_ego_live_wilor.sh --max-frames 300
 ```
@@ -341,6 +341,22 @@ CMC/MCP/IP，其他手指 MCP/PIP/DIP。角度由同一帧的双目 3D 点计算
 程序每 10 个已处理帧报告最新帧队列丢帧量。输出中仅写有推理结果的帧，
 不会伪造对被丢弃的相机帧的 3D/MANO 更新。
 
+### 接入 Ego Visualizer 的实时 Rerun 界面
+
+先运行 `ego-visualizer live --socket /tmp/ego-visualizer-live.sock`，再为当前入口
+增加 `--live-socket /tmp/ego-visualizer-live.sock --no-preview`。显示端接收原始
+`cam_0` MJPEG、同一帧的融合双手 3D、Orbbec 加速度/角速度原始采样，
+以及后台计算的 cam_0/cam_1 标定双目深度；不重新编码相机图像。可用
+`--live-cameras cam_0 cam_1 cam_2 cam_3` 显示全部四目，用
+`--no-live-depth` 关闭后台双目深度。深度是 CPU 估计的毫米制轴向深度，
+不是硬件深度传感器输出。socket 输出使用独立线程和
+单帧队列，查看器断开或刷新跟不上不会阻塞 WiLoR 推理；终端退出统计会
+报告实际发送帧和显示侧主动跳过的帧数。Rerun 的 3D 场景使用 cam_0
+光学坐标（X 右、Y 下、Z 前）。世界坐标视图只在收到有效 VIO 位姿后显示。
+2026-11-06 已接入持续运行的 Basalt VIO 和延迟的 OmniEgoCap 人体预测；
+使用下方联合入口启动。相机位姿和地图来自实际双目/IMU 估计，初始化期间
+保持空白。人体是滑动窗口推理，目前吞吐明显低于相机采集。
+
 默认每 12 个**已处理帧**重新运行全图检测；其余帧沿用并移动手框。
 跟踪帧的框会标记 `proposal_source=tracker`。快速运动或遮挡可能造成短暂
 错误，需按任务调整 `--detector-every`；设置为 `1` 可每帧检测。
@@ -349,7 +365,7 @@ CMC/MCP/IP，其他手指 MCP/PIP/DIP。角度由同一帧的双目 3D 点计算
 吞吐；`--frame-batch 1` 降低延迟。`--crop-device cpu` 用于对照 CPU 裁剪路径。
 要主动发现仅出现在侧目的手，可设置 `--side-scan-every 30`；默认 `0` 只在主
 双目 3D 失败时调用侧目。WiLoR MANO 参数保留在每个相机的输出中。网格顶点
-只进入实时预览线程，不写入 JSONL；当前每只手优先使用主相机的一套 MANO
+用于实时预览和可视化传输，不写入 JSONL；当前每只手优先使用主相机的一套 MANO
 网格，以双目关节配准位置，不对多个相机的 MANO 网格做逐顶点融合。
 
 当前真机实测：四目同步时间戳跨度约 10 µs；未过滤异常大框时，
@@ -370,3 +386,112 @@ P95 延迟 238 ms。侧目多视角融合优化后的离线重放耗时中位数
 侧目调用 10 次，120/120 帧仍有双手 3D，但相机跨度为 145 帧，跳过
 25 帧，实际更新速率 24.79 Hz，延迟 P50/P95 为 80.6/194.1 ms。
 穿插实际遮挡并触发侧目后的完整 30 Hz 验收尚未完成。
+
+
+## 连续 Basalt VIO / WiLoR / 人体联合入口（2026-11-06）
+
+```bash
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
+bash scripts/run_ego_live_multimodal.sh
+```
+
+在有桌面环境的终端运行会打开轻量 Rerun 界面。SSH 无桌面可保存同一显示流：
+
+```bash
+bash scripts/run_ego_live_multimodal.sh --headless --max-frames 240 --body-max-windows 1
+```
+
+默认输出 `output/ego_live_multimodal/<时间>/`；`--output` 可指定新的目录。
+启动采集后先保持相机静止约 2 秒，镜头朝向有纹理的场景，等待 VIO 初始化
+后再缓慢移动。避免镜头贴近或被空白桌面占满。
+`Ctrl+C` 停止本次启动的进程组。不要同时运行其他 Orbbec 采集程序。
+启动器首先读取设备 flash 标定，然后让 WiLoR 单独打开四目相机；原始
+cam_0/cam_1 JPEG 和 IMU 通过独立有界 socket 发往 VIO，不二次打开设备。
+默认打开左右两栏：左侧为彩色 22 关节人体骨架、跟随手腕的实时手指骨架、VIO 和活动地图，
+不显示人体网格及关节名称；右侧为 WiLoR 的 cam_0 原生图像叠加、手指角度和 MANO 网格。
+右侧 cam_0 图像默认最多 10 Hz；
+相机采集、WiLoR 推理和 Basalt VIO 仍各自以原始速率运行。显示队列只保留最新一帧，
+Rerun 界面内存上限默认为 128 MiB 的记录数据，达到上限时丢弃最早历史。
+首页不绘制深度和 IMU，默认不运行软件双目深度计算。`--display-width`、
+`--display-preview-fps`、`--display-pose-fps`、`--display-map-fps` 可进一步降低显示负载。
+`--display-depth-hz 2` 可单独启用后台深度计算；需要同时查看原始多目、深度和 IMU
+时，可使用 `ego-visualizer live` 的完整模式。未降采样的推理与 VIO 数值结果仍保存在
+`predictions.jsonl` 和 `vio/*.jsonl`，原有离线命令继续可用。
+
+人体默认 1 秒窗口、6 步 DDIM 采样、关闭优化；预测出的窗口以原速度播放，
+不再按推理耗时放慢。人体姿态仍比当前相机画面延迟，手指骨架从当前 WiLoR
+结果更新，并将手腕接到最近的人体骨架手腕上。`--body-ddim-steps 30` 可恢复
+原模型的 30 步采样，`--body-optimization` 恢复较慢的优化；
+`--body-window-s`、`--body-stride-s` 可调整窗口和刷新间隔。
+`--no-body` 可单独查看手部/VIO，`--max-frames 0` 持续运行。
+
+脚本自动验证/安装锁定 SHA256 的项目内 Basalt headers、Sophus、cereal，
+并编译 `ego_live_bridge` 和 `ego_basalt_live`，不替换原 Basalt 动态库。
+默认 Python 为 `~/miniforge3/envs/ego-hand/bin/python`，可通过
+`EGO_HAND_PYTHON`、`ORBBEC_SDK_ROOT`、`EGO_BUILD_JOBS` 配置。
+
+- `wilor/predictions.jsonl`：真实处理过的手部帧，保留原始设备时间戳。
+- `vio/vio.jsonl`：仅相机位姿，供 OmniEgoCap 匹配。
+- `vio/world.jsonl`：相机位姿和活动稀疏地图更新，供 Rerun `live-world`。
+- `body.jsonl`：22 个米制世界坐标人体关节、源时间戳及窗口计算耗时；实时界面只接收骨架。
+- `vio/summary.json`、`run_summary.json`、`logs/`：统计与各子进程日志。
+- `live.rrd` 和 `live.summary.json`：仅 `--headless` 模式保存已限频的显示流；用
+  `../ego-visualizer/.venv/bin/ego-visualizer view /完整路径/live.rrd` 在桌面回看。
+
+`tools/ego_basalt_live.cpp` 在一次会话中只创建一个光流/VIO 估计器，持续
+向 Basalt 的双目和 IMU 队列送数据。`ego_live_basalt_stream.py` 解码/缩放
+灰度图，应用 flash IMU 标定一次，使用标定的图像到 IMU 时间偏移一次；
+输出时恢复 cam_0 原设备时间戳。启动时固件缓存的过期 IMU 被过滤，等待
+当前有效 IMU 覆盖后初始化。严重 IMU 丢失会报错，不伪造轨迹。
+旧 `ego_live_basalt.py` 是未验收的重复离线窗口原型，不是联合入口。
+
+世界坐标是米制、右手系、Z 向上，`T_world_cam0=T_world_imu*T_imu_cam0`。
+稀疏地图是当前 VIO 活动路标，不是带闭环的全局地图。未提供实测相机到头部
+外参时，Rerun 的 head 轨迹代表 cam_0；OmniEgoCap 则沿用初始近似头部外参，
+起始相机高度默认按本次坐姿实测约 1.25 m，可通过 `--camera-height` 修改。要评估人体
+绝对位置精度，需要测量真实高度和相机到头部外参。
+
+Rerun 按原设备时间戳对齐异步结果，最多匹配相差 50 ms 的手与位姿；
+快 VIO/慢神经网络和慢 VIO/快手部结果都保留历史缓冲。默认人体先积累 1 秒窗口
+再运行模型，延迟结果回写到采集时刻。不要把时间轴上对齐的结果解释成
+零延迟，也不要将 VIO 适配器耗时解释为整条神经网络链路延迟。
+
+2026-11-06 流畅模式真机 450 帧测试：WiLoR 23.10 Hz，显示端发送 410 帧且
+没有 IMU 异常、发送超时或断管；人体两次 60 帧推理耗时 10.2/6.6 秒。
+追加 1500 帧、65.30 秒测试：WiLoR 22.96 Hz，显示端发送 1388 帧，
+查看器 0 次异常，采集端 0 次发送超时/断管；人体 9 次推理，中位数 6.65 秒。
+运行约 40 秒时的桌面画面时间轴与采集经过时间同步，双目画面与彩色人体骨架
+仍在更新。上述发送帧数不等于桌面实际渲染帧数；人体还需先积累 2 秒窗口，
+首个窗口计算约 9.88 秒，不能保证所有场景都满足 5–10 秒延迟。
+
+改版后的 100 秒、3000 帧真机运行中，WiLoR 保持 30.00 Hz，实时合成画面发送
+964 帧，VIO 输出 2974 次位姿，人体输出 18 次，查看器无异常。桌面截图中
+合成画面帧号 2231 与 Rerun 当前时间约 73.2 秒一致，没有重现录屏中的累计
+数十秒落后。该次相机前没有手，MANO 网格显示为不可用；手进入视野后仍需
+人工检查双手网格的视觉效果。人体为模型估计，并非人体光学真值。
+
+2026-11-06 低延迟版真机 550 帧测试：默认 1 秒窗口、6 步 DDIM，人体 15 次预测；
+首轮之后推理耗时中位数 1.29 秒，预测帧相对最新匹配输入的滞后中位数 1.28 秒，
+两膝角中位数约 107°。左侧手指骨架已在桌面画面中确认显示。滞后统计不含 WiLoR
+从相机取帧到结果输出的约百毫秒处理时间，也不代表桌面渲染的精确端到端延迟。
+
+联合真机验收统计与限制见
+`work/20261106/live_vio_resume/ACCEPTANCE.md`（相对 EGO_glove 项目根目录）。
+
+
+初始化会积累 2 秒真实 IMU。若其角速度均值/方差和加速度方差满足静止候选
+门限，则用平均重力方向初始化姿态，用平均角速度初始化陀螺偏置，并估计
+重力方向上可观测的加速度残余偏置。运动起步不满足门限时保留 Basalt 默认
+初始化。只设置估计器初始状态，不改写 flash 标定，也不锁死后续相机轨迹。
+记录 `vio/backend_events.jsonl.initialization.json` 及 summary 的 `initialization`。
+单独 VIO 入口 `--initialization-s` 可改变累积时长（0–5 秒，默认 2 秒）。
+
+弱纹理近距离桌面仍是已知失败场景：同一段真实静止输入，零偏置版本在
+约 9.93 秒内漂移 14.01 m；短窗口初始化降到 0.535 m。积累 2 秒后，严格
+相同的后续 7.93 秒输入中，基线漂移 9.003 m、修复版漂移 0.232 m。这是
+漂移改善，仍不满足高精度静止跟踪；地图点数量和有限刚体矩阵不代表位置
+准确。运动场景无外部真值时，也不能由这些统计推导毫米级精度。
+
+启动脚本兼容 `data_sda1/ego_hand_system` 和 `data_sda1/EGO_glove/ego_hand_system`
+两种目录布局，会查找相邻目录中的共享 SDK、Ego Visualizer 和 OmniEgoCap。
+仍可通过 `ORBBEC_SDK_ROOT`、`--visualizer`、`--omni-root` 显式指定依赖位置。

@@ -136,8 +136,11 @@ def prepare(aligned_path: Path, dataset: Path, output: Path, rectification_outpu
     left_pixels, left_inside = _project(
         positions_left, rectification.R1, rectification.P1, rectification.image_size
     )
+    # P2 includes the stereo baseline and projects points in the LEFT rectified
+    # frame. Feeding right-camera coordinates here would apply that baseline
+    # twice, corrupting the right-view diagnostics and any 2-D fitting loss.
     right_pixels, right_inside = _project(
-        positions_right, rectification.R2, rectification.P2, rectification.image_size
+        positions_left, rectification.R1, rectification.P2, rectification.image_size
     )
     raw_views = {}
     for camera, positions in ((left_camera, positions_left), (right_camera, positions_right)):

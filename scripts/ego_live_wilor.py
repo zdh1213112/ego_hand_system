@@ -22,7 +22,9 @@ from camera_models import project_points, unproject_points
 from ego_data.calibration import cameras_from_ego_yaml
 from ego_four_bridge import DecodedFourReader, FourBridge, LatestFourReader, decode_camera
 from ego_live_stabilizer import LiveHandStabilizer
+from ego_live_depth import LiveStereoDepth
 from ego_live_wilor_preview import LivePreview
+from ego_live_publish import LivePublisher
 import wilor_inference as base
 import wilor_multiview_inference as multi
 
@@ -70,6 +72,24 @@ def parse_args():
                         help="disable the live hand-pose preview window")
     parser.add_argument("--preview-camera", choices=MAIN, default="cam_0",
                         help="main camera shown in the live preview")
+    parser.add_argument("--live-socket", type=Path,
+                        help="send live frames and predictions to ego-visualizer live")
+    parser.add_argument("--vio-socket", type=Path,
+                        help="send cam_0/cam_1 and IMU at capture rate to the online Basalt adapter")
+    parser.add_argument("--live-cameras", nargs="+", choices=MAIN + SIDE, default=["cam_0"],
+                        help="camera images sent to the live visualizer; defaults to cam_0")
+    parser.add_argument("--live-width", type=int,
+                        help="downscale only live viewer JPEGs to this width; capture and VIO retain native resolution")
+    parser.add_argument("--live-preview-panel", action="store_true",
+                        help="send the WiLoR camera, angles and MANO mesh as one live viewer panel")
+    parser.add_argument("--live-native-panel", action="store_true",
+                        help="send camera, 2D annotations, angles and MANO mesh as native Rerun entities")
+    parser.add_argument("--live-preview-fps", type=float, default=10.0,
+                        help="maximum live preview refresh rate; capture and inference remain uncapped")
+    parser.add_argument("--live-depth-hz", type=float, default=0,
+                        help="limit estimated stereo depth updates in the viewer; 0 keeps every eligible frame")
+    parser.add_argument("--no-live-depth", action="store_true",
+                        help="disable background estimated cam0/cam1 stereo depth")
     return parser.parse_args()
 
 
@@ -243,11 +263,20 @@ def fuse_side(side, selected, cameras, max_reprojection_px, min_valid_joints):
 
 def main() -> int:
     args = parse_args()
+    preview_enabled = not args.no_preview and bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
     if (args.max_frames < 0 or args.queue < 1 or args.side_scan_every < 0
             or args.warmup < 0 or args.detector_every < 1):
         raise ValueError("invalid frame, queue, scan, or warmup count")
     if not 0 < args.max_box_area_ratio <= 1:
         raise ValueError("max-box-area-ratio must be in (0, 1]")
+    if args.live_preview_panel and args.live_native_panel:
+        raise ValueError("choose one live panel mode")
+    if (args.live_preview_panel or args.live_native_panel) and args.preview_camera not in args.live_cameras:
+        raise ValueError("live preview camera must be included in --live-cameras")
+    if args.live_preview_fps <= 0:
+        raise ValueError("--live-preview-fps must be positive")
     if not torch.cuda.is_available():
         raise RuntimeError("live WiLoR requires CUDA")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -271,7 +300,8 @@ def main() -> int:
     device = torch.device("cuda")
     model, config = base.load_wilor_model(args.checkpoint, args.model_config, args.mano_model_dir)
     model = model.to(device).eval().half()
-    mesh_faces = np.asarray(model.mano.faces, dtype=np.int32).copy()
+    mesh_faces = (np.asarray(model.mano.faces, dtype=np.int32).copy()
+                  if args.live_preview_panel or args.live_native_panel or preview_enabled else None)
     detector = base.load_detector(args.detector, device)
     print(f"WiLoR loaded; detector={args.detector.name}, hypotheses={args.hypotheses}", flush=True)
 
@@ -289,17 +319,22 @@ def main() -> int:
         prepared_at = time.perf_counter()
         predictions = multi._infer_prepared_batched(
             prepared, model, config, device, batch_size=8, full_output=True,
-            include_vertices=preview_enabled,
+            include_vertices=args.live_preview_panel or args.live_native_panel or preview_enabled,
         )
         return predictions, {
             "detector_and_crop": round((prepared_at - prep_started) * 1000, 2),
             "wilor_forward": round((time.perf_counter() - prepared_at) * 1000, 2),
         }
 
-    bridge = FourBridge(args.bridge, args.sdk_config)
+    vio_publisher = LivePublisher(args.vio_socket, MAIN) if args.vio_socket else None
+    bridge = FourBridge(args.bridge, args.sdk_config, imu=bool(args.live_socket or args.vio_socket))
     capture_capacity = max(args.queue, args.frame_batch)
+    def publish_vio_packet(packet):
+        if vio_publisher is not None:
+            vio_publisher.submit({"timestamp_us": packet["timestamp_us"],
+                                  "imu": packet.get("imu", {})}, packet)
     reader = DecodedFourReader(
-        LatestFourReader(bridge, capture_capacity), capacity=args.frame_batch,
+        LatestFourReader(bridge, capture_capacity, on_packet=publish_vio_packet), capacity=args.frame_batch,
     )
     processed = 0
     warmed = False
@@ -313,13 +348,20 @@ def main() -> int:
     recent_latency = deque(maxlen=300)
     recent_frames = deque()
     stabilizer = LiveHandStabilizer()
-    preview_enabled = not args.no_preview and bool(
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    )
     if not args.no_preview and not preview_enabled:
         print("No desktop display found; live preview disabled. JSONL output remains active.",
               flush=True)
     preview = None
+    depth_worker = LiveStereoDepth(cameras) if args.live_socket and not args.no_live_depth else None
+    publisher = (LivePublisher(args.live_socket, args.live_cameras, depth_worker,
+                               image_width=args.live_width, imu_hz=50 if args.live_width else None,
+                               compact=bool(args.live_width),
+                               max_fps=args.live_preview_fps if args.live_preview_panel or args.live_native_panel else None,
+                               preview={"camera": args.preview_camera, "cameras": cameras, "faces": mesh_faces}
+                               if args.live_preview_panel else None,
+                               native={"camera": args.preview_camera, "cameras": cameras, "faces": mesh_faces}
+                               if args.live_native_panel else None) if args.live_socket else None)
+    last_depth_submit_us = None
     stop_requested = False
     with ThreadPoolExecutor(max_workers=4) as executor, \
             (args.output / "predictions.jsonl").open("wb") as output:
@@ -441,17 +483,16 @@ def main() -> int:
                     for camera_name, camera_hands in by_camera.items():
                         for side, hand in camera_hands.items():
                             vertices = hand.pop("mano_vertices_camera_relative", None)
-                            if (preview_enabled and batch_index == len(batch) - 1
-                                    and vertices is not None and side not in preview_meshes):
+                            if vertices is not None and side not in preview_meshes:
                                 preview_meshes[side] = {
-                                    "camera": camera_name,
-                                    "vertices": vertices,
+                                    "camera": camera_name, "vertices": vertices,
                                     "joints": hand["joints_3d_camera_relative"],
                                 }
                     ended = time.perf_counter()
                     row = {
                         "sequence": sequence,
                         "timestamp_us": packet["timestamp_us"],
+                        "imu": packet.get("imu", {}),
                         "frame_index": packet["index"],
                         "sync_spread_us": state["sync_delta"],
                         "sync_valid": state["sync_valid"],
@@ -475,6 +516,14 @@ def main() -> int:
                     stabilizer.update_row(row)
                     output.write(orjson.dumps(row, option=orjson.OPT_NON_STR_KEYS) + b"\n")
                     output.flush()
+                    if publisher is not None:
+                        depth_stamp = packet["timestamp_us"]["cam_0"]
+                        if (depth_worker is not None and
+                                (not args.live_depth_hz or last_depth_submit_us is None or
+                                 depth_stamp - last_depth_submit_us >= 1_000_000 / args.live_depth_hz)):
+                            depth_worker.submit(depth_stamp, _frames)
+                            last_depth_submit_us = depth_stamp
+                        publisher.submit(row, packet, preview_meshes)
                     camera_timestamp = packet["timestamp_us"]["cam_0"]
                     if first_timestamp_us is None:
                         first_timestamp_us = camera_timestamp
@@ -502,8 +551,7 @@ def main() -> int:
                     if preview_enabled and batch_index == len(batch) - 1:
                         if preview is None:
                             preview = LivePreview(args.preview_camera,
-                                                  cameras[args.preview_camera],
-                                                  cameras, mesh_faces)
+                                                  cameras[args.preview_camera], cameras, mesh_faces)
                         recent_span_s = (recent_frames[-1][0] - recent_frames[0][0]) / 1e6
                         output_fps = ((len(recent_frames) - 1) / recent_span_s
                                       if recent_span_s > 0 else 0.0)
@@ -512,14 +560,22 @@ def main() -> int:
                         if not preview.show():
                             stop_requested = True
                             break
-                        preview.submit(packet, _frames, row, output_fps, skipped,
-                                       preview_meshes)
+                        preview.submit(packet, _frames, row, output_fps, skipped, preview_meshes)
                 if stop_requested:
                     break
         except KeyboardInterrupt:
             print("Stopping live WiLoR...", flush=True)
         finally:
             reader.close()
+            if publisher is not None:
+                publisher.close()
+                print(f"Live visualizer: sent={publisher.sent}, skipped_for_display={publisher.dropped}",
+                      flush=True)
+            if vio_publisher is not None:
+                vio_publisher.close()
+                print(f"Live VIO input: sent={vio_publisher.sent}, skipped={vio_publisher.dropped}", flush=True)
+            if depth_worker is not None:
+                depth_worker.close()
             if preview is not None:
                 preview.close()
     if processed:
