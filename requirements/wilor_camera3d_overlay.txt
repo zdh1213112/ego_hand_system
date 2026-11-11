@@ -1,0 +1,5 @@
+# Project-local overrides for the existing wilor Conda environment's NumPy 2 ABI.
+scikit-image==0.25.2
+pandas==2.3.3
+# Required by detector_1009.pt (YOLO26n); kept local to this project.
+ultralytics==8.4.76

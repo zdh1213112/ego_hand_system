@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -21,7 +22,7 @@ import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WILOR_ROOT = PROJECT_ROOT / "third_party" / "WiLoR"
+WILOR_ROOT = Path(os.environ.get("EGO_WILOR_ROOT", PROJECT_ROOT / "third_party" / "WiLoR")).expanduser().resolve()
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 sys.path.insert(0, str(WILOR_ROOT))
 

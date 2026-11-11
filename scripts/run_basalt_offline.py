@@ -118,6 +118,10 @@ def main() -> int:
         dataset / "mav0" / "imu0" / "data.csv",
     ]
     dataset_ready = all(path.is_file() for path in dataset_outputs)
+    if dataset_ready:
+        from ego_data.time_sync import require_zero_camera_offset
+        require_zero_camera_offset(json.loads((dataset/'summary.json').read_text()),str(dataset))
+        require_zero_camera_offset(json.loads((dataset/'calibration.json').read_text()),str(dataset))
     if args.rebuild_dataset and dataset.exists():
         raise RuntimeError(
             f"--rebuild-dataset never deletes data. Choose a fresh --output-root: {output_root}"

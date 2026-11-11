@@ -232,6 +232,17 @@ RTX 5060 保持默认的
 脚本会自动使用 `camera2/3` 作为锚点，并生成 `diagnostic_4view.mp4`；确认冒烟测试后将
 `--max-frames` 改为 `0` 运行完整数据。
 
+### 鱼眼去畸变与原图对比
+
+`scripts/run_multiview_wilor_undistorted_experiment.sh` 在检测前将多路 KB/GEN-DS
+鱼眼图像转换为针孔视图，并携带新标定运行同一套 WiLoR、融合及渲染流程；
+原来的 `run_multiview_wilor_experiment.sh` 默认仍直接处理原图。
+两组实验使用不同输出目录，可用 `compare_multiview_wilor_undistortion.py` 比较检测覆盖、
+3D 输出覆盖及原图坐标下的配对残差。命令、视场角设置和评价限制见
+[鱼眼去畸变对比指南](docs/MULTIVIEW_WILOR_UNDISTORTION_COMPARISON.md)。
+去畸变入口追加 `--original-video`，可额外生成 `final_on_original_Nview.mp4`：
+在原始鱼眼视频上显示回投影后的融合 3D、2D 回退骨架和检测框；已有推理与融合结果可直接复用。
+
 ### 新 Orbbec EGO Pro 四目 MCAP：原始 WiLoR 基线
 
 新款 EGO Pro 录制目录（包含一个 `.mcap` 和对应 `meta_*.json`）使用以下适配脚本：
@@ -255,6 +266,16 @@ SAM3、三角化、3D 融合或时序修正。这个 MCAP 没有 `camera_info`�
 二维身份锁定、重复框合并、短时序保持和可见关节质量门控，不改变原始预测文件。
 
 ### Orbbec EGO Pro 四路 MP4 导出：复用 GEN 多视角链路
+
+若需要各相机坐标下的 WiLoR 三维关节、手腕位姿与 MANO 网格，可使用
+`scripts/run_orbbec_wilor_3d.py`。它支持现有四路 MP4 与 KB 标定，输出每目 NPZ、
+位姿 CSV、OBJ 样例及网格叠加视频；这是独立单目估计，未做多目几何融合。
+执行命令和字段含义见 [WiLoR 相机坐标 3D 输出指南](docs/ORBBEC_EGO4_WILOR_CAMERA_3D.md)。
+
+使用 `detector_1009.pt` 运行四目融合并对接 Basalt VIO 的流程，见
+[Orbbec 多目手部与 OmniEgoCap 输入适配](docs/ORBBEC_MULTIVIEW_OMNIEGOCAP.md)。
+最终人体头部轨迹需安装外参与地面高度；该指南也记录本次已确认的 IMU 位置、首帧中立姿态、
+约 1.70 m 高度近似方案。
 
 `recordings/20260928` 这类录制目录包含四路 MP4、各路 `*_pts.csv` 和
 `*_calibration_camera.yaml`。规范化器使用 YAML 中的相机 ID 建立映射：
@@ -709,6 +730,323 @@ python scripts/run_basalt_offline.py \
 ```
 
 详见 [docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md)。
+
+多目头环定位可使用独立的 `scripts/prepare_basalt_video_dataset.py`：输入 2/4/6 路视频、
+逐帧纳秒时间戳和原生 Basalt 标定，转换为 EuRoC 数据集，并可选直接调用 Monado 分支的
+`basalt_vio`。无 IMU 运行 VO，提供 IMU 时运行 VIO；不要求手部轨迹。
+构建、数据格式和验收步骤见 [多目头环定位复现指南](docs/BASALT_MONADO_MULTICAMERA_REPRODUCTION.md)。
+
+带完整厂商标定与 IMU 的 Orbbec 双目/四目录像，可直接用
+`scripts/run_orbbec_headring_vio.py` 生成头环参考位姿，并加 `--save-marg-data` 保留建图缓存。
+四目录制的实际运行、稀疏地图导出和坐标约定见
+[EGO Pro 四目 VIO 与地图结果](docs/BASALT_EGO4_RECORDING_20260928_144343.md)。
+
+### PICO 原始录制数据质量检查
+
+`scripts/check_pico_capture_quality.py` 检查 PICO 自身的头显和 Tracker 原始 CSV：
+数值/四元数、设备与主机时间连续性、Tracker 缺失、轨迹突跳及元数据行数。
+按 Tracker 序列号统计；不读取 NOKOV，也不代表跨系统精度评价。仅依赖 Python 标准库。
+
+```bash
+python scripts/check_pico_capture_quality.py \
+  /path/to/session_pico_cal_20261105_004 \
+  --output output/pico_quality
+```
+
+支持一次传入多个 session 或其 `pico/` 子目录。打开 `output/pico_quality/index.html` 查看报告；
+同时生成汇总 JSON/CSV、每个 session 的 `sample_quality.csv` 和 `issues.csv`，原始数据保持不变。
+默认以单步位移 >50 mm、姿态角差 >5°、设备间隔 >中位数的 2.5 倍作经验复核，
+可用 `--max-position-step-mm`、`--max-rotation-step-deg`、`--gap-factor` 调整；
+`--expected-hz` 可指定已知设备更新率，不能填主机 `poll_hz`。无跟踪状态字段时明确标为未知。
+退出码：`0` 本轮未检出异常，`1` 有数据需复核（报告已生成），`2` 参数或读写错误。
+
+### PICO VIO / NOKOV 逐 session 评价
+
+`scripts/analyze_pico_vio_nokov.py` 用 NOKOV 的 `pico_head` 刚体评价已录制的 PICO 头显 VIO。
+每段前 20 秒独立估计时间补偿、安装外参 `T_B_H` 和局部世界配准 `T_N_P`，固定后统计
+整段参考有效样本的指标；尺度固定为 1，并根据 NOKOV Marker 质量屏蔽参考异常。
+
+```bash
+python scripts/analyze_pico_vio_nokov.py \
+  /path/to/session_004 /path/to/session_005 /path/to/session_006 \
+  --output output/pico_vio_nokov
+```
+
+需要现有 VIO 环境中的 NumPy、SciPy、Matplotlib。打开输出的 `report.html` 查看轨迹、误差和
+各 session 转换关系的两两偏差；`calibration.json` 保存完整矩阵，`head_errors.csv` 保存逐帧误差。
+`T_A_B` 表示 B→A，平移单位 m；`T_P_N` 是 `T_N_P` 的逆。
+刚体到局部世界的动态关系另存 `T_P_B_per_frame.csv`，世界关系差异不直接等同于安装误差。
+可用 `--calibration-seconds`、`--reference-marker-rms-mm`、`--reference-guard-s` 调整分析设置。
+报告给出整段及每约 8 秒一段的剩余时间差，明确比较 PICO 头显 VIO 与 NOKOV 头显刚体的同一次运动。
+整段结果保存在 `full_sequence_time_offset.csv`，分段结果保存在 `motion_time_residuals.csv`；均为运动估计值。
+
+### VIO / NOKOV 误差评估与时间同步
+
+**新流程使用下述两个独立脚本：先保存标定关系，再读取固定关系运行整段 VIO、建图和误差评估。**
+历史实验由 `analyze_basalt_ego4_comparison.py` 评估，NOKOV 时间偏移由
+`calibrate_nokov_ego4.py` 估计。可视化页面的角速度 RMSE 是同步检查指标，不能当作 VIO 位姿精度。
+
+#### 先标定，再用固定关系处理整段录制
+
+在项目根目录依次运行。以下默认输入即本次 EGO `20261104_195844` 与 NOKOV `session_20261104_195852_461949`；
+更换输入时在第一步指定 `--ego-session <EGO目录>`、`--nokov <NOKOV目录>`。
+输出目录应为新目录；已有标定和结果可直接查看，无需再次运行。
+
+```bash
+# 1. 独立标定：时间偏移、头环刚体与 IMU 安装关系、三种配置各自的世界变换
+/home/lff/miniforge3/envs/wilor/bin/python scripts/calibrate_ego_nokov_relations.py \
+  --output output/ego_nokov_fixed_calibration_new
+
+# 2. 读取第一步的固定关系：整段 VIO → NFR 稀疏建图 → 全程误差 → 可视化
+/home/lff/miniforge3/envs/wilor/bin/python scripts/run_vio_nokov_fixed.py \
+  --relations output/ego_nokov_fixed_calibration_new/relations.json \
+  --output output/ego_nokov_fixed_full_new
+```
+
+第一步用前约 20 秒的原始 IMU 与 NOKOV 估计时间／安装关系，并预跑约 3 秒 VIO、用前 2 秒保存世界变换；
+因此它是**本段数据的前段标定**，不是独立测量得到的安装外参。第二步不重新拟合时间、安装外参、世界变换或尺度；
+三种配置为原版双目、Monado 双目、Monado 四目。所有有有效真值的位姿均计入全程误差，也单列 20.2 秒之后的统计。
+NOKOV 用于标定和评估，不作为 VIO 的观测输入；固定世界变换应用于输出轨迹和地图。
+
+- `relations.json` 保存 `T_marker_imu`、`nokov_to_imu_offset_s`、各配置的 `T_nokov_vio` 和输入／程序绑定信息。
+  矩阵约定为 `T_A_B` 将 B 坐标转换到 A 坐标，因此 NOKOV 刚体位姿转换为 IMU 位姿时使用
+  `T_N_IMU = T_N_marker × T_marker_imu`；反方向的刚体点→IMU 坐标变换是它的逆矩阵。
+- 安装外参仅在安装不变时可复用。**世界变换只适用于本次录制及相同起点、配置、程序和初始化**，不能直接用于任意新启动的 VIO。
+  第二步检查文件哈希和初始位姿，不匹配则停止，避免误用旧世界关系。
+- 图像—IMU 时间修正固定为 0 ms，直接保留导出时间戳；NOKOV 偏移由第一步估计并固定。位姿评估在 NOKOV 校时后的时间上插值取得参考，
+  相机／IMU 配对仍使用有容差的最近邻；VIO 使用两次图像更新之间的全部 IMU 样本。
+- 依赖已构建的 VIO／地图导出程序，默认复用 `output/basalt_comparison_20261104_195844/` 的构建缓存；可用 `--build-cache` 指定其他缓存。
+  第二步中断后用相同命令追加 `--resume`，保留已完成的 VIO 与建图结果。
+
+**本次已执行结果**：
+[固定标定参数](output/ego_nokov_fixed_calibration_20261105/relations.json) ·
+[地图与轨迹交互页面](output/ego_nokov_fixed_full_20261105/viewer.html) ·
+[三条轨迹及逐帧误差](output/ego_nokov_fixed_full_20261105/trajectories.html) ·
+[整段指标 CSV](output/ego_nokov_fixed_full_20261105/metrics.csv)。
+用 Chrome 打开页面即可；切换算法、播放或拖动进度、旋转 3D、选择 XY／XZ／YZ、调整地图显示半径。
+默认逐步显示轨迹，最近 3 秒用醒目粗线高亮；此前全部历史轨迹以淡色细线持续保留，暂停时也不消失。完整概览需手动选择。地图点为**整段离线优化后的稀疏地标**，按首次观测时间揭示，不代表在线建图回放。
+
+| 第二步输出 | 含义 |
+|---|---|
+| `relations_used.json`、`summary.json` | 原样保存的标定包、初始化校验、全程／标定后误差、RPE 与建图统计。 |
+| `runs/*/repeat_1/trajectory.csv` | 算法自身世界坐标下的原生 VIO 位姿。 |
+| `evaluation/*_imu_nokov_world.csv`、`*_errors.csv` | 固定变换后的 IMU 轨迹、同一时刻的 NOKOV 参考和逐帧位置／姿态误差。 |
+| `evaluation/nokov_imu_reference.csv` | 在 VIO 更新时间插值得到的 NOKOV／IMU 完整参考位姿（位置与四元数）。 |
+| `maps/*/map_nokov_world.ply`、`landmarks_nokov_world.csv` | NOKOV 世界下的完整稀疏地图，单位 m；页面半径过滤不删改这些文件。 |
+| `maps/*/keyframe_imu_nokov_world.csv` | NFR 优化后的关键帧 IMU 位姿，与在线 VIO 轨迹分开保存。 |
+| `metrics.csv`、`metrics_all_intervals.csv` | 整段精度／耗时／地图统计，以及不同时间区间的轨迹误差。 |
+| `viewer.html`、`trajectories.html`、`maps_3d.png`、`trajectories_3d_2d.png` | 交互地图、逐步轨迹与误差、地图／轨迹静态图。 |
+
+NOKOV 头环刚体只能提供位姿真值，没有场景表面真值。地图重投影 RMSE 是内部像素残差，不能当作地图的绝对空间精度；
+本流程输出的是稀疏地图，不是稠密场景重建。VIO 保留图像更新时刻的 ns 时间戳和约 30 Hz 频率，并不变成 1000 Hz IMU 轨迹。
+
+#### IMU 参考坐标与 RGB／高度着色
+
+[更新后的地图页面](output/ego_nokov_fixed_full_20261105/viewer.html) 将**三种配置与 NOKOV 真值同时叠加在 3D／2D 视图中**。
+默认使用**共同首帧参考 IMU 坐标系 I₀**：原点与轴向取 NOKOV 首帧参考 IMU 位姿，全程固定，
+三条算法轨迹、真值和点云使用同一个变换，保留算法间的差异。红／绿／蓝坐标轴分别表示 X／Y／Z；
+“当前 IMU 姿态轴”随当前估计位姿移动、旋转。IMU 的 Z 轴不保证朝重力上方，XY 网格也不代表地面。
+可切换回 NOKOV 世界坐标；切换只改变显示坐标，误差、尺度、时间戳保持原结果。
+**关闭“叠加点云”后自动适配轨迹范围**，两幅图均可滚轮缩放。
+3D 默认拖动旋转，切换为“平移”后拖动平移，也可按住 Shift 或使用右／中键拖动；2D 直接拖动平移，数值刻度同步更新。
+“适配视角”恢复旋转、缩放及两图平移；2D 的“居中”只恢复该图的平移。
+
+轨迹图例：**蓝色圆点＝原版双目、洋红方点＝Monado 双目、橙色三角＝Monado 四目、深青绿色虚线／菱形＝NOKOV 真值**。
+图例复选框可分别显隐。默认隐藏点云以突出轨迹；“叠加点云”与“点云来源”只控制点云，不切换或隐藏其他算法轨迹。
+
+3D／2D 视图下方的“当前与累计误差”显示当前帧位置／姿态误差，以及从开始到当前帧的位置／姿态 RMSE、累计位姿数。
+表格与两条误差曲线跟随播放和进度条更新；回退时累计区间同步缩小，点击曲线可跳转到对应时刻。
+曲线仅显示开始至当前，使用当前运行的误差与原始 ns 时间戳；算法显隐复选框同时控制曲线和对应表格行。
+
+- **真实图像 RGB（默认）**：从原始彩色视频中采样并融合颜色。
+- **坐标高度**：按当前参考坐标系的 Z 值着色，不一定表示距地面的高度。
+
+页面只提供上述两种着色方式。地图坐标和 RGB 均由整段离线数据生成，播放只按首次观测时间揭示，不能作为在线建图回放。
+
+复用已有 RGB 和几何结果，只刷新显示，不重新运行 VIO、建图或标定：
+
+```bash
+/home/lff/miniforge3/envs/wilor/bin/python scripts/run_vio_nokov_fixed.py \
+  --output output/ego_nokov_fixed_full_20261105 --refresh-viewer
+```
+
+每种配置的 `maps/<配置>/` 提供：
+
+| 输出 | 含义 |
+|---|---|
+| `map_rgb_imu0.ply` | 与叠加轨迹一致的共同首帧参考 IMU 坐标下的真实 RGB 点云。 |
+| `map_rgb_nokov_world.ply` | 同一 RGB 地图在 NOKOV 世界坐标下的点云。 |
+| `landmarks_nokov_world.csv` | NOKOV 世界坐标下的地标位置与观测数。 |
+
+PLY 保留全部地标，页面半径筛选不会删改导出文件。
+`map_view_transforms.json` 保存显示使用的固定坐标变换；另有
+[RGB 地图静态对比](output/ego_nokov_fixed_full_20261105/rgb_maps_imu0.png)。
+
+**整段运行结果**分为精度和性能两张表：位置 RMSE／P95／最大值、姿态 RMSE、1 秒 RPE、末帧误差、位姿输出率，
+以及逐帧视觉后端耗时的均值／P50／P95／最大值、进程均摊耗时、吞吐 FPS、实时倍率、CPU 和峰值内存。
+后端耗时读取原生 `stats_sums` 实测计时，不含光流与先前的 IMU 预积分；进程均摊是 VIO 墙钟总耗时除以位姿数，
+不等于逐帧端到端延迟。实时倍率为录制时长除以进程耗时；CPU 100% 表示一个核。
+
+| 新增输出 | 内容 |
+|---|---|
+| `metrics_comparison.csv`、`comparison_summary.json` | 完整精度、性能、建图指标与共同坐标信息。 |
+| `performance_metrics.csv`、`performance_metrics.json` | 性能分布、资源占用、统计来源及口径；CSV 另含 P90／P99、RTF 等。 |
+| `performance/<配置>_frame_times.csv` | 逐帧原始 ns 时间戳与实测视觉后端耗时，单位 ms。 |
+| `trajectories_comparison_3d_2d.png` | 同一共同 IMU 坐标下的三算法／真值 3D、XY、XZ、YZ 对比图。 |
+
+| 功能 | 程序入口 | 主要输出或作用 |
+|---|---|---|
+| 独立保存时间、安装及世界关系 | [calibrate_ego_nokov_relations.py](scripts/calibrate_ego_nokov_relations.py) | 新流程第一步，输出 `relations.json`；世界关系来自短段 VIO，安装／时间关系来自 IMU 与 NOKOV。 |
+| 固定关系下的整段 VIO、建图、评估与地图可视化 | [run_vio_nokov_fixed.py](scripts/run_vio_nokov_fixed.py) | 新流程第二步，只加载固定关系，输出本节上述完整结果。 |
+| 刷新 RGB／高度地图与 IMU 坐标显示 | [run_vio_nokov_fixed.py](scripts/run_vio_nokov_fixed.py) 的 `--refresh-viewer` | 复用已有颜色、位姿和地图，仅刷新交互页面。 |
+| 准备 EGO 数据、运行原版／Monado VIO | [compare_basalt_ego4.py](scripts/compare_basalt_ego4.py) 的 `prepare`、`run` | `input_adapter/`、`input_validation.json`、各配置的 `runs/*/repeat_*/trajectory.csv`。 |
+| 估计 NOKOV→IMU 时间偏移与刚体安装外参 | [calibrate_nokov_ego4.py](scripts/calibrate_nokov_ego4.py) | `nokov_calibration.json`；使用原始 IMU 与 NOKOV 头环刚体，不使用 VIO 预测拟合这些参数。 |
+| 历史流程：应用偏移、计算世界配准并评估 | [analyze_basalt_ego4_comparison.py](scripts/analyze_basalt_ego4_comparison.py) | 位置／姿态 RMSE、RPE、全程 SE(3) ATE，以及逐帧误差 CSV 和报告。 |
+| 查看 3D／2D 轨迹及全程误差 | [visualize_vio_nokov_trajectories.py](scripts/visualize_vio_nokov_trajectories.py) | 可旋转 3D、XY／XZ／YZ 投影、全程与不同区间的误差统计、原始／已配准坐标切换。 |
+| 图像／IMU 原始时间与采样关联 | [ego_data/time_sync.py](scripts/ego_data/time_sync.py) | `camera_offset_policy()` 固定返回 0 ms，不应用厂家相机时间偏移；`nearest_indices()` 做阈值内的采样关联。 |
+| 将 VIO 位姿关联到最近的 IMU 采样 | [associate_vio_imu.py](scripts/associate_vio_imu.py) | `vio_imu_association.csv`、`vio_imu_timing.json`；保留 VIO 原时间戳及约 30 Hz 的原输出频率。 |
+| 应用已有偏移并可视化验证 | [visualize_ego_nokov_sync.py](scripts/visualize_ego_nokov_sync.py) | 读取 `nokov_calibration.json`，校正后做最近邻匹配，生成下节介绍的交互页面。 |
+
+**NOKOV 与 IMU 的跨系统对时分两步：先估计偏移，再应用偏移。** 图像与 IMU 不追加任何时间修正，仅将导出微秒整数乘以 1000 转成纳秒。新流程第二步仅读取保存的 NOKOV 偏移和安装关系，
+在 VIO 时刻插值取得 IMU 原点的参考位姿；历史评估由 `interpolate_reference()` 完成该操作。同步验证可视化和配对表使用校正后的最近邻匹配。
+页面中只能调整 NOKOV 偏移，只改变显示及手动导出，不会自动重算 VIO 精度报告。
+
+**已有结果**位于 `output/basalt_comparison_20261104_195844/`：
+
+- [精度与耗时报告](output/basalt_comparison_20261104_195844/comparison_report.html)、
+  [指标汇总 CSV](output/basalt_comparison_20261104_195844/comparison_metrics.csv)。
+- [时间与安装标定参数](output/basalt_comparison_20261104_195844/nokov_calibration.json)。
+- [逐帧 VIO／NOKOV 对比](output/basalt_comparison_20261104_195844/evaluation/)；
+  `*_repeat_*_errors.csv` 包含估计位置、参考位置、位置误差和姿态误差。
+
+**重新评估已有轨迹**（项目根目录执行，不重跑 VIO；更新该目录的评估报告）：
+
+```bash
+/home/lff/miniforge3/envs/wilor/bin/python \
+  scripts/analyze_basalt_nokov_overlap.py \
+  --output output/basalt_comparison_20261104_195844
+```
+
+该评估入口读取原版双目、Monado 双目／四目三种配置。新会话需先准备并运行这些配置，再估计同步参数并评估。
+估计参数的命令如下，`--output` 指向已包含 `input_adapter/`、`input_validation.json` 的 VIO 实验目录：
+
+```bash
+/home/lff/miniforge3/envs/wilor/bin/python \
+  scripts/calibrate_nokov_ego4.py \
+  --output <已有VIO实验目录> \
+  --reference <对应NOKOV会话目录> \
+  --calibration-seconds 20
+```
+
+这会写入或更新 `nokov_calibration.json`；其他会话不能直接复用本次约 **161.782 ms** 的偏移。
+所有有有效真值的位姿均计算误差。前 2 秒只确定一组固定旋转和平移，将整条 VIO 轨迹换算到 NOKOV 世界；不缩放轨迹、不修改时间戳。
+前约 20 秒参与传感器时间与安装外参标定，因此原报告重点统计之后的误差；全程误差同样保留，全程 ATE 单独列出。
+参数拟合与主误差统计的时间分界附近存在平滑窗口交叠。
+当前单 session 与跨 session 结果统一采用 **0 ms** 图像—IMU 修正。195732 复用原有零偏移轨迹；195844 重新准备数据并运行三种配置、各三次，旧的 **+1.802 ms** 实验移入 `output/archive/`。
+准备、运行、固定标定、评估与查看器入口均拒绝带非零图像—IMU 修正的旧实验；不能只改元数据或平移已有轨迹的时间戳。
+历史实验设置见 [Basalt / NOKOV 对比说明](docs/BASALT_EGO4_COMPARISON_20261104_195844.md)。
+
+**3D／2D 轨迹查看**：[交互页面](output/vio_nokov_trajectories_20261105/viewer.html)、
+[3D 与三个平面静态图](output/vio_nokov_trajectories_20261105/trajectories_comparison_3d_2d.png)。
+页面默认从 0 秒逐步绘制，未播放时仅显示起点；历史路径用淡色细线保留，最近 2 秒用粗线高亮，当前位置显示光圈和运动方向。
+可将高亮范围改为最近 1／2／5 秒；暂停保留历史，拖动进度条或“回到起点”会同步回退显示。
+默认隐藏未来轨迹及未来误差曲线；需要查看全貌时手动选择“完整轨迹概览（显示未来）”。表格中的区间 RMSE 仍是完整离线统计。
+可切换统计区间、XY／XZ／YZ、原始／已配准坐标，并拖动 3D 视角。
+“原始坐标”用于理解两个世界坐标的差异；表格和误差曲线始终使用固定配准后的结果。
+默认展示第 1 次运行，与三次运行中位数报告区分。
+
+```bash
+/home/lff/miniforge3/envs/wilor/bin/python \
+  scripts/visualize_vio_nokov_trajectories.py \
+  --output output/vio_nokov_trajectories_new
+```
+
+使用 `--comparison <已有对比目录>` 或 `--repeat 2` 更换输入／运行轮次。
+当前默认复用三算法对比查看器，自动读取原版重复运行、部分真值覆盖的重复运行、固定标定完整运行三种结果结构；
+只加载各次保存的世界变换，不重新拟合。没有 NFR 地图时显示轨迹、姿态与误差控件。
+可直接写入已有实验目录，新增 `viewer.html`、`viewer_summary.json`、`viewer_metrics.csv`、
+`viewer_performance_metrics.csv` 与 `viewer_evaluation/`，保留原始轨迹和原评价汇总。
+真值只覆盖录制中段时，查看器显示有效参考区间，不外推首尾真值。
+
+```bash
+python scripts/visualize_vio_nokov_trajectories.py \
+  --comparison output/basalt_comparison_20261104_195732 \
+  --output output/basalt_comparison_20261104_195732
+
+python scripts/compare_ego_nokov_calibrations.py \
+  --a output/basalt_comparison_20261104_195732 \
+  --b output/basalt_comparison_20261104_195844 \
+  --output output/basalt_calibration_comparison_195732_195844
+```
+
+第二条命令通过相同结果适配层生成 `report.html`、`vio_metrics.csv` 与 `vio_effects_summary.json`，
+分别报告整段有效区间、标定后区间、处理性能及运动时间残差；安装偏差只比较物理安装外参。
+历史运行写边缘化缓存的设置不同时，报告会单独标注该计时范围差异。
+如需旧版轨迹页面，追加 `--layout legacy` 并选择空输出目录；该模式继续输出
+`metrics_all_intervals.csv` 与 `*_all_poses.csv`。
+已有页面只更新显示功能，可在原命令上追加 `--refresh-viewer`，并将 `--output` 指向已有目录；完成后刷新浏览器。
+
+### EGO / NOKOV 同步验证可视化
+
+用于同屏核对 **EGO 四目画面、IMU 转动、NOKOV 头环与手部动作**，并检查手部投影。
+
+**打开已有结果**：[同步检查页面](output/ego_nokov_sync_visual_20261105/viewer.html)。
+用 Chrome 打开，保持 `viewer.html` 与 `ego_four_camera_preview.mp4` 在同一目录。
+若直接打开无法播放，在项目根目录运行以下命令，再访问
+[http://127.0.0.1:8766/viewer.html](http://127.0.0.1:8766/viewer.html)：
+
+```bash
+python -m http.server 8766 --bind 127.0.0.1 \
+  --directory output/ego_nokov_sync_visual_20261105
+```
+
+**推荐检查顺序：**
+
+1. 点击“播放”，或拖动进度条、使用“上一帧／下一帧”，查看同一时刻的四路画面与右侧手部动作。
+2. 在角运动图中选择“全段”寻找明显转头，再切回“当前前后 4 秒”。切换“不校正 NOKOV”和
+   “使用会话估计值”，观察峰谷是否对应；**重点检查 20 秒之后的数据**。
+3. 勾选“叠加 NOKOV 手部投影”，选择 **24 个实测 marker** 或 **26 个骨架关节**。
+   可分别开关 cam0～cam3，显示连线／点编号；“导出当前帧投影”保存该帧四路投影坐标。
+4. 查看图像下方的时间戳表，检查配对时间差及是否缺失；“导出当前配对 CSV”保存当前偏移设置下的配对。
+
+**图表怎么看：**
+
+| 页面内容 | 重点关注 |
+|---|---|
+| 上方角运动图 | 蓝线是 EGO IMU，绿线是校正后的 NOKOV，红色虚线是未校正 NOKOV；峰谷越重合，运动时刻越一致。单位为 rad/s，表示转动速度。 |
+| 下方残差图 | IMU 与 NOKOV 的角速度差，绿色越接近零越好。 |
+| 黑色竖线／淡橙色区域 | 分别表示当前播放时刻／已有标定使用的前 20 秒。 |
+| 开始至当前播放时刻的平均时间差 | 时间戳表下方按预览首帧至当前帧，分别统计 EGO IMU、NOKOV 头环相对 EGO cam0 的校正后时间差均值（ms，保留正负号），同时显示平均绝对时间差和有效配对数；缺失不计入均值，随播放、跳转和偏移调整更新。 |
+| 底部 RMSE | 统计 **20 秒之后整段数据**，不随当前显示窗口缩短；它是角速度误差，不是 VIO 位置或姿态误差。 |
+| 开始至当前的平均绝对偏差（MAE） | 从 IMU 时间轴 0 秒到当前显示帧时刻，分别统计未校正与当前校正的角速度模长绝对差均值（rad/s），包含前 20 秒。随播放、跳转和偏移调整更新；仅计入有效配对，不随曲线窗口或分量改变。 |
+
+本次 NOKOV 默认偏移约为 **+161.782 ms**，仅适用于这次会话；图像—IMU 时间修正固定为 **0 ms**，
+直接保留导出时间戳，页面已取消相机偏移输入及实验切换按钮。
+手部投影沿用已有估计安装外参，投影不贴合时也要检查外参；缺失配对不会沿用上一帧。
+
+**重新生成**（在项目根目录执行，使用本机已验证的 Python 环境）：
+
+```bash
+/home/lff/miniforge3/envs/wilor/bin/python \
+  scripts/visualize_ego_nokov_sync.py \
+  --output output/ego_nokov_sync_visual_new
+```
+
+输出目录须为空。默认读取本次 `EGO-4B_AZLCA610091_20261104_195844` 录制、对应 NOKOV
+会话及已有标定。更换输入时指定 `--ego-session`、`--nokov`、`--calibration`；标定须与会话对应。
+可加 `--max-frames 60` 先检查前 60 组画面。
+
+已有结果只需更新页面功能时运行以下命令，保留预览视频及原有时间设置；完成后刷新浏览器：
+
+```bash
+/home/lff/miniforge3/envs/wilor/bin/python \
+  scripts/visualize_ego_nokov_sync.py \
+  --output output/ego_nokov_sync_visual_20261105 --refresh-viewer
+```
+
+主要输出：`viewer.html` 为交互页面，`synchronized_frames.csv` 为固定参数的配对及传感器数值，
+`motion_alignment.png` 为全段对照图，`summary.json` 记录偏移、匹配情况与统计。
+CSV 的长时间戳列用 Excel 导入时应设为文本，避免精度丢失。
 
 ## 构建与测试
 

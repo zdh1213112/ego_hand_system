@@ -23,6 +23,7 @@ GPU_PROFILE="compatible"
 NO_VIDEO=0
 STOP_AFTER_INFERENCE=0
 FINAL_VIDEO_ENABLED=0
+ORIGINAL_VIDEO_ENABLED="${EGO_WILOR_ORIGINAL_VIDEO:-0}"
 FINAL_2D_RESIDUAL_FALLBACK_PX="${EGO_FINAL_2D_RESIDUAL_FALLBACK_PX:-35}"
 FINAL_2D_RESIDUAL_PERCENTILE="${EGO_FINAL_2D_RESIDUAL_PERCENTILE:-95}"
 FINAL_MIN_JOINT_INLIER_VIEWS="${EGO_FINAL_MIN_JOINT_INLIER_VIEWS:-4}"
@@ -168,6 +169,15 @@ while (($#)); do
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if ! [[ "$ORIGINAL_VIDEO_ENABLED" =~ ^[01]$ ]]; then
+  echo "EGO_WILOR_ORIGINAL_VIDEO must be 0 or 1" >&2
+  exit 2
+fi
+if ((ORIGINAL_VIDEO_ENABLED)) && [[ -z "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
+  echo "Original-frame rendering requires the undistorted experiment entry point" >&2
+  exit 2
+fi
 
 if [[ "$INPUT_KIND" == "session" ]]; then
   if ((CAMERAS_EXPLICIT == 0)); then CAMERAS=(camera0 camera1 camera2 camera3); fi
@@ -357,6 +367,7 @@ if ((SAM3_GLOVE_ASSIST)); then
 fi
 VIDEO="$FUSION/diagnostic_${#CAMERAS[@]}view.mp4"
 FINAL_VIDEO="$FUSION/final_only_${#CAMERAS[@]}view.mp4"
+ORIGINAL_VIDEO="$FUSION/final_on_original_${#CAMERAS[@]}view.mp4"
 CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
 CAMERA_CONFIDENCE_ARGS=()
 for CAMERA in "${CAMERAS[@]}"; do
@@ -370,7 +381,7 @@ done
 
 run_python() {
   conda run --no-capture-output -n "$CONDA_ENV" \
-    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
+    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/python_deps/wilor_runtime:$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" \
     TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
     python "$@"
 }
@@ -383,6 +394,7 @@ run_sam3_python() {
 
 run_python - "$OUTPUT/run_config.json" "$MCAP" "$MAX_FRAMES" "$DEVICE" "$DETECTOR" "$BATCH_SIZE" "$GPU_PROFILE" "$FRAME_BATCH_SIZE" "$PREPROCESS_WORKERS" "$MAX_DETECTIONS_PER_CLASS" "$COMPILE_BACKBONE" "$FUSION_WORKERS" "$CAMERA_CSV" "$REFERENCE_CAMERA" "${ANCHOR_CAMERAS[*]}" "$DETECTOR_HANDEDNESS" "$ALLOW_SINGLE_HAND_ANCHORS" "$GLOVE_MARKER_ASSIST" "$MARKER_SATURATION_MAX" "$MARKER_VALUE_MIN" "$MARKER_MIN_MATCHES" "$MARKER_MIN_FINGER_GROUPS" "$MARKER_GLOBAL_MIN_MATCHES" "$MARKER_GLOBAL_MIN_FINGER_GROUPS" "$MARKER_SEARCH_PADDING_PX" "$MARKER_BBOX_PADDING_PX" "$MARKER_SEED_DISTANCE_PX" "$MARKER_MATCH_DISTANCE_PX" "$MARKER_MAX_SHIFT_PX" "$MARKER_MAX_APPLIED_SHIFT_PX" "$MARKER_BLEND" "$MARKER_MAX_LOCAL_ADJUSTMENT_PX" "$SAM3_GLOVE_ASSIST" "$SAM3_CONDA_ENV" "$SAM3_TOOL_ROOT" "$SAM3_MODEL" "$SAM3_PROMPT" "$SAM3_DEVICE" "$SAM3_CONF" "$SAM3_MIN_SCORE" "$SAM3_MIN_BOX_IOU" "$SAM3_MIN_JOINT_SUPPORT" "$SAM3_HARD_JOINT_SUPPORT" "$SAM3_TEXT_ONLY" "$SAM3_REFINE_2D" "$SAM3_MAX_2D_CORRECTION_PX" "$SAM3_2D_CORRECTION_BLEND" "$SAM3_MAX_2D_BONE_CHANGE_RATIO" "$CONDITION_HARD_THRESHOLD" "$ANATOMY_REFINEMENT" "$JOINT_TEMPORAL_MIN_HAND_JOINTS" "$JOINT_TEMPORAL_EXCESSIVE_JUMP_THRESHOLD_M" "$JOINT_TEMPORAL_VIEW_WRIST_JUMP_PX" "$JOINT_TEMPORAL_VIEW_EXPANDED_BOX_RATIO" "$JOINT_TEMPORAL_VIEW_EXPANDED_BOX_WRIST_PX" "$TEMPORAL_HAND_IDENTITY_MAX_GAP" <<'PY'
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -512,6 +524,9 @@ if source.is_dir():
     config["camera_confidences"] = {
         camera: config["camera_confidences"][camera] for camera in camera_ids
     }
+if os.environ.get("EGO_WILOR_UNDISTORT_FOV_DEG"):
+    from undistort_multiview_dataset import options_from_environment
+    config["image_preprocessing"] = options_from_environment()
 path = Path(config_path)
 if path.exists():
     previous = json.loads(path.read_text(encoding="utf-8"))
@@ -619,6 +634,16 @@ else
   echo "[multiview] reuse normalized dataset"
 fi
 
+# Set only by the separate undistorted experiment entry point. All downstream
+# stages use the converted videos AND their new pinhole calibrations.
+if [[ -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
+  echo "[multiview] undistort each camera to a pinhole view"
+  run_python "$ROOT/scripts/undistort_multiview_dataset.py" \
+    --input "$NORMALIZED" --output "$OUTPUT/undistorted_multiview" \
+    --from-environment --reuse
+  NORMALIZED="$OUTPUT/undistorted_multiview"
+fi
+
 if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
   echo "[multiview] run ${#CAMERAS[@]}-view dual-hypothesis WiLoR"
   INFERENCE_ARGS=(
@@ -693,7 +718,9 @@ elif ((SAM3_GLOVE_ASSIST)); then
 fi
 
 if [[ ! -f "$FUSION/summary.json" ]]; then
-  if [[ "$INPUT_KIND" == "session" ]]; then
+  if [[ -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
+    echo "[multiview] fuse calibrated undistorted pinhole rays with RANSAC"
+  elif [[ "$INPUT_KIND" == "session" ]]; then
     echo "[multiview] fuse calibrated KB rays with RANSAC"
   else
     echo "[multiview] fuse native Double-Sphere rays with RANSAC"
@@ -768,20 +795,24 @@ if [[ "$NO_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
     --video-codec auto --max-frames "$MAX_FRAMES"
 fi
 
+HYBRID_VIDEO_ARGS=(
+  --dataset "$NORMALIZED" --fusion "$FUSION" --predictions "$PREDICTIONS"
+  --cameras "${CAMERAS[@]}" --video-codec auto
+  --max-frames "$MAX_FRAMES" --physical-side-swap 0
+  --min-joint-inlier-views "$FINAL_MIN_JOINT_INLIER_VIEWS"
+  --residual-percentile 75 --residual-threshold-px "$FINAL_HYBRID_RESIDUAL_THRESHOLD_PX"
+  --wrist-threshold-px "$FINAL_HYBRID_WRIST_THRESHOLD_PX"
+  --max-condition-number "$FINAL_HYBRID_MAX_CONDITION"
+  --max-stereo-difference-mm "$FINAL_HYBRID_MAX_STEREO_DIFFERENCE_MM"
+  --smoothing-radius 1 --smoothing-strength 0.25
+  --wrist-outlier-threshold-px 150 --max-hold-frames 2
+)
+
 if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ! -f "$FINAL_VIDEO" ]]; then
   if [[ "$FINAL_RENDERER" == "hybrid" ]]; then
     echo "[multiview] render conservative trusted-3D/native-2D final video"
     run_python "$ROOT/scripts/render_hybrid_multiview.py" \
-      --dataset "$NORMALIZED" --fusion "$FUSION" --predictions "$PREDICTIONS" \
-      --output "$FINAL_VIDEO" --cameras "${CAMERAS[@]}" --video-codec auto \
-      --max-frames "$MAX_FRAMES" --physical-side-swap 0 \
-      --min-joint-inlier-views "$FINAL_MIN_JOINT_INLIER_VIEWS" \
-      --residual-percentile 75 --residual-threshold-px "$FINAL_HYBRID_RESIDUAL_THRESHOLD_PX" \
-      --wrist-threshold-px "$FINAL_HYBRID_WRIST_THRESHOLD_PX" \
-      --max-condition-number "$FINAL_HYBRID_MAX_CONDITION" \
-      --max-stereo-difference-mm "$FINAL_HYBRID_MAX_STEREO_DIFFERENCE_MM" \
-      --smoothing-radius 1 --smoothing-strength 0.25 \
-      --wrist-outlier-threshold-px 150 --max-hold-frames 2
+      "${HYBRID_VIDEO_ARGS[@]}" --output "$FINAL_VIDEO"
   else
     echo "[multiview] render final fused 3-D video"
     run_python "$ROOT/scripts/render_multiview_wilor.py" \
@@ -794,6 +825,17 @@ if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ! -f "$FINAL_VIDEO" ]];
       --final-wrist-residual-fallback-px "$FINAL_WRIST_RESIDUAL_FALLBACK_PX" \
       --final-min-joint-inlier-views "$FINAL_MIN_JOINT_INLIER_VIEWS" \
       --final-require-local-view "$FINAL_REQUIRE_LOCAL_VIEW"
+  fi
+fi
+
+if [[ "$NO_VIDEO" == 0 && "$ORIGINAL_VIDEO_ENABLED" == 1 ]]; then
+  if [[ ! -f "$ORIGINAL_VIDEO" || ! -f "${ORIGINAL_VIDEO%.mp4}.json" ]]; then
+    echo "[multiview] render undistorted results on original fisheye frames (hybrid 3D/2D)"
+    run_python "$ROOT/scripts/render_hybrid_multiview.py" \
+      "${HYBRID_VIDEO_ARGS[@]}" --original-dataset "$OUTPUT/normalized_multiview" \
+      --output "$ORIGINAL_VIDEO"
+  else
+    echo "[multiview] reuse final video on original frames: $ORIGINAL_VIDEO"
   fi
 fi
 

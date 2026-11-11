@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 
 
-CameraModel = Literal["KB", "DS"]
+CameraModel = Literal["KB", "DS", "PINHOLE"]
 
 
 def _array(value, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -33,14 +33,14 @@ class CameraCalibration:
 
     def __post_init__(self) -> None:
         model = str(self.model).upper()
-        if model not in ("KB", "DS"):
+        if model not in ("KB", "DS", "PINHOLE"):
             raise ValueError(f"unsupported camera model: {self.model}")
         width, height = (int(self.image_size[0]), int(self.image_size[1]))
         if width <= 0 or height <= 0:
             raise ValueError(f"invalid image size: {self.image_size}")
         K = _array(self.K, (3, 3), "K")
         T = _array(self.T_base_camera, (4, 4), "T_base_camera")
-        expected = 4 if model == "KB" else 6
+        expected = {"KB": 4, "DS": 6, "PINHOLE": 0}[model]
         distortion = np.asarray(self.distortion, dtype=np.float64).reshape(-1)
         if distortion.size != expected or not np.all(np.isfinite(distortion)):
             raise ValueError(f"{model} distortion must contain {expected} finite values")

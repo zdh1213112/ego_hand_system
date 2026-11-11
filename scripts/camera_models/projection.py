@@ -12,6 +12,8 @@ def project_points(camera: CameraCalibration, points: np.ndarray) -> tuple[np.nd
         from .kb import project
     elif camera.model == "DS":
         from .double_sphere import project
+    elif camera.model == "PINHOLE":
+        from .pinhole import project
     else:
         raise ValueError(f"unsupported camera model: {camera.model}")
     return project(camera, points)
@@ -23,6 +25,8 @@ def unproject_points(camera: CameraCalibration, pixels: np.ndarray) -> tuple[np.
         from .kb import unproject
     elif camera.model == "DS":
         from .double_sphere import unproject
+    elif camera.model == "PINHOLE":
+        from .pinhole import unproject
     else:
         raise ValueError(f"unsupported camera model: {camera.model}")
     return unproject(camera, pixels)

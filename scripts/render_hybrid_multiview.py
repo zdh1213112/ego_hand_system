@@ -22,6 +22,7 @@ import numpy as np
 
 from ego_data.calibration import CameraCalibration
 from ego_data.dataset import SequentialVideoReader
+from multiview_original_projection import OriginalVideoProjection
 from render_multiview_wilor import (
     _create_video_writer,
     _draw_final_2d_fallback,
@@ -37,6 +38,10 @@ from render_native_2d_multiview import _select_camera_tracks, _smooth_track
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path)
+    parser.add_argument(
+        "--original-dataset", type=Path,
+        help="display on the corresponding raw normalized videos; keep tracking/trust in --dataset coordinates",
+    )
     parser.add_argument("--fusion", required=True, type=Path)
     parser.add_argument("--predictions", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -173,6 +178,12 @@ def main() -> int:
     cameras = tuple(dict.fromkeys(args.cameras or available))
     if sorted(set(cameras) - set(available)):
         raise ValueError("selected cameras are not present in the dataset")
+    original_projection = (
+        OriginalVideoProjection(dataset, args.original_dataset, cameras)
+        if args.original_dataset is not None else None
+    )
+    display_dataset = original_projection.root if original_projection else dataset
+    display_manifest = original_projection.manifest if original_projection else manifest
     with (dataset / "multiview_frames.csv").open("r", encoding="utf-8", newline="") as stream:
         frame_rows = list(csv.DictReader(stream))
     frame_rows = frame_rows[: args.max_frames or None]
@@ -222,6 +233,24 @@ def main() -> int:
             trusted_poses[camera, side] = [
                 (stable[index], points) for index, (_, points) in enumerate(samples)
             ]
+    if original_projection:
+        # All decisions above were made with the inference calibration/pixels.
+        # Convert only the selected display tracks and trusted 3D projections.
+        for camera in cameras:
+            for side in (0, 1):
+                native_tracks[camera, side] = [
+                    original_projection.native_view(camera, item)
+                    for item in native_tracks[camera, side]
+                ]
+                converted = []
+                for index, (trusted, points) in enumerate(trusted_poses[camera, side]):
+                    if trusted:
+                        hand = next(item for item in accepted[frame_ids[index]]["hands"]
+                                    if int(item.get("side", -1)) == side)
+                        points = original_projection.fused_points(camera, hand["joints_base_m"], points)
+                        trusted = int(np.isfinite(points).all(axis=1).sum()) >= 5
+                    converted.append((trusted, points))
+                trusted_poses[camera, side] = converted
     if args.columns:
         columns = int(args.columns)
     elif len(cameras) == 6:
@@ -231,7 +260,7 @@ def main() -> int:
     else:
         columns = max(1, int(np.ceil(np.sqrt(len(cameras)))))
     row_count = int(np.ceil(len(cameras) / columns))
-    image_size = tuple(manifest["image_size"])
+    image_size = tuple(display_manifest["image_size"])
     tile_height = int(round(args.tile_width * image_size[1] / image_size[0]))
     frame_size = (args.tile_width * columns, tile_height * row_count)
     output = args.output.resolve()
@@ -243,7 +272,7 @@ def main() -> int:
     writer, codec = _create_video_writer(output, fps, frame_size, args.video_codec)
     readers = {
         camera: SequentialVideoReader(
-            dataset / "cameras" / camera / manifest["storage"]["video_filename"], image_size,
+            display_dataset / "cameras" / camera / display_manifest["storage"]["video_filename"], image_size,
         )
         for camera in cameras
     }
@@ -268,6 +297,8 @@ def main() -> int:
                         trusted, projected = trusted_poses[camera, side][index]
                         if trusted:
                             final_view = dict(hand.get("views", {}).get(camera, {}))
+                            if original_projection:
+                                final_view = original_projection.view(camera, final_view)
                             _draw_final_detection(image, final_view, side, "refined")
                             _draw_refined_hand(image, projected, side, 0, final_only=True)
                             used_fused = True
@@ -311,6 +342,8 @@ def main() -> int:
                     else "FUSED3D" if used_fused
                     else "NATIVE2D"
                 )
+                if original_projection:
+                    state = "RAW<-UNDISTORTED " + (state if used_fused or used_native else "NO_POSE")
                 cv2.putText(
                     image, f"{camera} | {state} | frame {sync_index}",
                     (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
@@ -353,6 +386,16 @@ def main() -> int:
         "native_2d_camera_hand_tiles": int(native_count),
         "codec": codec, "output": str(output),
     }
+    if original_projection:
+        summary["original_display"] = {
+            "dataset": str(display_dataset),
+            "image_size": list(image_size),
+            "projection": "original KB/DS calibration; original optical axes",
+            "tracking_and_trust_domain": "inference dataset pixels (before display conversion)",
+            "native_2d": "pinhole rays reprojected through original calibration",
+            "boxes": "axis-aligned envelope of sampled warped box perimeter",
+            "out_of_view_joints": "hidden, including predictions outside the inference image",
+        }
     output.with_suffix(".json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"Hybrid multiview video: {output}")
     return 0

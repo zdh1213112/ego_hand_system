@@ -12,6 +12,7 @@ import time
 import cv2
 import numpy as np
 import yaml
+from ego_data.time_sync import camera_offset_policy
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,12 +179,12 @@ def build_basalt_calibration(
     camera_yaml: dict, imu_yaml: dict, scale: float, precalibrated_imu: bool
 ) -> tuple[dict, dict]:
     cameras = camera_yaml["cameras"]
-    if len(cameras) != 2 or any(camera["distortion_model"] != "KB" for camera in cameras):
-        raise RuntimeError("expected two KB cameras")
-    left, right = cameras
+    if len(cameras) < 2 or any(camera["distortion_model"] != "KB" for camera in cameras):
+        raise RuntimeError("expected at least two KB cameras")
+    left, right = cameras[:2]
     original_resolution = (int(left["image_width"]), int(left["image_height"]))
-    if original_resolution != (int(right["image_width"]), int(right["image_height"])):
-        raise RuntimeError("left/right resolutions differ")
+    if any(original_resolution != (int(camera["image_width"]), int(camera["image_height"])) for camera in cameras):
+        raise RuntimeError("camera resolutions differ")
     output_resolution = (
         int(round(original_resolution[0] * scale)),
         int(round(original_resolution[1] * scale)),
@@ -208,6 +209,10 @@ def build_basalt_calibration(
     validate_rotation(t_c0_i[:3, :3], "T_cam_imu")
     t_i_c0 = invert_transform(t_c0_i)
     t_i_c1 = t_i_c0 @ invert_transform(t_c1_c0)
+    t_i_cameras = [
+        t_i_c0 @ invert_transform(transform @ invert_transform(camera_reference_transforms[0]))
+        for transform in camera_reference_transforms
+    ]
 
     baseline_m = float(np.linalg.norm((invert_transform(t_i_c0) @ t_i_c1)[:3, 3]))
     expected_baseline_m = float(np.linalg.norm(t_c1_c0[:3, 3]))
@@ -218,10 +223,10 @@ def build_basalt_calibration(
     zeros_gyro = [0.0] * 12
     calibration = {
         "value0": {
-            "T_imu_cam": [basalt_pose(t_i_c0), basalt_pose(t_i_c1)],
-            "intrinsics": [scaled_intrinsics(left, scale), scaled_intrinsics(right, scale)],
-            "resolution": [list(output_resolution), list(output_resolution)],
-            "vignette": [flat_vignette(), flat_vignette()],
+            "T_imu_cam": [basalt_pose(transform) for transform in t_i_cameras],
+            "intrinsics": [scaled_intrinsics(camera, scale) for camera in cameras],
+            "resolution": [list(output_resolution) for _ in cameras],
+            "vignette": [flat_vignette() for _ in cameras],
             "calib_accel_bias": zeros_accel,
             "calib_gyro_bias": zeros_gyro,
             "imu_update_rate": float(imu0["update_rate"]),
@@ -243,9 +248,11 @@ def build_basalt_calibration(
         "T_cam0_imu_input_translation_unit": "millimetres converted to metres",
         "T_imu_cam0": t_i_c0.tolist(),
         "T_imu_cam1": t_i_c1.tolist(),
+        "T_imu_cameras": [transform.tolist() for transform in t_i_cameras],
         "imu_values_precalibrated": precalibrated_imu,
-        "camera_time_shift_s": float(imu_yaml["cam0"]["timeshift_cam_imu"]),
-        "camera_time_shift_baked_into_image_timestamps": True,
+        "camera_time_shift_s": 0.0,
+        "camera_time_shift_baked_into_image_timestamps": False,
+        "time_sync_policy": camera_offset_policy(),
     }
     return calibration, metadata
 
@@ -346,7 +353,6 @@ def main() -> int:
         camera_yaml, imu_yaml, args.image_scale, precalibrated_imu
     )
     resolution = tuple(calibration["value0"]["resolution"][0])
-    time_shift_ns = int(round(float(imu_yaml["cam0"]["timeshift_cam_imu"]) * 1e9))
 
     mav0 = output / "mav0"
     cam0_data = mav0 / "cam0" / "data"
@@ -376,7 +382,7 @@ def main() -> int:
         if args.image_scale != 1.0:
             left_gray = cv2.resize(left_gray, resolution, interpolation=cv2.INTER_AREA)
             right_gray = cv2.resize(right_gray, resolution, interpolation=cv2.INTER_AREA)
-        basalt_timestamp_ns = left_timestamps[left_index] * 1000 + time_shift_ns
+        basalt_timestamp_ns = left_timestamps[left_index] * 1000
         filename = f"{basalt_timestamp_ns}.png"
         parameters = [cv2.IMWRITE_PNG_COMPRESSION, args.png_compression]
         if not cv2.imwrite(str(cam0_data / filename), left_gray, parameters):
@@ -390,7 +396,7 @@ def main() -> int:
             "left_timestamp_us": left_timestamps[left_index],
             "right_timestamp_us": right_timestamps[right_index],
             "stereo_delta_us": right_timestamps[right_index] - left_timestamps[left_index],
-            "camera_to_imu_shift_ns": time_shift_ns,
+            "camera_to_imu_shift_ns": 0,
             "basalt_timestamp_ns": basalt_timestamp_ns,
             "filename": filename,
         })
@@ -484,7 +490,7 @@ def main() -> int:
     print(f"Stereo pairs: {len(timestamp_rows)} at {resolution[0]}x{resolution[1]}")
     print(f"IMU samples: {len(imu_samples)} ({summary['imu_rate_hz']:.1f} Hz)")
     print(f"Stereo baseline: {calibration_metadata['stereo_baseline_m']:.6f} m")
-    print(f"Camera/IMU time shift baked into images: {time_shift_ns} ns")
+    print("Camera/IMU time correction: fixed 0 ms; recorded timestamps preserved")
     return 0
 
 

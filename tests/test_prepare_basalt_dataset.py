@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 import unittest
 
@@ -12,6 +13,7 @@ import yaml
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "prepare_basalt_dataset.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("prepare_basalt_dataset", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -85,6 +87,29 @@ class PrepareBasaltDatasetTests(unittest.TestCase):
         )
         np.testing.assert_allclose(accel, np.asarray(imu0["M_acc"]) @ (1.0, 2.0, 3.0) - imu0["AccBias"])
         np.testing.assert_allclose(gyro, np.asarray(imu0["M_gyr"]) @ (0.5, 1.0, 1.5) - imu0["GyrBias"])
+
+    def test_four_camera_extrinsics_preserve_rotated_reference_geometry(self):
+        cameras = []
+        source_transforms = []
+        for index in range(4):
+            rotation, _ = __import__("cv2").Rodrigues(np.asarray((0.05 * index, -0.2 * index, 0.1 * index)))
+            translation = np.asarray((index * 0.08, index * 0.01, index * -0.02))
+            source_transforms.append(MODULE.make_transform(rotation, translation))
+            cameras.append({"distortion_model": "KB", "image_width": 1600, "image_height": 1200,
+                            "intrinsics": {"fx": 500, "fy": 500, "cx": 800, "cy": 600},
+                            "distortion": dict(k1=0, k2=0, k3=0, k4=0),
+                            "extrinsics": {"rotation": rotation.tolist(), "translation": (translation * 1000).tolist()}})
+        imu = {"cam0": {"T_cam_imu": np.eye(4).tolist(), "timeshift_cam_imu": 0.002},
+               "imu0": {"update_rate": 1000, "accelerometer": {"noise_density": 0.01, "random_walk": 0.001},
+                        "gyroscope": {"noise_density": 0.01, "random_walk": 0.001}}}
+        calibration, metadata = MODULE.build_basalt_calibration({"cameras": cameras}, imu, 0.5, True)
+        self.assertEqual(calibration['value0']['cam_time_offset_ns'], 0)
+        self.assertEqual(metadata['camera_time_shift_s'], 0)
+        self.assertFalse(metadata['camera_time_shift_baked_into_image_timestamps'])
+        self.assertEqual(metadata['time_sync_policy']['application_count'], 0)
+        self.assertEqual(len(calibration["value0"]["T_imu_cam"]), 4)
+        for pose, transform in zip(calibration["value0"]["T_imu_cam"], source_transforms):
+            np.testing.assert_allclose(pose_to_transform(pose) @ transform, np.eye(4), atol=1e-12)
 
 
 if __name__ == "__main__":
