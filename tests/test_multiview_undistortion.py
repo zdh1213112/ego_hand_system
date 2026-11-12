@@ -252,8 +252,9 @@ elif name.startswith("render_"):
     output.write_bytes(b"fake video")
     output.with_suffix(".json").write_text("{}")
 else:
-    output.mkdir(parents=True)
-    (output / "summary.json").write_text("{}")
+    output.mkdir(parents=True, exist_ok=True)
+    summary = {"save_mano_params": "--save-mano-params" in args} if name == "wilor_multiview_inference.py" else {}
+    (output / "summary.json").write_text(json.dumps(summary))
 ''')
             conda.chmod(0o755)
             source, detector = root / "input.mcap", root / "detector.pt"
@@ -263,7 +264,8 @@ else:
             env.update(PATH=str(fake) + os.pathsep + env["PATH"], PYTHONPATH=str(ROOT / "scripts"),
                        FIXTURE=str(fixture), CALL_LOG=str(root / "calls.jsonl"))
             common = ["--mcap", str(source), "--detector", str(detector), "--cameras", "camera0", "camera1",
-                      "--reference-camera", "camera0", "--max-frames", "0", "--no-video"]
+                      "--reference-camera", "camera0", "--max-frames", "0", "--no-video",
+                      "--wilor-mode", "both"]
             for mode in ("raw", "undistorted"):
                 runner = ROOT / "scripts" / ("run_multiview_wilor_experiment.sh" if mode == "raw" else "run_multiview_wilor_undistorted_experiment.sh")
                 command = ["bash", str(runner), *common, "--output", str(root / mode)]

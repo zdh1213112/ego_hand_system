@@ -91,6 +91,31 @@ class NormalizeOrbbecEgo4Tests(unittest.TestCase):
             self.assertEqual(int(rows[1]["camera3_frame_index"]), 1)
             self.assertEqual(float(rows[0]["camera3_delta_us"]), 9.0)
 
+            # A requested part uses the recording-root calibration but only
+            # streams inside that part, even when another part is present.
+            part = session / "part0001"
+            part.mkdir()
+            sibling = session / "part0002"
+            sibling.mkdir()
+            for stream, _ in CAMERA_SOURCES.values():
+                for suffix in (".mp4", "_pts.csv"):
+                    original = session / f"recording_camera_{stream}{suffix}"
+                    original.rename(part / f"recording_camera_{stream}_part0001{suffix}")
+                    (sibling / f"recording_camera_{stream}_part0002{suffix}").touch()
+            (session / "meta_recording.json").write_text('{"test": true}')
+            part_output = normalize(type("Args", (), {
+                "session": part, "output": root / "normalized_part",
+                "reference_camera": "camera0", "max_delta_us": 1500, "max_frames": 0,
+            })())
+            part_manifest = json.loads((part_output / "manifest.json").read_text())
+            self.assertEqual(part_manifest["source"]["session"], str(part.resolve()))
+            self.assertEqual(part_manifest["synchronization"]["frame_count"], 2)
+            self.assertTrue((part_output / "source_meta.json").is_file())
+            source_videos = [Path(item["path"]) for item in part_manifest["source"]["files"]
+                             if item["path"].endswith(".mp4")]
+            self.assertEqual(len(source_videos), 4)
+            self.assertTrue(all(path.parent == part for path in source_videos))
+
 
 if __name__ == "__main__":
     unittest.main()

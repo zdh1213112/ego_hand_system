@@ -116,6 +116,34 @@ def frame_residual_statistics(marker_error_m):
     return statistics
 
 
+def marker_direction_payload(data, ids):
+    """Unquantized right-hand coordinates and outward MANO face normals."""
+    if str(np.asarray(data['handedness']).item()).lower() != 'right':
+        raise ValueError('Directional viewer currently defines right-hand axes only')
+    joints = np.asarray(data['joints'][ids], dtype=np.float64)
+    vertices = np.asarray(data['vertices'][ids], dtype=np.float64)
+    origin = joints[:, :1]
+
+    def unit(vector):
+        length = np.linalg.norm(vector, axis=-1, keepdims=True)
+        return np.divide(vector, length, out=np.full_like(vector, np.nan), where=length > 1e-12)
+
+    y = unit(joints[:, 9] - joints[:, 0])
+    across = joints[:, 17] - joints[:, 5]
+    x = unit(across - np.sum(across * y, axis=-1, keepdims=True) * y)
+    axes = np.stack([x, y, unit(np.cross(x, y))], axis=1)
+    faces = np.asarray(data['faces'])[np.asarray(data['attachment_face_ids'])]
+    triangle = vertices[:, faces]
+    normals = unit(np.cross(triangle[:, :, 1] - triangle[:, :, 0],
+                            triangle[:, :, 2] - triangle[:, :, 0]))
+    measured = np.asarray(data['markers_world_m'][ids], dtype=np.float64) - origin
+    measured[~np.asarray(data['marker_valid'][ids], dtype=bool)] = np.nan
+    attached = np.asarray(data['predicted_markers'][ids], dtype=np.float64) - origin
+    arrays = dict(measured=measured, attached=attached, normals=normals, axes=axes)
+    return {key: base64.b64encode(value.astype('<f4').tobytes()).decode()
+            for key, value in arrays.items()}
+
+
 def export_html(directory, data, summary):
     ids = np.unique(np.r_[np.arange(0, len(data['frame_no']), 3), len(data['frame_no'])-1])
     origin = data['joints'][ids,0]
@@ -126,6 +154,9 @@ def export_html(directory, data, summary):
     payload.update(frame_residual_statistics(data['marker_error_m'][ids]))
     payload['marker_error_m']=base64.b64encode(data['marker_error_m'][ids].astype('<f4').tobytes()).decode()
     payload['attachment_face_ids']=data['attachment_face_ids'].tolist()
+    payload['directions'] = marker_direction_payload(data, ids)
+    detail_vertices = (np.asarray(data['vertices'][ids], dtype=np.float64) - origin[:, None]).astype('<f4')
+    payload['detail_vertices'] = base64.b64encode(detail_vertices.tobytes()).decode()
     payload['overlays'] = overlay_catalog(directory)
     for key in ('vertices','joints','markers_world_m','predicted_markers'):
         payload[key] = quantized(data[key][ids], origin)
@@ -133,6 +164,10 @@ def export_html(directory, data, summary):
     interaction=(Path(__file__).parent/'templates/nokov_marker_interaction.js').read_text()
     page = template.replace('__DATA__',json.dumps(payload,separators=(',',':'),ensure_ascii=False))
     page=page.replace('__MARKER_INTERACTION__',interaction)
+    diagnostics=(Path(__file__).parent/'templates/nokov_marker_diagnostics.js').read_text()
+    page=page.replace('__MARKER_DIAGNOSTICS__',diagnostics)
+    inspector=(Path(__file__).parent/'templates/nokov_marker_inspector.js').read_text()
+    page=page.replace('__MARKER_INSPECTOR__',inspector)
     plot_uri='data:image/png;base64,'+base64.b64encode((directory/'fit_residuals.png').read_bytes()).decode()
     page=page.replace('src="fit_residuals.png"',f'src="{plot_uri}"')
     (directory/'mano_viewer.src.html').write_text(page)

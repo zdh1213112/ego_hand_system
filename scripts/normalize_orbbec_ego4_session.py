@@ -8,6 +8,7 @@ import csv
 from dataclasses import replace
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -27,6 +28,26 @@ CAMERA_SOURCES = {
     "camera2": ("right_side", "cam_2"),
     "camera3": ("left_side", "cam_3"),
 }
+
+
+def session_stream_file(session: Path, stream: str, *, timestamps: bool) -> Path:
+    """Find a flat export or a single-part EGO4 recording without copying it."""
+    suffix = f"_camera_{stream}_pts.csv" if timestamps else f"_camera_{stream}.mp4"
+    flat = sorted(session.glob(f"*{suffix}"))
+    if len(flat) == 1:
+        return flat[0]
+    if flat:
+        raise RuntimeError(f"expected one '*{suffix}' in {session}, found {len(flat)}")
+    ending = "_pts.csv" if timestamps else ".mp4"
+    parts = sorted(session.glob(f"*_camera_{stream}_part*{ending}"))
+    if not parts:
+        parts = sorted(session.glob(f"part*/**/*_camera_{stream}_part*{ending}"))
+    if len(parts) != 1:
+        raise RuntimeError(
+            f"expected one {stream} {'timestamp file' if timestamps else 'video'} "
+            f"in {session}; found {len(parts)}. Multiple parts require concatenation."
+        )
+    return parts[0]
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,7 +119,14 @@ def normalize(args: argparse.Namespace) -> Path:
     if args.reference_camera not in CAMERA_SOURCES:
         raise ValueError(f"unknown reference camera: {args.reference_camera}")
 
-    calibration_path = unique_file(session, "_calibration_camera.yaml")
+    # EGOViewer stores calibration/metadata at the recording root while the
+    # selected part holds only its own video/PTS streams. Never search sibling
+    # parts when a specific part directory was requested.
+    metadata_root = session
+    if (not list(session.glob("*_calibration_camera.yaml"))
+            and re.fullmatch(r"part\d+", session.name)):
+        metadata_root = session.parent
+    calibration_path = unique_file(metadata_root, "_calibration_camera.yaml")
     source_calibrations = cameras_from_ego_yaml(calibration_path)
     expected_ids = {source_id for _, source_id in CAMERA_SOURCES.values()}
     if set(source_calibrations) != expected_ids:
@@ -108,8 +136,8 @@ def normalize(args: argparse.Namespace) -> Path:
     timestamps = {}
     calibrations = {}
     for camera, (stream, source_id) in CAMERA_SOURCES.items():
-        video = unique_file(session, f"_camera_{stream}.mp4")
-        pts = unique_file(session, f"_camera_{stream}_pts.csv")
+        video = session_stream_file(session, stream, timestamps=False)
+        pts = session_stream_file(session, stream, timestamps=True)
         values = read_timestamps(pts)
         count, size = _video_info(video)
         calibration = source_calibrations[source_id]
@@ -147,9 +175,9 @@ def normalize(args: argparse.Namespace) -> Path:
         for camera in CAMERA_SOURCES:
             columns.extend((f"{camera}_frame_index", f"{camera}_timestamp_ns", f"{camera}_delta_us"))
         _write_csv(temporary / "multiview_frames.csv", columns, synchronized)
-        metadata_files = sorted(session.glob("meta_*.json"))
+        metadata_files = sorted(metadata_root.glob("meta_*.json"))
         if len(metadata_files) > 1:
-            raise ValueError(f"expected at most one metadata JSON in {session}")
+            raise ValueError(f"expected at most one metadata JSON in {metadata_root}")
         if metadata_files:
             shutil.copy2(metadata_files[0], temporary / "source_meta.json")
         source_files = [*videos.values(), *pts_files.values(), calibration_path, *metadata_files]

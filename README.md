@@ -1,11 +1,13 @@
 # EGO Hand System
 
-面向头戴式双目相机的离线手部重建与 MANO 拟合系统。当前主要支持两种输入：
+面向头戴式双目及多视角相机的离线手部重建系统，支持 WiLoR/MANO 和 GEM-X/SOMA
+骨架与网格重建。当前主要支持两种输入：
 
-- `orbbec`：Orbbec EGO 左右视频、硬件时间戳、KB 鱼眼标定和可选 IMU；
-- `gen`：GEN DAS EGO MCAP/H264、KB 或 Double Sphere 双目标定。
+- `orbbec`：Orbbec EGO 双目或 EGO4 四路视频、硬件时间戳、KB 鱼眼标定和可选 IMU；
+- `gen`：GEN DAS EGO MCAP/H264、KB 或 Double Sphere 双目及多目标定。
 
-当前系统包含统一的双目主流程，以及 GEN 六目 WiLoR 扩展流程：
+当前系统包含统一的双目主流程，以及支持四路、六路等标定相机组合的多视角流程。
+直接运行多视角实验，请看 [WiLoR 与 GEM 快速使用](#multiview-wilor-gem)：**两个入口现在都默认使用 `shared` 模式**。
 
 ```text
 Orbbec EGO session ─────┐
@@ -22,21 +24,21 @@ GEN 双目 MCAP ──────────┘                               
                                                                    └─> 21 个关键点
                                                                        + MANO 参数/网格
 
-GEN 六目 MCAP(camera0~camera5)
-          └─> 六路标准化 + 微秒级同步 + DS 标定
-              └─> 六路 detector + WiLoR 双姿态推理
-                  └─> detector 左右手身份锁定
-                      └─> 动态锚点 + DS 射线三角化 + 逐关节 RANSAC
-                          └─> 六目融合 21 个 3D 关键点
-                              ├─> MANO 时序拟合
-                              │   └─> MANO 网格和姿态参数
-                              └─> WiLoR 自动标签导出
-                                  └─> images/*.jpg + labels/*.npy
+GEN 多目 MCAP / Orbbec EGO4 session 或 part0001
+          └─> 各路原图标准化 + 时间戳同步 + 原始相机标定
+              └─> 各路检测 + WiLoR 或 GEM-X 双姿态推理
+                  ├─> 原流程：骨架融合 + 时序处理 + 二维回退
+                  │   ├─> 骨架 + 各路独立网格（legacy / independent）
+                  │   └─> WiLoR 原有 MANO 拟合与训练标签导出链路
+                  └─> 共享流程：多视角共同调整一只虚拟手（shared，默认）
+                      └─> 同一个模型的骨架 + 网格投影到各路
+                          WiLoR 使用 MANO；GEM-X 使用 SOMA
 ```
 
 Orbbec 和 GEN 双目数据经过标准化、校正后，可通过 `EGO_HAND_ROUTE` 选择
 MediaPipe、WiLoR 或并行运行。GEN 六目流程使用独立的多视角 Double-Sphere
 几何融合；camera2/3 校正视图主要用于 MANO 约束和 WiLoR 训练标签导出。
+多视角的 `--wilor-mode`、`--gem-mode` 与双目入口的 `EGO_HAND_ROUTE` 是不同选项。
 
 ## 效果展示
 
@@ -87,7 +89,7 @@ python -m pip install --no-build-isolation \
 当前官方 `detector.pt` 含有 `C3k2` 层，因此安装脚本固定使用与该权重一致的
 Ultralytics 8.4.56；环境检查也会在版本或模型层不兼容时提前报出明确错误。
 
-准备授权资产。MANO 的两个 pkl 从官方页面下载后安装，放到models/MANO。WiLoR checkpoint 和 detector
+准备授权资产。MANO 的两个 pkl 从官方页面下载后安装，放到 `models/mano/`。WiLoR checkpoint 和 detector
 从官方 Hugging Face Space 下载：
 
 ```bash
@@ -150,7 +152,195 @@ export EGO_WILOR_BATCH_SIZE=4
 ./scripts/run_offline.sh all
 ```
 
-### GEN 六目 WiLoR 实验
+<a id="multiview-wilor-gem"></a>
+
+### 多视角 WiLoR 与 GEM：快速使用
+
+这一节对应 `scripts/run_multiview_wilor_experiment.sh` 和
+`scripts/run_multiview_gem_experiment.sh`。两者都能在各路视频上显示检测框、21 点骨架
+和半透明手部网格。**骨架是关节和连线，网格是包在外面的手部表面。**
+
+WiLoR 用 MANO 手模型，GEM-X 用 SOMA 手模型。共享模式的做法相同：先从整段视频
+估计左右手各自的基本手型，再根据每个同步时刻的多路照片，调整手的位置、朝向和
+手指动作。各相机显示同一只虚拟手的不同角度，骨架与网格由同一个模型一起生成。
+整段固定的是基本手型参数，姿态、位置和受限的整体缩放仍可逐帧变化。
+
+#### 选择模式
+
+下面的最终视频需要添加 `--final-video`；独立网格视频使用默认的
+`--final-renderer hybrid`。`N` 是实际选择的相机数量，例如四路对应 `4view`。
+
+| 想得到什么 | WiLoR 参数 | GEM 参数 | 最终视频 |
+| --- | --- | --- | --- |
+| 各路骨架和网格共同三维一致 | `--wilor-mode shared`（默认） | `--gem-mode shared`（默认） | `final_shared_Nview.mp4` |
+| 原流程骨架，加各路自己预测的网格 | `--wilor-mode legacy` | `--gem-mode independent` | `final_only_Nview.mp4` |
+| 同时查看上述两种结果 | `--wilor-mode both` | `--gem-mode both` | 两个视频都生成 |
+
+- **`shared`：**每个同步时刻、每只手只有一份三维模型。通过质量检查后才显示，
+  无有效手模型时显示 `NO VALID SHARED 3D`，不插入各路独立的二维姿态。
+- **`legacy` / `independent`：**骨架保留原流程的融合、平滑和二维回退；网格来自各路
+  网络预测。骨架与网格不保证完全贴合，各路网格也不保证三维一致。
+- **`both`：**在一次运行中复用同一份检测和网络推理结果，再额外做共享拟合，方便比较。
+  WiLoR 与 GEM 是两种不同网络，运行两个入口时仍需分别推理，并使用不同输出目录。
+
+未指定模式时，两个入口都选择 `shared`。环境变量 `EGO_WILOR_MODE`、`EGO_GEM_MODE`
+可改变对应入口的默认值；命令行显式传入模式的优先级最高。
+
+#### 准备输入和环境
+
+输入二选一：`--session` 指定带标定、时间戳的 EGO4 四路录制目录或其 `part0001`
+分段；`--mcap` 指定带所需标定的 GEN 多目 MCAP。共享重建至少需要两台相机，且标定
+必须包含各路镜头参数和相机之间的位置、朝向。缺少标定的 EGO Pro MCAP 原始二维基线
+请使用下文的 `run_orbbec_multiview_wilor.sh`，不能直接当作已标定的共享三维输入。
+
+WiLoR 使用前面安装的 `ego-hand` 环境、WiLoR 权重、检测器和 MANO 资产；共享拟合默认
+读取 `models/mano`。GEM 还需要 GEM-X 源码、EgoHand 权重及完整 SOMA 资产，可在已有
+项目环境上安装其依赖：
+
+```bash
+GEM_X_ROOT="/path/to/GEM-X" bash scripts/setup_gem_hand_environment.sh
+```
+
+安装脚本不代替模型资产准备。GEM 入口默认使用 GEM-X 目录内的
+`weights/egohand_s060000.ckpt` 和 `assets/soma`，也可以用 `--checkpoint`、
+`--soma-assets` 指定；需要独立 Python 环境时可传 `--gem-python /path/to/python`。
+
+#### 先跑 60 帧，再处理整段
+
+在项目根目录执行，替换 `/path/to/...` 路径。下面两条命令都明确选择共享模式，并且
+只生成最终视频，跳过额外诊断视频。检测器默认是 `models/wilor/detector.pt`，可用
+`--detector /path/to/detector.pt` 换成自己的权重。
+
+WiLoR：
+
+```bash
+bash scripts/run_multiview_wilor_experiment.sh \
+  --session /path/to/ego4_session_or_part \
+  --output output/wilor_shared_60 \
+  --cameras camera0 camera1 camera2 camera3 \
+  --conda-env ego-hand --device cuda \
+  --max-frames 60 --batch-size 4 \
+  --wilor-mode shared \
+  --final-video --no-diagnostic-video
+```
+
+GEM：
+
+```bash
+bash scripts/run_multiview_gem_experiment.sh \
+  --session /path/to/ego4_session_or_part \
+  --output output/gem_shared_60 \
+  --gem-root /path/to/GEM-X \
+  --cameras camera0 camera1 camera2 camera3 \
+  --conda-env ego-hand --device cuda \
+  --max-frames 60 --batch-size 4 \
+  --gem-mode shared \
+  --final-video --no-diagnostic-video
+```
+
+检查结果后，把 `--max-frames 60` 改为 `--max-frames 0` 处理全部同步帧，并使用新的
+输出目录。要对比独立和共享结果，把对应的模式改为 `both`，保留 `--final-video`，
+并使用 `--final-renderer hybrid`。处理 GEN MCAP 时，将 `--session ...` 替换成
+`--mcap /path/to/recording.mcap`，同时按录制选择相机；GEN 六目通常是 `camera0` 到
+`camera5`，EGO4 四目是 `camera0` 到 `camera3`。
+
+#### 输出视频分别是什么
+
+以四路、未启用辅助分支的 `both` 模式为例：
+
+```text
+WiLoR 输出目录/
+├── wilor_multiview/                     # 各路原始预测和保存的 MANO 参数
+├── fusion_multiview/
+│   └── final_only_4view.mp4              # 原流程骨架 + 各路独立 WiLoR 网格
+└── fusion_multiview_shared_wilor/
+    ├── shared_pose.pt                   # 每帧每手共享骨架、网格及参数
+    └── final_shared_4view.mp4            # 共享 MANO 骨架 + 共享网格
+
+GEM 输出目录/
+├── gem_multiview/cameraN/
+│   ├── predictions.jsonl               # 各路二维观测
+│   └── gem_pose.pt                     # 各路 SOMA 参数、关节和网格
+├── fusion_multiview/
+│   └── final_only_4view.mp4              # 原流程骨架 + 各路独立 GEM 网格
+└── fusion_multiview_shared_gem/
+    ├── shared_pose.pt
+    └── final_shared_4view.mp4            # 共享 SOMA 骨架 + 共享网格
+```
+
+两个入口还会保存 `normalized_multiview/`、运行配置、质量统计和同名视频 JSON。
+共享目录的 `accepted.jsonl`、`rejected.jsonl` 记录有效结果与拒绝原因，
+`final_shared_4view.projections.jsonl` 记录同一只手在各路的投影。
+检测框来自图像检测，不代表该路一定参与了共享拟合；WiLoR 共享视频会显示各路原始
+检测框，即使该帧没有有效共享手模型。网格配色为左手蓝、右手橙，透明度为 55%。
+
+未跳过诊断视频时，`fusion_multiview/diagnostic_Nview.mp4` 用于查看原流程的融合
+状态，不应当作共享网格最终视频。手套标记、SAM3 或几何身份选择等分支会改变融合
+目录名，共享目录在实际融合目录名后添加 `_shared_wilor` 或 `_shared_gem`。
+
+以下两个 WiLoR 文件属于额外的对照产物，当前主脚本不会自动生成：
+
+| 文件 | 内容 | 如何获得 |
+| --- | --- | --- |
+| `final_legacy_shared_mesh_4view.mp4` | 原流程骨架 + 与共享视频相同的网格 | 已有共享结果后，单独运行 `render_hybrid_multiview.py`，传入 `--shared-mano-mesh` |
+| `comparison_same_mesh.mp4` | 左边为上一个视频，右边为 `final_shared_4view.mp4`；两边网格相同，观察骨架差异 | 运行 `compare_shared_wilor_multiview.py`，用 `--legacy-video` 指定上一个视频 |
+
+**当前 `final_only_4view.mp4` 使用各路独立网格，不再被共享网格对照版本覆盖。**
+额外渲染步骤见 [WiLoR 共享实验说明](docs/multiview_wilor_shared_experiment.md)。
+若要直接比较“独立网格”和“共享网格”，在 WiLoR 的 `both` 运行完成后执行：
+
+```bash
+WILOR_RUN="output/wilor_both"
+conda run --no-capture-output -n ego-hand \
+  env PYTHONPATH="$PWD/python_deps/wilor_runtime:$PWD/scripts" \
+  python scripts/compare_shared_wilor_multiview.py \
+  --run "$WILOR_RUN" \
+  --output "$WILOR_RUN/comparison_native_vs_shared.json" \
+  --video "$WILOR_RUN/comparison_native_vs_shared.mp4"
+```
+
+把 `WILOR_RUN` 换成实际的 WiLoR 输出目录。该命令默认左边使用 `final_only`，右边使用
+`final_shared`，还会输出统计 JSON 和配对 CSV；再次生成时需要使用新的报告和视频文件名。
+这个对比工具读取 WiLoR 数据，不能直接用于 GEM 输出。
+
+#### 常用开关和复用结果
+
+| 参数 | 作用 |
+| --- | --- |
+| `--final-video` | 生成所选模式的最终视频；默认不生成最终视频 |
+| `--no-diagnostic-video` | 只跳过诊断视频，保留请求的最终视频 |
+| `--no-video` | 跳过诊断和最终视频，保留推理、融合和所选模式的共享拟合数据 |
+| `--final-renderer hybrid` | 默认值；`final_only` 显示原流程骨架和各路独立网格 |
+| `--final-renderer fused` | `final_only` 使用骨架渲染入口，不画网格；不影响 `final_shared` |
+| `--max-frames 60` / `0` | 先测试 60 个同步帧 / 处理全部同步帧 |
+| `--batch-size 4` | 网络推理的手部假设批量；显存不足时可减小 |
+| `--shared-steps 100` | 共享模型每帧的优化步数，默认 100 |
+| `--shared-batch-size 32` | 共享拟合的批量，默认 32；与网络推理批量不同 |
+| `--stop-after-inference` | 完成各路网络推理后停止，不运行后续融合、拟合和渲染 |
+| `--external-boxes DIR` | 仅 WiLoR：复用同一输入的检测框，仍由 WiLoR 独立预测姿态 |
+
+两个入口默认使用 `--gpu-profile compatible`（FP32）。可选择 `rtx5090d` 加速配置并按
+显存调整批量；GEM 的相机求解和 SOMA 几何仍用 FP32，`--preprocess-workers` 不控制
+GEM 的模型裁剪。手套标记 `--glove-marker-assist 1` 和 SAM3
+`--sam3-glove-assist 1` 是可选辅助，默认关闭，相关准备见下文专题链接。
+
+已有输出可以在配置一致时复用完成的阶段，切换模式或更新视频通常可复用已有网络预测。
+WiLoR 的网格和共享拟合需要保存过 MANO 参数；旧缓存缺少这些参数时，脚本会提示换新
+输出目录重新推理。改变输入、相机、帧数、权重或拟合配置时使用新目录；不完整阶段
+也应按脚本提示处理，不能把任意两个实验的缓存混在一起。
+
+共享模式保证“各路使用同一份三维手”，不保证姿态完全准确。当前按左右手最多维护
+两只手；共享关联按单只手进行，至少需要两路支持，不要求四路都看见双手。两个原图
+入口都不做图像去畸变，网络阶段存在针孔近似，后续共享拟合与投影使用原始标定。
+共享姿态逐帧拟合，未套用原流程单独修改骨架的时序平滑，避免骨架与网格脱离。
+更多模型配置见 [GEM 实验说明](docs/multiview_gem_experiment.md) 和
+[WiLoR 共享实验说明](docs/multiview_wilor_shared_experiment.md)。
+
+### GEN 六目 WiLoR 实验（原流程骨架与标签链路）
+
+本节保留原流程的融合、辅助和训练标签用法，示例显式使用 `--wilor-mode legacy`。
+需要共享骨架与网格时，使用上方快速使用中的 `shared` 或 `both`；旧流程的锚点和
+双手判据不代表共享拟合的逐手关联规则。
 
 完整设计、算法改进、指标、左右手身份修复和排错记录见
 [`docs/GEN_SIX_CAMERA_WILOR_FUSION.md`](docs/GEN_SIX_CAMERA_WILOR_FUSION.md)。
@@ -169,12 +359,12 @@ camera2/3 锚点选择、DS 射线、外围相机关联和逐关节 RANSAC 的�
 
 主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
 `camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
-双假设 WiLoR，以 `camera2/3` 为首选锚点并在缺失时动态选择其他相机对，再让外围
+双假设 WiLoR，默认优先使用基线较宽的 `camera0/5`，不可用时尝试 `camera2/3` 或其他相机对，再让外围
 相机逐只手按重投影匹配，最后用原生 Double-Sphere 射线和 RANSAC 融合 3D 关节：
 
-最终 Left/Right 身份由 `detector.pt` 的 `left/right` 类别严格锁定；双假设只用于估计
-对应身份的姿态，几何误差和手掌翻转不能再交换两只手。汇总中的
-`detector_handedness_mismatch_observation_count` 应为 `0`。
+原流程在 `--detector-handedness strict` 下，由 detector 的 `left/right` 类别锁定身份，
+汇总中的 `detector_handedness_mismatch_observation_count` 应为 `0`。未开启手套标记辅助
+时默认使用 `strict`；开启标记辅助时默认改为下文说明的 `adaptive`。
 
 ```bash
 cd <ego_hand_system目录>
@@ -185,6 +375,7 @@ conda activate ego-hand
   --device cuda \
   --max-frames 60 \
   --batch-size 4 \
+  --wilor-mode legacy \
   --glove-marker-assist 1
 ```
 ```bash
@@ -195,6 +386,7 @@ conda activate ego-hand
     --device     cuda \
     --gpu-profile rtx5090d \
     --max-frames 0 \
+    --wilor-mode legacy \
     --glove-marker-assist 1
 ```
 
@@ -202,7 +394,7 @@ conda activate ego-hand
 OpenCV 抗锯齿裁剪线程、锁页内存异步传输和 H.264 解码预取、FP16 autocast/TF32，
 并仅在每路相机结束后清理 CUDA 缓存。若 24 GB 显存仍不足，推理会自动将 WiLoR
 假设批次减半并重试。
-WiLoR backbone 默认通过 `torch.compile` 合并 CUDA kernel；首次运行会有一次编译等待，
+该加速配置默认通过 `torch.compile` 编译 WiLoR backbone；首次运行会有一次编译等待，
 之后的完整序列会摊薄该开销。
 由于严格 handedness 模式下每帧物理上最多只有一只左手和一只右手，该配置还会为
 每个 detector 类别只保留最高置信度框，避免低阈值侧相机的重复假框成倍运行 WiLoR。
@@ -226,6 +418,7 @@ RTX 5060 保持默认的
   --cameras camera1 camera2 camera3 camera4 \
   --reference-camera camera2 \
   --device cuda \
+  --wilor-mode legacy \
   --max-frames 60
 ```
 
@@ -284,12 +477,14 @@ SAM3、三角化、3D 融合或时序修正。这个 MCAP 没有 `camera_info`�
 数据格式，并保留 KB 鱼眼标定。后续复用 GEN 的逐路双假设 WiLoR、跨视角匹配、
 3D 融合、关节时序与质量后处理、诊断渲染链路；融合及后处理判据与 GEN 保持一致。
 
-先运行 60 帧检查数据适配和融合结果：
+下面显式使用 `legacy` 运行 60 帧，检查原流程的数据适配和融合结果；共享模式的使用见
+[快速使用](#multiview-wilor-gem)。
 
 ```bash
 ./scripts/run_multiview_wilor_experiment.sh \
   --session recordings/20260928/EGO_Pro_AZLR86000F7_20260928_135841 \
-  --output output/0928/ego4_135841_anchor01 --max-frames 60 --device cuda
+  --output output/0928/ego4_135841_anchor01 --max-frames 60 --device cuda \
+  --wilor-mode legacy
 ```
 
 输出 `fusion_multiview/diagnostic_4view.mp4` 和相应的融合结果。EGO4 四目恢复
@@ -333,9 +528,9 @@ conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
 
 `--crop-top-px 300` 只针对 `135841` 中双手始终位于画面下方的录制验证过；其它录制应先检查手是否会进入裁掉的区域。`clean` 仅隐藏诊断框和文字，不改变关节数据。`native_2d` 视频展示的是 2D 跟踪，不能作为 3D 精度证明。
 
-需要保留只有一只手通过多视角质量门限的帧时，在新输出目录运行 EGO4 流程并加 `--allow-single-hand-anchors 1`。这个选项仍要求至少两路真实观测通过几何检查；默认值保持为 `0`。在 `135841` 前 60 帧，开启后保留了原有 39 帧双手结果，并增加 20 帧单手结果。
+原流程需要保留只有一只手通过多视角质量门限的帧时，在新输出目录运行 EGO4 流程并加 `--allow-single-hand-anchors 1`。这个选项仍要求至少两路真实观测通过几何检查；默认值保持为 `0`。在 `135841` 前 60 帧，开启后保留了原有 39 帧双手结果，并增加 20 帧单手结果。共享拟合另行逐只手关联，不受这个旧锚点开关控制。
 
-确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
+对于 GEN 六目，确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
 序列。脚本会生成 `fusion_multiview/diagnostic_6view.mp4`，其中六个画面按 3x2 排列；
 绿色 `USED` 显示该相机实际贡献的内点关节，灰色 `INACTIVE` 表示未参与，红色
 `OUTLIER/REJECTED` 显示离群候选或整帧拒绝原因。
@@ -370,10 +565,11 @@ conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
 如果一个目录中有多个 MCAP，可使用批处理入口运行。`rtx5090d` 默认启用两级流水线：
 下一条记录执行 GPU inference 时，上一条记录同时执行 CPU fusion 和 NVENC render；
 可用 `--pipeline 0` 恢复严格串行。每个 MCAP 使用文件名创建独立输出目录，某个文件
-失败后默认继续下一个：
+失败后默认继续下一个。以下用 `EGO_WILOR_MODE=legacy` 固定原流程，保留这组批处理
+示例的骨架融合行为：
 
 ```bash
-./scripts/run_multiview_wilor_batch.sh \
+EGO_WILOR_MODE=legacy ./scripts/run_multiview_wilor_batch.sh \
   --input-dir /home/p3/data_sda1/ego_hand_system/recordings/20260818 \
   --output-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
   --conda-env ego-hand \
@@ -385,9 +581,10 @@ conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
 ```
 
 视频编码会优先使用 PyAV 的 `h264_nvenc`，不可用时自动回退到 OpenCV `mp4v`。
-渲染会并行读取六路视频并预取下一帧；添加 `--final-video` 时，先生成诊断版，再生成
-保守的 trusted-3D/native-2D 混合交付版（可用 `EGO_FINAL_RENDERER=fused` 显式恢复纯
-融合 3D）。混合版只在深度几何可靠时显示 3D，否则显示该相机的原生 2D，避免扭曲手指。
+渲染会并行读取六路视频并预取下一帧；在本节 `legacy` 模式下添加 `--final-video`，
+会额外生成原流程骨架与各路独立网格视频。混合骨架只在深度几何可靠时显示融合 3D，
+否则显示该相机的原生 2D；`--final-renderer fused` 则改用不带网格的融合骨架渲染入口。
+如果选择 `shared` 或 `both`，最终视频按上方模式表生成。
 normalization 的 remux 完整性校验也会优先使用六路并行 `h264_cuvid`/NVDEC，不支持
 NVDEC 的机器自动回退到软件 H.264 解码。
 
@@ -603,6 +800,9 @@ export EGO_STAGE=stereo
 
 ## 常用运行变量
 
+以下变量用于 `run_offline.sh` 双目主流程；多视角入口的模式和参数见
+[WiLoR 与 GEM 快速使用](#multiview-wilor-gem)。
+
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `EGO_SOURCE` | 必填 | `orbbec` 或 `gen` |
@@ -639,7 +839,8 @@ export EGO_MAX_FRAMES=80
 
 ## 输出目录
 
-Orbbec 和 GEN 现在都先生成统一的标准化、校正数据集，再进入同一套后处理：
+以下为 `run_offline.sh` 双目主流程的输出：Orbbec 和 GEN 都先生成统一的标准化、
+校正数据集，再进入后处理。多视角实验的目录见 [快速使用](#multiview-wilor-gem)。
 
 ```text
 $EGO_OUTPUT/

@@ -13,7 +13,8 @@ button,select{padding:var(--s-2) var(--s-3);border:1px solid var(--border-bright
 .marker-focus{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-3);padding:var(--s-3) 0;font-size:var(--t-small);font-variant-numeric:tabular-nums}
 .marker-focus label{display:flex;align-items:center;gap:var(--s-2)}
 #marker-choice{max-width:230px}#context-opacity{width:90px}#marker-detail{margin-left:auto;min-width:160px;text-align:right}
-#marker-distance{font-weight:600;color:var(--accent)}#clear-marker:disabled{cursor:default;color:var(--text-dim)}
+#marker-distance{font-weight:600;color:var(--accent)}#clear-marker:disabled,#open-marker-inspector:disabled{cursor:default;color:var(--text-dim)}
+#marker-inspector-notice:empty{display:none}
 .attachment{color:#f2cb86}.marker-help{font-size:var(--t-small);color:var(--text-dim);margin:var(--s-2) 0}
 .readout{display:flex;flex-wrap:wrap;gap:var(--s-5);font-variant-numeric:tabular-nums;margin:var(--s-3) 0}
 .readout strong{font-size:var(--t-h3);display:block}.readout span{font-size:var(--t-label);color:var(--text-dim)}
@@ -27,6 +28,14 @@ button,select{padding:var(--s-2) var(--s-3);border:1px solid var(--border-bright
 .overlay-validation article{border-top:1px solid var(--border-bright);padding-top:var(--s-3)}
 .overlay-validation p{margin:var(--s-2) 0}.overlay-validation h3{font-size:var(--t-body)}
 #overlay-state{font-weight:600}#overlay-error{color:var(--risk)}#overlay-video{display:block;width:100%;height:auto;background:#182029}
+.direction-options{margin:var(--s-3) 0;border-top:1px solid var(--border-bright);padding-top:var(--s-3)}
+.direction-options summary{cursor:pointer;font-size:var(--t-body);font-weight:600}
+.direction-options .readout{gap:var(--s-4)}.direction-options .readout strong{font-size:var(--t-body)}
+.direction-options [hidden]{display:none!important}.direction-values{font-variant-numeric:tabular-nums}
+.direction-views{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s-3)}
+.direction-views figure{margin:0;min-width:0}.direction-views canvas{display:block;width:100%;height:240px;background:#182029;border-radius:var(--r-1)}
+.direction-views figcaption{font-size:var(--t-small);margin-top:var(--s-2)}
+@media(max-width:780px){.direction-views{grid-template-columns:1fr}}
 @media(max-width:780px){main{padding:var(--s-3)}#scene{height:440px}.layout{grid-template-columns:1fr}}
 </style>
 </head>
@@ -42,9 +51,11 @@ button,select{padding:var(--s-2) var(--s-3);border:1px solid var(--border-bright
 <div class="marker-focus" id="marker-focus">
 <label>聚焦 marker <select id="marker-choice" aria-label="选择要聚焦的 marker"><option value="-1">全部 marker</option></select></label>
 <button id="clear-marker" disabled>取消聚焦</button>
+<button id="open-marker-inspector" disabled title="先选中 marker，再打开可自由旋转和连续缩放的独立窗口">局部放大窗口</button>
 <label>背景可见度 <input id="context-opacity" aria-label="其他内容的可见度" type="range" min="10" max="65" value="25"><output id="context-value">25%</output></label>
 <div id="marker-detail"><span id="marker-status">点击点或连线进行聚焦</span> <output id="marker-distance" aria-label="选中 marker 的三维残差"></output></div>
 </div>
+<p id="marker-inspector-notice" class="marker-help" role="status"></p>
 <canvas id="scene" tabindex="0" role="img" aria-describedby="marker-help" aria-label="可旋转并点选 marker 的右手三维重建">右手 MANO：778 顶点、1538 三角面和 21 关节。点击 marker、网格附着点或连线可聚焦，也可通过上方列表选择。</canvas>
 <div class="toolbar">
 <label><input type="checkbox" id="mesh" checked>网格表面</label><label><input type="checkbox" id="wire">三角线框</label>
@@ -52,6 +63,39 @@ button,select{padding:var(--s-2) var(--s-3);border:1px solid var(--border-bright
 <label><input type="checkbox" id="residuals" checked>残差连线</label><label><input type="checkbox" id="labels">关节编号</label>
 <button id="reset">重置视角</button><button id="front">俯视</button><button id="side">侧视</button>
 </div>
+<details id="direction-options" class="direction-options">
+<summary>方向诊断（可选）</summary>
+<p class="fine muted">先选中一个 marker，再勾选需要的显示。全部默认关闭；收起本面板即可暂时停用增强显示。需要自由放大观察时，使用上方“局部放大窗口”；无需开启三个正交视图。</p>
+<div class="toolbar">
+<label><input id="direction-axes" type="checkbox">分轴残差</label>
+<label><input id="direction-normal" type="checkbox">局部表面与法线</label>
+<label><input id="direction-views" type="checkbox">三个正交视图</label>
+<label><input id="direction-visibility" type="checkbox">遮挡提示</label>
+<button id="direction-reset">关闭全部诊断</button>
+</div>
+<div class="toolbar">
+<label>方向坐标 <select id="direction-space" aria-label="诊断方向坐标"><option value="hand">手部局部坐标</option><option value="world">NOKOV 世界坐标</option></select></label>
+<label>正交视窗 <select id="direction-span" aria-label="正交视窗范围"><option value="10">±10 mm</option><option value="20" selected>±20 mm</option><option value="40">±40 mm</option></select></label>
+</div>
+<p id="direction-status" class="fine">选择 marker 后可查看方向。</p>
+<div id="direction-results" class="direction-values" hidden>
+<p id="direction-axis-help" class="fine muted"></p>
+<div id="direction-axis-values" class="readout" hidden>
+<div><span>横向 X</span><strong id="direction-x">—</strong></div><div><span>纵向 Y</span><strong id="direction-y">—</strong></div><div><span>掌背方向 Z</span><strong id="direction-z">—</strong></div>
+</div>
+<div id="direction-normal-values" hidden>
+<div class="readout"><div><span>沿局部外法线 n</span><strong id="direction-n">—</strong></div><div><span>沿局部表面的偏差</span><strong id="direction-tangent">—</strong></div></div>
+<p class="fine muted">蓝色小平面经过网格附着点，n+ 为三角面外法线。正值表示实测点在局部切平面外侧，负值在内侧；不等于对整个网格的内外判定或球体贴附高度。球半径、手套厚度也会影响该数值。</p>
+</div>
+<div id="direction-panels" class="direction-views" hidden>
+<figure><canvas id="direction-xy" role="img" aria-label="XY 正交残差视图"></canvas><figcaption>XY：横向与纵向偏差。</figcaption></figure>
+<figure><canvas id="direction-yz" role="img" aria-label="YZ 正交残差视图"></canvas><figcaption>YZ：纵向与掌背方向偏差。</figcaption></figure>
+<figure><canvas id="direction-xz" role="img" aria-label="XZ 正交残差视图"></canvas><figcaption>XZ：横向与掌背方向偏差。</figcaption></figure>
+</div>
+<p class="fine muted">◇ 网格附着点为正交图原点，□ 为实测点；箭头从附着点指向实测点。三幅图比例一致，数值单位 mm；旋转主视图不改变诊断数值。</p>
+</div>
+<p id="direction-visibility-help" class="fine muted" hidden>空心虚线点及虚线残差表示当前视角下被网格挡住；仅在网格表面开启时判断遮挡，仍可点击聚焦。</p>
+</details>
 <div class="key"><b class="joint">● MANO 关节 / 骨架</b><b class="marker">□ NOKOV 实测 marker</b><b class="attachment">◇ 模型附着点</b><b>灰线：两点之间的三维残差</b></div>
 <p class="marker-help" id="marker-help">点击点或连线聚焦；其他内容变淡。拖动旋转、滚轮缩放；再次点击选中点、点击空白或按 Esc 取消。选择随回放保持，视角不变。模型附着点是估计的网格对应位置。</p>
 <div class="readout"><div><span>采集时间</span><strong id="time">载入中</strong></div><div><span>NOKOV 帧号</span><strong id="frame">—</strong></div><div><span>有效 marker</span><strong id="valid">—</strong></div><div><span>平均残差</span><strong id="mean">—</strong></div><div><span>最大残差</span><strong id="max">—</strong></div><div><span>当前中位残差</span><strong id="median">—</strong></div><div><span>当前 P95 残差</span><strong id="p95">—</strong></div></div>
@@ -65,7 +109,7 @@ button,select{padding:var(--s-2) var(--s-3);border:1px solid var(--border-bright
 <p class="fine">表面附着点与形状均由本段数据估计。手套厚度、皮肤和 marker 半径没有独立标定，残差表示对观测的拟合程度，不能代表解剖关节精度。视频叠加还依赖独立的时间和安装标定，3D 拟合残差不能代替图像投影精度。</p>
 <div class="download"><a href="mano_reconstruction.mp4">完整回放视频</a><a href="reconstruction.npz">90 Hz 网格与关节</a><a href="mano_parameters.npz">MANO 参数</a><a href="joints_21_world.csv">21 关节 CSV</a><a href="summary.json">拟合指标</a></div>
 </section>
-<section><h2>本次拟合概况</h2><div id="overall"></div><p class="fine">页面每 3 帧抽取一帧，覆盖整段采集。可视化坐标按腕部中心压缩至 0.1 mm 精度；NPZ 保留全部帧及原始 float32 精度。</p><p class="fine" id="wrist"></p></section>
+<section><h2>本次拟合概况</h2><div id="overall"></div><p class="fine">页面每 3 帧抽取一帧，覆盖整段采集。主视图网格按腕部中心压缩至 0.1 mm 精度；方向诊断及局部放大窗口使用原始浮点坐标。NPZ 保留全部帧及原始 float32 精度。</p><p class="fine" id="wrist"></p></section>
 </div>
 <section id="video-overlay"><h2>叠加到原始 EGO 视频</h2>
 <figure>
@@ -85,6 +129,8 @@ button,select{padding:var(--s-2) var(--s-3);border:1px solid var(--border-bright
 </main>
 <script type="application/json" id="data">__DATA__</script>
 <script>__MARKER_INTERACTION__</script>
+<script>__MARKER_DIAGNOSTICS__</script>
+<script>__MARKER_INSPECTOR__</script>
 <script>
 'use strict';
 const D=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id),S=D.summary;
@@ -93,10 +139,14 @@ function binary(text){const raw=atob(text),bytes=new Uint8Array(raw.length);for(
 for(const key in sizes){arrays[key]=new Int16Array(binary(D[key]));delete D[key]}
 const markerErrors=new Float32Array(binary(D.marker_error_m));delete D.marker_error_m;
 const interaction=NokovMarkerInteraction;
+const spatial=NokovMarkerDiagnostics,directionArrays={};
+for(const key of ['measured','attached','axes','normals'])directionArrays[key]=new Float32Array(binary(D.directions[key]));
+delete D.directions;
 let index=0,playing=false,yaw=-.12,pitch=1.12,zoom=1,drag=null,previous=null,clockTime=0;
 let selectedMarker=-1,screenMarkers=[],screenAttachments=[];
+let markerInspector=null,detailVertices=null,inspectorFrame=null,inspectorIndex=-1;
 for(let k=0;k<D.marker_names.length;k++){const option=document.createElement('option');option.value=k;option.textContent=`${k} · ${D.marker_names[k]}`;$('marker-choice').append(option)}
-function chooseMarker(k){selectedMarker=k>=0&&k<D.marker_names.length?k:-1;$('marker-choice').value=selectedMarker;$('clear-marker').disabled=selectedMarker<0;draw()}
+function chooseMarker(k){selectedMarker=k>=0&&k<D.marker_names.length?k:-1;$('marker-choice').value=selectedMarker;$('clear-marker').disabled=selectedMarker<0;$('open-marker-inspector').disabled=selectedMarker<0;draw()}
 function markerError(k){return markerErrors[index*24+k]}
 function residualText(value){return Number.isFinite(value)?(value*1000).toFixed(2)+' mm':'—'}
 function pickAt(e){const r=$('scene').getBoundingClientRect();return interaction.pickMarker([e.clientX-r.left,e.clientY-r.top],screenMarkers,screenAttachments,{markers:$('markers').checked,residuals:$('residuals').checked,selected:selectedMarker})}
@@ -105,15 +155,58 @@ $('overall').textContent=`${S.frames.toLocaleString()} 帧 / ${S.duration_s.toFi
 $('source').textContent=S.source+'/nokov_markers.csv · MANO_RIGHT.pkl · 所有导出几何均为 NOKOV 世界坐标，单位 m。';
 function framePoints(key){const a=arrays[key],n=sizes[key],offset=index*n*3,p=[];for(let j=0;j<n;j++){const k=offset+j*3;p.push(a[k]===-32768?null:[a[k]*.0001,a[k+1]*.0001,a[k+2]*.0001])}return p}
 function context(id){const c=$(id),w=c.clientWidth,h=c.clientHeight,d=Math.min(devicePixelRatio||1,2);if(c.width!==Math.round(w*d)||c.height!==Math.round(h*d)){c.width=Math.round(w*d);c.height=Math.round(h*d)}const x=c.getContext('2d');x.setTransform(d,0,0,d,0,0);return {c,x,w,h}}
+function directionOptions(){
+ const active=$('direction-options').open;
+ return {axes:active&&$('direction-axes').checked,normal:active&&$('direction-normal').checked,views:active&&$('direction-views').checked,visibility:active&&$('direction-visibility').checked,space:$('direction-space').value,span:Number($('direction-span').value)};
+}
+function directionVector(key,k){const offset=(index*(key==='axes'?3:24)+k)*3,p=Array.from(directionArrays[key].slice(offset,offset+3));return spatial.finite(p)?p:null}
+function currentDirection(options){
+ if(selectedMarker<0)return null;
+ const axes=options.space==='world'?spatial.world:[0,1,2].map(k=>directionVector('axes',k));
+ return spatial.analyse(directionVector('measured',selectedMarker),directionVector('attached',selectedMarker),axes,directionVector('normals',selectedMarker));
+}
+function getInspectorFrame(){
+ if(selectedMarker<0){inspectorFrame=null;return null}
+ if(inspectorFrame&&inspectorIndex===index&&inspectorFrame.marker===selectedMarker)return inspectorFrame;
+ if(!detailVertices){detailVertices=new Float32Array(binary(D.detail_vertices));delete D.detail_vertices}
+ const offset=index*sizes.vertices*3,vertices=[];
+ for(let k=0;k<sizes.vertices;k++)vertices.push(Array.from(detailVertices.subarray(offset+k*3,offset+k*3+3)));
+ inspectorIndex=index;
+ inspectorFrame={marker:selectedMarker,name:D.marker_names[selectedMarker],frame:D.frames[index],time:D.time[index],d:currentDirection({space:'hand'}),vertices,faces:D.faces,faceId:D.attachment_face_ids[selectedMarker]};
+ return inspectorFrame;
+}
+function updateDirections(d,options,vertices){
+ const enabled=options.axes||options.normal||options.views;
+ $('direction-results').hidden=!enabled||!d;
+ $('direction-visibility-help').hidden=!options.visibility;
+ $('direction-status').textContent=!d?'选择 marker 后可查看方向。':!enabled?'已选 '+D.marker_names[selectedMarker]+'；勾选需要的诊断显示。':D.marker_names[selectedMarker]+(d.delta?' · 偏差 = 实测点 − 网格附着点':' · 本帧无有效实测点，仅显示附着点与局部表面');
+ if(!enabled||!d)return;
+ $('direction-axis-help').textContent=options.space==='hand'?'手部 X+：小指侧；Y+：从腕部朝向中指指根；Z+：手背侧。分轴数值来自原始浮点数据。':'使用 NOKOV 世界 X / Y / Z 正方向；正交图中的轴名也为世界坐标。';
+ if(!d.axes)$('direction-status').textContent+='；本帧手部坐标退化，可切换世界坐标';
+ $('direction-axis-values').hidden=!options.axes;
+ ['x','y','z'].forEach((key,k)=>$('direction-'+key).textContent=spatial.axisText(d.components?d.components[k]:null,k,options.space));
+ $('direction-axis-values').querySelectorAll('span').forEach((node,k)=>node.textContent=options.space==='hand'?['横向 X','纵向 Y','掌背方向 Z'][k]:'世界 '+'XYZ'[k]);
+ $('direction-normal-values').hidden=!options.normal;
+ $('direction-n').textContent=spatial.signed(d.normalDistance)+(d.normalDistance===null?'':Math.abs(d.normalDistance)<.000005?' · 位于切平面':d.normalDistance>0?' · 表面外侧':' · 表面内侧');
+ $('direction-tangent').textContent=residualText(d.tangentDistance);
+ $('direction-panels').hidden=!options.views;
+ if(options.views){
+  ['xy','yz','xz'].forEach((key,k)=>spatial.drawOrthographic($('direction-'+key),d,vertices,D.faces,[[0,1],[1,2],[0,2]][k],options));
+  $('direction-panels').querySelectorAll('figcaption').forEach((node,k)=>node.textContent=options.space==='hand'?['XY：横向与纵向偏差。','YZ：纵向与掌背方向偏差。','XZ：横向与掌背方向偏差。'][k]:['XY：世界 X 与 Y 偏差。','YZ：世界 Y 与 Z 偏差。','XZ：世界 X 与 Z 偏差。'][k]);
+ }
+}
 function draw(){
  const {x,w,h}=context('scene');x.fillStyle='#182029';x.fillRect(0,0,w,h);
  const v=framePoints('vertices'),j=framePoints('joints'),m=framePoints('markers_world_m'),p=framePoints('predicted_markers');
+ const options=directionOptions(),diagnostic=currentDirection(options),enhanced=options.axes||options.normal||options.views||options.visibility;
+ if(enhanced&&diagnostic){m[selectedMarker]=diagnostic.measured;p[selectedMarker]=diagnostic.attached}
  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch),scale=Math.min(w,h)/.32*zoom;
  const rot=q=>[cy*q[0]-sy*q[1],sy*sp*q[0]+cy*sp*q[1]+cp*q[2],-sy*cp*q[0]-cy*cp*q[1]+sp*q[2]];
  const center=rot(j[9].map(z=>z*.65));
  const project=q=>{if(!q)return null;const a=rot(q);return [(a[0]-center[0])*scale+w/2,-(a[1]-center[1])*scale+h/2,a[2]]};
  const pv=v.map(project),pj=j.map(project),pm=m.map(project),pp=p.map(project);
  screenMarkers=pm;screenAttachments=pp;
+ const visibility=options.visibility&&$('mesh').checked,hiddenMarkers=visibility?pm.map(q=>spatial.occluded(q,pv,D.faces)):[],hiddenAttachments=visibility?pp.map(q=>spatial.occluded(q,pv,D.faces)):[];
  if($('mesh').checked||$('wire').checked){
   const ordered=D.faces.map((f,i)=>[i,(pv[f[0]][2]+pv[f[1]][2]+pv[f[2]][2])/3]).sort((a,b)=>a[1]-b[1]);
   for(const [id] of ordered){const f=D.faces[id],a=pv[f[0]],b=pv[f[1]],c=pv[f[2]];x.beginPath();x.moveTo(a[0],a[1]);x.lineTo(b[0],b[1]);x.lineTo(c[0],c[1]);x.closePath();
@@ -123,21 +216,25 @@ function draw(){
  }
  function line(a,b,color,width=1){if(!a||!b)return;x.strokeStyle=color;x.lineWidth=width;x.beginPath();x.moveTo(a[0],a[1]);x.lineTo(b[0],b[1]);x.stroke()}
  function diamond(q,r,colour,width=1){if(!q)return;x.beginPath();x.moveTo(q[0],q[1]-r);x.lineTo(q[0]+r,q[1]);x.lineTo(q[0],q[1]+r);x.lineTo(q[0]-r,q[1]);x.closePath();x.strokeStyle=colour;x.lineWidth=width;x.stroke()}
- if($('residuals').checked)pm.forEach((q,k)=>{if(!q)return;line(q,pp[k],'#a8b5bd',1);diamond(pp[k],2.5,'#e5d4b5')});
+ if($('residuals').checked)pm.forEach((q,k)=>{if(!q)return;x.setLineDash(hiddenMarkers[k]||hiddenAttachments[k]?[4,3]:[]);line(q,pp[k],'#a8b5bd',1);diamond(pp[k],2.5,'#e5d4b5');x.setLineDash([])});
  if($('joints').checked){for(const [a,b] of D.edges)line(pj[a],pj[b],'#e4a34f',2);pj.forEach((q,k)=>{x.fillStyle='#e4a34f';x.beginPath();x.arc(q[0],q[1],3.5,0,Math.PI*2);x.fill();if($('labels').checked){x.font='12px monospace';x.fillStyle='#f4f1e8';x.fillText(k,q[0]+6,q[1]-5)}})}
- if($('markers').checked)pm.forEach(q=>{if(!q)return;x.fillStyle='#75c9a6';x.fillRect(q[0]-3,q[1]-3,6,6);x.strokeStyle='#102a24';x.lineWidth=1;x.strokeRect(q[0]-3,q[1]-3,6,6)});
+ if($('markers').checked)pm.forEach((q,k)=>{if(!q)return;if(hiddenMarkers[k]){spatial.glyph(x,q,'measured',true,3);return}x.fillStyle='#75c9a6';x.fillRect(q[0]-3,q[1]-3,6,6);x.strokeStyle='#102a24';x.lineWidth=1;x.strokeRect(q[0]-3,q[1]-3,6,6)});
  if(selectedMarker>=0){
   const k=selectedMarker,a=pm[k],b=pp[k],error=markerError(k),observed=!!a&&Number.isFinite(error);
   x.fillStyle=`rgba(24,32,41,${1-Number($('context-opacity').value)/100})`;x.fillRect(0,0,w,h);
   const face=D.faces[D.attachment_face_ids[k]],triangle=face.map(i=>pv[i]);
   x.beginPath();triangle.forEach((q,i)=>i?x.lineTo(q[0],q[1]):x.moveTo(q[0],q[1]));x.closePath();x.fillStyle='rgba(242,203,134,.18)';x.fill();x.strokeStyle='#b9a584';x.lineWidth=1.5;x.stroke();
+  if(enhanced)spatial.drawSpatial(x,diagnostic,project,options);
   if(observed){
+   x.setLineDash(hiddenMarkers[k]||hiddenAttachments[k]?[5,4]:[]);
    line(a,b,'#111820',7);line(a,b,'#e2e7ed',3.5);
+   x.setLineDash(hiddenMarkers[k]?[3,3]:[]);
    x.fillStyle='#182029';x.fillRect(a[0]-7,a[1]-7,14,14);x.strokeStyle='#8be0b9';x.lineWidth=2.5;x.strokeRect(a[0]-7,a[1]-7,14,14);
-   x.fillStyle='#8be0b9';x.fillRect(a[0]-1.5,a[1]-1.5,3,3);
+   if(!hiddenMarkers[k]){x.fillStyle='#8be0b9';x.fillRect(a[0]-1.5,a[1]-1.5,3,3)}
   }
+  x.setLineDash(hiddenAttachments[k]?[3,3]:[]);
   diamond(b,9,'#121b23',5.5);diamond(b,9,'#f2cb86',2.5);
-  x.fillStyle='#fff0cf';x.beginPath();x.arc(b[0],b[1],2.5,0,Math.PI*2);x.fill();
+  x.setLineDash([]);if(!hiddenAttachments[k]){x.fillStyle='#fff0cf';x.beginPath();x.arc(b[0],b[1],2.5,0,Math.PI*2);x.fill()}
   if(observed){
    const label=(error*1000).toFixed(2)+' mm';x.font='600 13px monospace';
    const tw=x.measureText(label).width,lx=Math.max(10,Math.min(w-tw-16,(a[0]+b[0])/2+20)),ly=Math.max(52,Math.min(h-68,(a[1]+b[1])/2-22));
@@ -154,6 +251,8 @@ function draw(){
  $('scrub').value=index;
  $('wrist').textContent='当前 MANO 腕部世界坐标 [m]：'+D.origin[index].map(z=>z.toFixed(4)).join(', ');
  drawResidual();
+ updateDirections(diagnostic,options,v);
+ if(markerInspector)markerInspector.update();
 }
 function drawResidual(){const {x,w,h}=context('residual'),left=46,right=w-15,top=20,bottom=h-25,max=Math.max(10,...D.p95.filter(Number.isFinite).map(z=>z*1000));x.clearRect(0,0,w,h);x.font='11px monospace';x.fillStyle='#8295a2';x.fillText('mm',8,14);x.fillText(max.toFixed(0),9,top+5);x.fillText('0',20,bottom);x.strokeStyle='#657480';x.lineWidth=.5;x.beginPath();x.moveTo(left,top);x.lineTo(left,bottom);x.lineTo(right,bottom);x.stroke();
  for(const [key,color] of [['p95','#92a4b0'],['median','#348c9f']]){x.beginPath();let connected=false;D[key].forEach((z,k)=>{if(!Number.isFinite(z)){connected=false;return}const a=left+k/(D.time.length-1)*(right-left),b=bottom-z*1000/max*(bottom-top);connected?x.lineTo(a,b):x.moveTo(a,b);connected=true});x.strokeStyle=color;x.lineWidth=1;x.stroke()}
@@ -167,7 +266,12 @@ $('back').onclick=()=>{stop();seek(index-1)};$('next').onclick=()=>{stop();seek(
 for(const key of ['mesh','wire','joints','markers','residuals','labels'])$(key).onchange=draw;
 $('reset').onclick=()=>{yaw=-.12;pitch=1.12;zoom=1;draw()};$('front').onclick=()=>{yaw=0;pitch=Math.PI/2;draw()};$('side').onclick=()=>{yaw=-.65;pitch=.15;draw()};
 $('marker-choice').onchange=()=>chooseMarker(Number($('marker-choice').value));$('clear-marker').onclick=()=>chooseMarker(-1);
+$('open-marker-inspector').onclick=()=>{if(selectedMarker<0)return;if(!markerInspector)markerInspector=NokovMarkerInspector.create({getFrame:getInspectorFrame,onNotice:text=>$('marker-inspector-notice').textContent=text});markerInspector.open()};
+window.addEventListener('pagehide',()=>{if(markerInspector)markerInspector.close()});
 $('context-opacity').oninput=()=>{$('context-value').textContent=$('context-opacity').value+'%';draw()};
+for(const key of ['axes','normal','views','visibility'])$('direction-'+key).onchange=draw;
+$('direction-space').onchange=draw;$('direction-span').onchange=draw;$('direction-options').ontoggle=draw;
+$('direction-reset').onclick=()=>{for(const key of ['axes','normal','views','visibility'])$('direction-'+key).checked=false;draw()};
 function escapeFocus(e){if(e.key==='Escape'&&selectedMarker>=0){e.preventDefault();chooseMarker(-1)}}
 $('scene').onkeydown=escapeFocus;$('marker-focus').onkeydown=escapeFocus;
 $('scene').onpointerdown=e=>{if(e.button!==0||drag)return;drag=interaction.startGesture(e.clientX,e.clientY,e.pointerId);$('scene').focus({preventScroll:true});$('scene').setPointerCapture(e.pointerId)};

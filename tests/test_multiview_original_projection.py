@@ -119,17 +119,22 @@ class OriginalProjectionTests(unittest.TestCase):
                     frames.append(frame.copy())
                 def release(self):
                     pass
+            def create_writer(path, *args):
+                path.write_bytes(b"fake video")
+                return Writer(), "test"
             args = ["render_hybrid_multiview.py", "--dataset", str(undistorted), "--original-dataset", str(raw),
                     "--fusion", str(fusion), "--predictions", str(root / "predictions"),
                     "--output", str(root / "original.mp4"), "--cameras", "camera0", "--tile-width", "64",
                     "--smoothing-radius", "0", "--max-hold-frames", "0", "--residual-threshold-px", "2",
                     "--wrist-threshold-px", "2", "--max-joint-residual-px", "2"]
             with (patch.object(sys, "argv", args),
-                  patch.object(renderer, "_create_video_writer", return_value=(Writer(), "test")),
+                  patch.object(renderer, "_create_video_writer", side_effect=create_writer),
                   patch.object(renderer, "_draw_refined_hand", side_effect=lambda image, points, *a, **kw: fused.append(points.copy())),
                   patch.object(renderer, "_draw_final_detection", side_effect=lambda image, item, *a: boxes.append(item)),
                   patch.object(renderer, "_draw_final_2d_fallback", side_effect=lambda image, item, *a: native.append(item))):
                 self.assertEqual(renderer.main(), 0)
+            self.assertTrue((root / "original.mp4").is_file())
+            self.assertFalse((root / "original.partial.mp4").exists())
             self.assertEqual(len(frames), 3)
             self.assertEqual(frames[0].shape, (48, 64, 3))  # Raw aspect ratio, not 80x40.
             reader = SequentialVideoReader(raw / "cameras/camera0/video.mkv", (64, 48))

@@ -38,7 +38,7 @@ def _stats(values) -> dict:
             "p95": float(np.percentile(values, 95)) if len(values) else None}
 
 
-def _fusion_directory(root: Path, config: dict) -> Path:
+def _fusion_directory(root: Path, config: dict, *, require_complete: bool = True) -> Path:
     if config.get("sam3_glove_assist", {}).get("enabled"):
         name = "fusion_multiview_sam3_assisted"
     elif config.get("glove_marker_assist", {}).get("enabled"):
@@ -48,7 +48,7 @@ def _fusion_directory(root: Path, config: dict) -> Path:
     else:
         name = "fusion_multiview"
     path = root / name
-    if not (path / "summary.json").is_file():
+    if require_complete and not (path / "summary.json").is_file():
         raise ValueError(f"complete fusion is required: {path}")
     return path
 

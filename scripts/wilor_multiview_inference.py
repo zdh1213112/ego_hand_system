@@ -45,6 +45,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--mano-model-dir", type=Path, default=PROJECT_ROOT / "models/mano")
+    parser.add_argument(
+        "--save-mano-params", action="store_true",
+        help="save canonical MANO rotations/shape for shared multiview fitting (no vertex archive)",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
@@ -144,7 +148,10 @@ def _load_external_boxes(
                 row = json.loads(line)
                 if "sync_index" not in row:
                     continue
-                by_sync[int(row["sync_index"])] = row
+                sync_index = int(row["sync_index"])
+                if sync_index in by_sync:
+                    raise ValueError(f"external proposals for {camera} duplicate sync_index {sync_index}")
+                by_sync[sync_index] = row
         missing = [
             int(row["sync_index"]) for row in sync_rows
             if int(row["sync_index"]) not in by_sync
@@ -154,6 +161,14 @@ def _load_external_boxes(
                 f"external proposals for {camera} do not cover "
                 f"{len(missing)} synchronized frames (first={missing[:3]})"
             )
+        for sync in sync_rows:
+            row = by_sync[int(sync["sync_index"])]
+            if ("source_frame_index" in row
+                    and int(row["source_frame_index"]) != int(sync[f"{camera}_frame_index"])):
+                raise ValueError(f"external proposals for {camera} have a source frame mismatch")
+            if ("timestamp_ns" in row
+                    and int(row["timestamp_ns"]) != int(sync[f"{camera}_timestamp_ns"])):
+                raise ValueError(f"external proposals for {camera} have a timestamp mismatch")
         result[camera] = [by_sync[int(row["sync_index"])] for row in sync_rows]
     return result
 
@@ -171,6 +186,7 @@ def infer_dual(
     frame, detector, model, model_cfg, device, confidence: float,
     iou: float, rescale_factor: float, batch_size: int,
     external_boxes: dict[str, Any] | None = None,
+    save_mano_params: bool = False,
 ) -> list[dict[str, Any]]:
     import torch
 
@@ -237,6 +253,12 @@ def infer_dual(
                 "camera_translation": camera.tolist(),
                 "joints_2d": joints2d.tolist(),
             }
+            if save_mano_params:
+                records[hypothesis_index]["joints_3d_camera_relative"] = joints3d.tolist()
+                records[hypothesis_index]["mano"] = {
+                    key: value[index].detach().float().cpu().tolist()
+                    for key, value in result["pred_mano_params"].items()
+                }
     return [record for record in records if record is not None]
 
 
@@ -600,6 +622,7 @@ def infer_dual_batched(
     preprocess_executor: ThreadPoolExecutor | None = None,
     runtime_stats: dict[str, int] | None = None,
     external_boxes: list[dict[str, Any]] | None = None,
+    save_mano_params: bool = False,
 ) -> list[list[dict[str, Any]]]:
     """Run a complete detector/crop/WiLoR batch without pipeline scheduling."""
     prepared = _prepare_dual_batched(
@@ -608,7 +631,8 @@ def infer_dual_batched(
         external_boxes,
     )
     return _infer_prepared_batched(
-        prepared, model, model_cfg, device, batch_size, runtime_stats
+        prepared, model, model_cfg, device, batch_size, runtime_stats,
+        full_output=save_mano_params,
     )
 
 
@@ -766,6 +790,7 @@ def main() -> int:
                                     external_boxes=external_by_camera[camera][
                                         chunk_start:chunk_start + len(frames)
                                     ] if external_by_camera is not None else None,
+                                    save_mano_params=args.save_mano_params,
                                 ),
                             )
                             for chunk_start, chunk, frames
@@ -786,6 +811,7 @@ def main() -> int:
                                         args.batch_size,
                                         external_boxes=external_by_camera[camera][ordinal]
                                         if external_by_camera is not None else None,
+                                        save_mano_params=args.save_mano_params,
                                     )
                                     for ordinal, frame in enumerate(
                                         frames, start=chunk_start
@@ -865,6 +891,7 @@ def main() -> int:
         "camera_ids": list(cameras),
         "frame_count": len(rows),
         "hypotheses_per_detection": 2,
+        "save_mano_params": args.save_mano_params,
         "gpu_profile": args.gpu_profile,
         "frame_batch_size": frame_batch_size,
         "hypothesis_batch_size": args.batch_size,

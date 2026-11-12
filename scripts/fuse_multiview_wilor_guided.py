@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 
 # Fusion launches several processes and all of its linear algebra matrices are
 # tiny.  A BLAS thread pool inside every worker only oversubscribes the CPU.
@@ -426,9 +426,11 @@ def _complete_detections(
     duplicate_iou: float = 0.95,
     duplicate_containment: float = 0.95,
 ) -> list[int]:
-    detections = [index for index, sides in groups.items() if 0 in sides and 1 in sides]
+    # Some estimators provide only the observed handedness for each box.
+    # Never synthesize an opposite-side pose; retain the available hypothesis.
+    detections = [index for index, sides in groups.items() if 0 in sides or 1 in sides]
     detections.sort(
-        key=lambda index: float(groups[index][0].get("confidence", 0.0)), reverse=True
+        key=lambda index: float(groups[index].get(0, next(iter(groups[index].values()))).get("confidence", 0.0)), reverse=True
     )
     if suppress_duplicate_boxes:
         # Ultralytics/top-k inference can retain two boxes at exactly the same
@@ -441,11 +443,11 @@ def _complete_detections(
         for first_index, first_detection in enumerate(detections):
             if first_detection in removed:
                 continue
-            first_hand = groups[first_detection][0]
+            first_hand = groups[first_detection].get(0, next(iter(groups[first_detection].values())))
             for second_detection in detections[first_index + 1:]:
                 if second_detection in removed:
                     continue
-                second_hand = groups[second_detection][0]
+                second_hand = groups[second_detection].get(0, next(iter(groups[second_detection].values())))
                 first_box = first_hand["bbox_xyxy"]
                 second_box = second_hand["bbox_xyxy"]
                 iou = _bbox_iou(first_box, second_box)
@@ -482,7 +484,8 @@ def _ordered_hand_pairs(
     detections: list[int], groups: dict[int, dict[int, dict[str, Any]]],
     handedness_mode: str,
 ) -> list[tuple[int, int]]:
-    pairs = list(itertools.permutations(detections, 2))
+    pairs = [pair for pair in itertools.permutations(detections, 2)
+             if 0 in groups[pair[0]] and 1 in groups[pair[1]]]
     if handedness_mode == "strict":
         pairs = [
             pair for pair in pairs
@@ -535,6 +538,8 @@ def _match_camera(
             (None, threshold_px, None)
         ]
         for detection in detections:
+            if side not in groups[detection]:
+                continue
             hand = groups[detection][side]
             if handedness_mode == "strict" and _detector_side(hand) not in (None, side):
                 continue
@@ -1601,6 +1606,9 @@ def _fuse_single_hand_frame(
             for first_index, second_index in itertools.product(
                 complete_by_camera[pair[0]], complete_by_camera[pair[1]]
             ):
+                if (side not in groups[pair[0]][first_index]
+                        or side not in groups[pair[1]][second_index]):
+                    continue
                 anchor_hands = {
                     pair[0]: groups[pair[0]][first_index][side],
                     pair[1]: groups[pair[1]][second_index][side],
@@ -1625,6 +1633,8 @@ def _fuse_single_hand_frame(
                         continue
                     matches = []
                     for detection in complete_by_camera[camera]:
+                        if side not in groups[camera][detection]:
+                            continue
                         hand = groups[camera][detection][side]
                         if (args.detector_handedness == "strict"
                                 and _detector_side(hand) not in (None, side)):

@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 import re
@@ -45,12 +46,14 @@ class FrameResidualStatisticsTests(unittest.TestCase):
     def test_export_samples_every_third_frame_and_retains_last(self):
         errors = np.array([[.001, .003], [.8, .9], [.7, .8],
                            [np.nan, np.nan], [.004, np.nan]], dtype=np.float32)
-        data = dict(frame_no=np.arange(10, 15), time_s=np.arange(5) / 90,
+        data = dict(frame_no=np.arange(10, 15), time_s=np.arange(5) / 90, handedness=np.array('right'),
                     faces=np.array([[0, 1, 2]]), joint_names=np.array(['wrist']),
                     marker_names=np.array(['a', 'b']), marker_error_m=errors,
                     marker_valid=np.isfinite(errors), attachment_face_ids=np.array([0, 0]))
-        for key in ('vertices', 'joints', 'markers_world_m', 'predicted_markers'):
-            data[key] = np.zeros((5, 3, 3), dtype=np.float32)
+        for key, count in [('vertices', 3), ('joints', 21), ('markers_world_m', 2), ('predicted_markers', 2)]:
+            data[key] = np.zeros((5, count, 3), dtype=np.float32)
+        data['vertices'][:, 0] = [.0123456, .0234567, .0345678]
+        data['joints'][:, 0] = [.001, .002, .003]
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             (directory / 'fit_residuals.png').write_bytes(b'test image')
@@ -59,6 +62,12 @@ class FrameResidualStatisticsTests(unittest.TestCase):
         payload = json.loads(re.search(r'<script type="application/json" id="data">(.*?)</script>', html).group(1))
         self.assertEqual(payload['frames'], [10, 13, 14])
         self.assertEqual(payload['valid'], [2, 0, 1])
+        detail = np.frombuffer(base64.b64decode(payload['detail_vertices']), dtype='<f4').reshape(3, 3, 3)
+        expected = (data['vertices'][[0, 3, 4]].astype(np.float64)
+                    - data['joints'][[0, 3, 4], :1]).astype('<f4')
+        np.testing.assert_array_equal(detail, expected)
+        self.assertFalse(np.allclose(detail, np.round(detail * 10000) / 10000, atol=1e-7))
+        self.assertNotIn('__MARKER_INSPECTOR__', html)
         self.assertAlmostEqual(payload['mean'][0], .002, places=9)
         self.assertEqual(payload['max'][0], float(errors[0, 1]))
         for key in ('mean', 'max', 'median', 'p95'):

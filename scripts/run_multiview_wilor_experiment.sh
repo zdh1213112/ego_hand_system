@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+POSE_BACKEND="${EGO_EXPERIMENT_POSE_BACKEND:-wilor}"
+case "$POSE_BACKEND" in wilor|gem) ;; *) echo "Unknown pose backend: $POSE_BACKEND" >&2; exit 2 ;; esac
+POSE_LABEL="WiLoR"
+if [[ "$POSE_BACKEND" == gem ]]; then POSE_LABEL="GEM-X"; fi
+GEM_MODE="${EGO_GEM_MODE:-shared}"
+WILOR_MODE="${EGO_WILOR_MODE:-shared}"
+SHARED_STEPS="${EGO_WILOR_SHARED_STEPS:-100}"
+SHARED_BATCH_SIZE="${EGO_WILOR_SHARED_BATCH_SIZE:-32}"
 MCAP=""
 INPUT_KIND="mcap"
 CAMERAS_EXPLICIT=0
@@ -10,6 +18,7 @@ OUTPUT=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
 DETECTOR="${EGO_WILOR_DETECTOR:-$ROOT/models/wilor/detector.pt}"
+EXTERNAL_BOXES=""
 CAMERAS=(camera0 camera1 camera2 camera3 camera4 camera5)
 REFERENCE_CAMERA="camera2"
 MAX_FRAMES=60
@@ -21,6 +30,7 @@ COMPILE_BACKBONE=""
 FUSION_WORKERS=""
 GPU_PROFILE="compatible"
 NO_VIDEO=0
+NO_DIAGNOSTIC_VIDEO=0
 STOP_AFTER_INFERENCE=0
 FINAL_VIDEO_ENABLED=0
 ORIGINAL_VIDEO_ENABLED="${EGO_WILOR_ORIGINAL_VIDEO:-0}"
@@ -81,7 +91,11 @@ TEMPORAL_HAND_IDENTITY_MAX_GAP="${EGO_TEMPORAL_HAND_IDENTITY_MAX_GAP:-60}"
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
-  echo "Optional: --final-video also generates a final delivery video (hybrid trusted-3D/native-2D by default; disabled by default)."
+  echo "Optional: --final-video generates the final video(s) selected by --wilor-mode; disabled by default."
+  echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
+  echo "Shared MANO fitting: --shared-steps N (100), --shared-batch-size N (32). --no-diagnostic-video skips only the diagnostic video."
+  echo "With the default hybrid renderer, final_only_Nview.mp4 uses the original skeleton and per-camera WiLoR meshes. Shared mode has its own final_shared_Nview.mp4."
+  echo "WiLoR --external-boxes DIR reuses saved detector boxes (DIR/camera*/predictions.jsonl) and does not reload YOLO weights."
   echo "Usage: $0 (--mcap FILE | --session EGO4_DIR) --output DIR [--detector FILE] [--cameras camera0 camera1 ...] [--reference-camera CAMERA] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--sam3-glove-assist 0|1] [--sam3-conda-env NAME] [--sam3-model FILE] [--sam3-prompt TEXT] [--sam3-text-only 0|1] [--sam3-refine-2d 0|1] [--sam3-max-2d-correction-px N] [--sam3-2d-correction-blend N] [--sam3-max-2d-bone-change-ratio N] [--condition-hard-threshold N] [--anatomy-refinement 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--final-renderer hybrid|fused] [--no-video] [--stop-after-inference]"
   echo "Defaults for glove stability: --sam3-refine-2d=0, --condition-hard-threshold=150, --anatomy-refinement=0. Override with EGO_* or the explicit flags."
   echo "Six-camera default anchors: camera0+camera5 (widest baseline); camera2+camera3 is used only when the wide pair is unavailable."
@@ -93,7 +107,7 @@ usage() {
 
 while (($#)); do
   case "$1" in
-    --no-video|--stop-after-inference|--final-video|-h|--help) ;;
+    --no-video|--no-diagnostic-video|--stop-after-inference|--final-video|-h|--help) ;;
     --*)
       if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then
         echo "Missing value for $1" >&2
@@ -108,6 +122,7 @@ while (($#)); do
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
     --detector) DETECTOR="$2"; shift 2 ;;
+    --external-boxes) EXTERNAL_BOXES="$2"; shift 2 ;;
     --cameras)
       CAMERAS_EXPLICIT=1
       CAMERAS=()
@@ -160,15 +175,24 @@ while (($#)); do
     --condition-hard-threshold) CONDITION_HARD_THRESHOLD="$2"; shift 2 ;;
     --anatomy-refinement) ANATOMY_REFINEMENT="$2"; shift 2 ;;
     --final-renderer) FINAL_RENDERER="$2"; shift 2 ;;
+    --wilor-mode) WILOR_MODE="$2"; shift 2 ;;
+    --shared-steps) SHARED_STEPS="$2"; shift 2 ;;
+    --shared-batch-size) SHARED_BATCH_SIZE="$2"; shift 2 ;;
     --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
     --gpu-profile) GPU_PROFILE="$2"; shift 2 ;;
     --no-video) NO_VIDEO=1; shift ;;
+    --no-diagnostic-video) NO_DIAGNOSTIC_VIDEO=1; shift ;;
     --stop-after-inference) STOP_AFTER_INFERENCE=1; shift ;;
     --final-video) FINAL_VIDEO_ENABLED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+case "$WILOR_MODE" in legacy|shared|both) ;; *) echo "--wilor-mode must be legacy, shared, or both" >&2; exit 2 ;; esac
+[[ "$SHARED_STEPS" =~ ^[1-9][0-9]*$ && "$SHARED_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+  echo "Shared steps/batch size must be positive integers" >&2; exit 2;
+}
 
 if ! [[ "$ORIGINAL_VIDEO_ENABLED" =~ ^[01]$ ]]; then
   echo "EGO_WILOR_ORIGINAL_VIDEO must be 0 or 1" >&2
@@ -258,7 +282,11 @@ if [[ "$INPUT_KIND" == "session" ]]; then
 else
   [[ -f "$MCAP" ]] || { echo "MCAP does not exist: $MCAP" >&2; exit 2; }
 fi
-if [[ ! -f "$DETECTOR" ]]; then
+if [[ -n "$EXTERNAL_BOXES" ]]; then
+  [[ "$POSE_BACKEND" == wilor ]] || { echo "--external-boxes is currently a WiLoR option" >&2; exit 2; }
+  [[ -d "$EXTERNAL_BOXES" ]] || { echo "External detector predictions do not exist: $EXTERNAL_BOXES" >&2; exit 2; }
+  EXTERNAL_BOXES="$(cd "$EXTERNAL_BOXES" && pwd)"
+elif [[ ! -f "$DETECTOR" ]]; then
   echo "detector checkpoint does not exist: $DETECTOR" >&2
   exit 2
 fi
@@ -347,11 +375,13 @@ done
 
 OUTPUT="$(mkdir -p "$OUTPUT" && cd "$OUTPUT" && pwd)"
 NORMALIZED="$OUTPUT/normalized_multiview"
-RAW_PREDICTIONS="$OUTPUT/wilor_multiview"
+PREDICTION_PREFIX="wilor"
+if [[ "$POSE_BACKEND" == gem ]]; then PREDICTION_PREFIX="gem"; fi
+RAW_PREDICTIONS="$OUTPUT/${PREDICTION_PREFIX}_multiview"
 PREDICTIONS="$RAW_PREDICTIONS"
 FUSION="$OUTPUT/fusion_multiview"
 if ((GLOVE_MARKER_ASSIST)); then
-  PREDICTIONS="$OUTPUT/wilor_multiview_glove_marker_assisted"
+  PREDICTIONS="$OUTPUT/${PREDICTION_PREFIX}_multiview_glove_marker_assisted"
   FUSION="$OUTPUT/fusion_multiview_glove_marker_assisted"
 elif [[ "$DETECTOR_HANDEDNESS" != "strict" ]]; then
   FUSION="$OUTPUT/fusion_multiview_geometric"
@@ -359,7 +389,7 @@ fi
 MARKER_PREDICTIONS="$PREDICTIONS"
 MARKER_FUSION="$FUSION"
 SAM3_SOURCE_PREDICTIONS="$PREDICTIONS"
-SAM3_PREDICTIONS="$OUTPUT/wilor_multiview_sam3_assisted"
+SAM3_PREDICTIONS="$OUTPUT/${PREDICTION_PREFIX}_multiview_sam3_assisted"
 SAM3_FUSION="$OUTPUT/fusion_multiview_sam3_assisted"
 if ((SAM3_GLOVE_ASSIST)); then
   PREDICTIONS="$SAM3_PREDICTIONS"
@@ -369,6 +399,7 @@ VIDEO="$FUSION/diagnostic_${#CAMERAS[@]}view.mp4"
 FINAL_VIDEO="$FUSION/final_only_${#CAMERAS[@]}view.mp4"
 ORIGINAL_VIDEO="$FUSION/final_on_original_${#CAMERAS[@]}view.mp4"
 CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
+export EGO_WILOR_EXTERNAL_BOXES="$EXTERNAL_BOXES"
 CAMERA_CONFIDENCE_ARGS=()
 for CAMERA in "${CAMERAS[@]}"; do
   case "$CAMERA" in
@@ -524,9 +555,33 @@ if source.is_dir():
     config["camera_confidences"] = {
         camera: config["camera_confidences"][camera] for camera in camera_ids
     }
+if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "gem":
+    checkpoint = Path(os.environ["EGO_GEM_CHECKPOINT"]).resolve()
+    assets = Path(os.environ["EGO_GEM_SOMA_ASSETS"]).resolve()
+    checkpoint_stat = checkpoint.stat()
+    config["pose_backend"] = {
+        "name": "gem", "checkpoint": str(checkpoint),
+        "checkpoint_size_bytes": checkpoint_stat.st_size,
+        "checkpoint_mtime_ns": checkpoint_stat.st_mtime_ns,
+        "soma_assets": str(assets), "gem_root": str(Path(os.environ["EGO_GEM_ROOT"]).resolve()),
+        "camera_model_for_pose": "pinhole_approximation_on_original_pixels",
+    }
+    if gpu_profile == "rtx5090d":
+        config["pose_backend"]["inference_precision"] = "float16_backbone_head_float32_camera_geometry"
 if os.environ.get("EGO_WILOR_UNDISTORT_FOV_DEG"):
     from undistort_multiview_dataset import options_from_environment
     config["image_preprocessing"] = options_from_environment()
+if os.environ.get("EGO_WILOR_EXTERNAL_BOXES"):
+    import hashlib
+    boxes_root = Path(os.environ["EGO_WILOR_EXTERNAL_BOXES"]).resolve()
+    files = {camera: boxes_root / camera / "predictions.jsonl" for camera in camera_ids}
+    if (boxes_root / "summary.json").is_file():
+        files["summary"] = boxes_root / "summary.json"
+    config["external_boxes"] = {
+        "path": str(boxes_root),
+        "sha256": {name: hashlib.sha256(file.read_bytes()).hexdigest() for name, file in files.items()},
+        "detector_execution": "reuse_recorded_detections",
+    }
 path = Path(config_path)
 if path.exists():
     previous = json.loads(path.read_text(encoding="utf-8"))
@@ -645,7 +700,7 @@ if [[ -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
 fi
 
 if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
-  echo "[multiview] run ${#CAMERAS[@]}-view dual-hypothesis WiLoR"
+  echo "[multiview] run ${#CAMERAS[@]}-view dual-hypothesis $POSE_LABEL"
   INFERENCE_ARGS=(
     --dataset "$NORMALIZED" --output "$RAW_PREDICTIONS"
     --detector "$DETECTOR"
@@ -657,9 +712,23 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
     --max-frames "$MAX_FRAMES"
     "${CAMERA_CONFIDENCE_ARGS[@]}"
   )
-  run_python "$ROOT/scripts/wilor_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+  if [[ "$POSE_BACKEND" == gem ]]; then
+    INFERENCE_ARGS+=(--gem-root "$EGO_GEM_ROOT" --checkpoint "$EGO_GEM_CHECKPOINT" --soma-assets "$EGO_GEM_SOMA_ASSETS")
+    if [[ -n "${EGO_GEM_PYTHON:-}" ]]; then
+      env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/python_deps/wilor_runtime:$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" \
+        "$EGO_GEM_PYTHON" "$ROOT/scripts/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+    else
+      run_python "$ROOT/scripts/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+    fi
+  else
+    if [[ "$WILOR_MODE" != legacy || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ]]; then
+      INFERENCE_ARGS+=(--save-mano-params)
+    fi
+    if [[ -n "$EXTERNAL_BOXES" ]]; then INFERENCE_ARGS+=(--external-boxes "$EXTERNAL_BOXES"); fi
+    run_python "$ROOT/scripts/wilor_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+  fi
 else
-  echo "[multiview] reuse WiLoR predictions"
+  echo "[multiview] reuse $POSE_LABEL predictions"
 fi
 
 if ((STOP_AFTER_INFERENCE)); then
@@ -667,8 +736,21 @@ if ((STOP_AFTER_INFERENCE)); then
   exit 0
 fi
 
+if [[ "$POSE_BACKEND" == wilor && ( "$WILOR_MODE" != legacy || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ) ]]; then
+  run_python - "$RAW_PREDICTIONS/summary.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+summary = json.loads(Path(sys.argv[1]).read_text())
+if not summary.get("save_mano_params", False):
+    raise SystemExit("WiLoR mesh rendering/shared fitting needs saved MANO parameters. These cached predictions "
+                     "were made without --save-mano-params. Use a new --output directory with "
+                     "--final-video or --wilor-mode shared/both; the existing output is preserved.")
+PY
+fi
+
 if ((GLOVE_MARKER_ASSIST)) && [[ ! -f "$PREDICTIONS/summary.json" ]]; then
-  echo "[multiview] refine WiLoR image joints with visible glove markers"
+  echo "[multiview] refine $POSE_LABEL image joints with visible glove markers"
   run_python "$ROOT/scripts/assist_wilor_with_glove_markers.py" \
     --dataset "$NORMALIZED" --predictions "$RAW_PREDICTIONS" --output "$PREDICTIONS" \
     --cameras "${CAMERAS[@]}" --max-frames "$MAX_FRAMES" \
@@ -686,11 +768,11 @@ if ((GLOVE_MARKER_ASSIST)) && [[ ! -f "$PREDICTIONS/summary.json" ]]; then
     --marker-blend "$MARKER_BLEND" \
     --max-local-adjustment-px "$MARKER_MAX_LOCAL_ADJUSTMENT_PX"
 elif ((GLOVE_MARKER_ASSIST)); then
-  echo "[multiview] reuse glove-marker-assisted WiLoR predictions"
+  echo "[multiview] reuse glove-marker-assisted $POSE_LABEL predictions"
 fi
 
 if ((SAM3_GLOVE_ASSIST)) && [[ ! -f "$SAM3_PREDICTIONS/summary.json" ]]; then
-  echo "[multiview] validate WiLoR detections and 2D hypotheses with SAM3 glove masks"
+  echo "[multiview] validate $POSE_LABEL detections and 2D hypotheses with SAM3 glove masks"
   SAM3_ARGS=(
     "$ROOT/scripts/sam3_glove_assist.py"
     --dataset "$NORMALIZED"
@@ -714,7 +796,7 @@ if ((SAM3_GLOVE_ASSIST)) && [[ ! -f "$SAM3_PREDICTIONS/summary.json" ]]; then
   ((SAM3_TEXT_ONLY)) && SAM3_ARGS+=(--text-only)
   run_sam3_python "${SAM3_ARGS[@]}"
 elif ((SAM3_GLOVE_ASSIST)); then
-  echo "[multiview] reuse SAM3-assisted WiLoR predictions"
+  echo "[multiview] reuse SAM3-assisted $POSE_LABEL predictions"
 fi
 
 if [[ ! -f "$FUSION/summary.json" ]]; then
@@ -787,7 +869,47 @@ else
   echo "[multiview] reuse fused result"
 fi
 
-if [[ "$NO_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
+if [[ "$POSE_BACKEND" == gem && "$GEM_MODE" != independent ]]; then
+  SHARED_FUSION="${FUSION}_shared_gem"
+  SHARED_VIDEO="$SHARED_FUSION/final_shared_${#CAMERAS[@]}view.mp4"
+  SHARED_ARGS=(
+    --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --native-predictions "$RAW_PREDICTIONS"
+    --output "$SHARED_FUSION" --gem-root "$EGO_GEM_ROOT" --soma-assets "$EGO_GEM_SOMA_ASSETS"
+    --cameras "${CAMERAS[@]}" --device "$DEVICE" --max-frames "$MAX_FRAMES"
+    --steps "${EGO_GEM_SHARED_STEPS:-100}" --batch-size "${EGO_GEM_SHARED_BATCH_SIZE:-32}"
+  )
+  echo "[multiview] jointly fit shared SOMA geometry to calibrated original views"
+  if [[ -n "${EGO_GEM_PYTHON:-}" ]]; then
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" "$EGO_GEM_PYTHON" \
+      "$ROOT/scripts/fit_shared_gem_multiview.py" "${SHARED_ARGS[@]}"
+  else
+    run_python "$ROOT/scripts/fit_shared_gem_multiview.py" "${SHARED_ARGS[@]}"
+  fi
+  if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 ]]; then
+    run_python "$ROOT/scripts/render_shared_gem_multiview.py" \
+      --dataset "$NORMALIZED" --shared "$SHARED_FUSION" --output "$SHARED_VIDEO" \
+      --cameras "${CAMERAS[@]}" --max-frames "$MAX_FRAMES" --video-codec auto
+  fi
+fi
+
+if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" != legacy ]]; then
+  SHARED_FUSION="${FUSION}_shared_wilor"
+  SHARED_VIDEO="$SHARED_FUSION/final_shared_${#CAMERAS[@]}view.mp4"
+  echo "[multiview] jointly fit shared MANO geometry to calibrated views"
+  run_python "$ROOT/scripts/fit_shared_wilor_multiview.py" \
+    --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --native-predictions "$RAW_PREDICTIONS" \
+    --output "$SHARED_FUSION" --mano-model-dir "$ROOT/models/mano" \
+    --cameras "${CAMERAS[@]}" --device "$DEVICE" --max-frames "$MAX_FRAMES" \
+    --steps "$SHARED_STEPS" --batch-size "$SHARED_BATCH_SIZE"
+  if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 ]]; then
+    run_python "$ROOT/scripts/render_shared_wilor_multiview.py" \
+      --dataset "$NORMALIZED" --shared "$SHARED_FUSION" --output "$SHARED_VIDEO" \
+      --detector-predictions "$RAW_PREDICTIONS" \
+      --cameras "${CAMERAS[@]}" --max-frames "$MAX_FRAMES" --video-codec auto
+  fi
+fi
+
+if [[ "$NO_VIDEO" == 0 && "$NO_DIAGNOSTIC_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
   echo "[multiview] render ${#CAMERAS[@]}-view diagnostic video"
   run_python "$ROOT/scripts/render_multiview_wilor.py" \
     --dataset "$NORMALIZED" --fusion "$FUSION" \
@@ -807,12 +929,47 @@ HYBRID_VIDEO_ARGS=(
   --smoothing-radius 1 --smoothing-strength 0.25
   --wrist-outlier-threshold-px 150 --max-hold-frames 2
 )
+if [[ "$POSE_BACKEND" == gem ]]; then
+  HYBRID_VIDEO_ARGS+=(--gem-mesh-predictions "$RAW_PREDICTIONS" --tile-width 960)
+fi
+WILOR_NATIVE_VIDEO_ARGS=()
+if [[ "$POSE_BACKEND" == wilor ]]; then
+  WILOR_NATIVE_VIDEO_ARGS=(--wilor-native-mesh --wilor-native-predictions "$RAW_PREDICTIONS" --tile-width 960 --native-mesh-device "$DEVICE")
+fi
 
-if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ! -f "$FINAL_VIDEO" ]]; then
+RENDER_FINAL=0
+if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ( "$POSE_BACKEND" != gem || "$GEM_MODE" != shared ) && ( "$POSE_BACKEND" != wilor || "$WILOR_MODE" != shared ) ]]; then
+  if [[ ! -f "$FINAL_VIDEO" ]]; then
+    RENDER_FINAL=1
+  elif [[ "$FINAL_RENDERER" == hybrid ]]; then
+    # Re-render missing or outdated mesh styles without repeating an
+    # otherwise complete inference/fusion run.
+    MESH_STYLE_STATUS="$(run_python - "${FINAL_VIDEO%.mp4}.json" "$POSE_BACKEND" <<'PY'
+import json
+import sys
+from pathlib import Path
+from render_gem_multiview import MESH_STYLE
+try:
+    summary = json.loads(Path(sys.argv[1]).read_text())
+    mesh = summary.get("mesh", {})
+    expected = "GEM-X SOMA" if sys.argv[2] == "gem" else "WiLoR native MANO"
+    complete = (mesh.get("model") == expected
+                and all(mesh.get(key) == value for key, value in MESH_STYLE.items()))
+except (OSError, ValueError):
+    complete = False
+print("current" if complete else "outdated")
+PY
+    )"
+    if [[ "$MESH_STYLE_STATUS" != current ]]; then
+      RENDER_FINAL=1
+    fi
+  fi
+fi
+if [[ "$RENDER_FINAL" == 1 ]]; then
   if [[ "$FINAL_RENDERER" == "hybrid" ]]; then
     echo "[multiview] render conservative trusted-3D/native-2D final video"
     run_python "$ROOT/scripts/render_hybrid_multiview.py" \
-      "${HYBRID_VIDEO_ARGS[@]}" --output "$FINAL_VIDEO"
+      "${HYBRID_VIDEO_ARGS[@]}" "${WILOR_NATIVE_VIDEO_ARGS[@]}" --output "$FINAL_VIDEO"
   else
     echo "[multiview] render final fused 3-D video"
     run_python "$ROOT/scripts/render_multiview_wilor.py" \
@@ -841,3 +998,11 @@ fi
 
 echo "[multiview] finished: $FUSION"
 cat "$FUSION/summary.json"
+if [[ "$POSE_BACKEND" == gem && "$GEM_MODE" != independent ]]; then
+  echo "[multiview] shared SOMA result: $SHARED_FUSION"
+  cat "$SHARED_FUSION/summary.json"
+fi
+if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" != legacy ]]; then
+  echo "[multiview] shared MANO result: $SHARED_FUSION"
+  cat "$SHARED_FUSION/summary.json"
+fi
