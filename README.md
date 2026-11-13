@@ -4,7 +4,8 @@
 共享三维手模型 → 原始鱼眼回投 → 四目视频和三维结果。入口为
 `bash scripts/run_hand_inference.sh --input <录制目录或MCAP> --output output/shared_hand`。
 安装、参数和使用方法见 [共享推理说明](docs/SHARED_HAND_INFERENCE_zh.md)，
-产物字段见 [输出说明](docs/outputs.md)。原有双目/六目推理、实时、VIO、NOKOV 和标签入口继续使用下文命令。
+产物字段见 [输出说明](docs/outputs.md)，整合与清理证据见 [验收记录](docs/INTEGRATION_VALIDATION_20261113.md)。
+原有双目/六目推理、实时、VIO、NOKOV 和标签入口继续使用下文命令。
 
 面向头戴式双目相机的离线手部重建与 MANO 拟合系统。当前主要支持两种输入：
 
