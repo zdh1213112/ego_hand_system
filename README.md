@@ -168,6 +168,4 @@ OUTPUT/
 PYTHONPATH=scripts conda run -n ego-hand python -m pytest -q tests
 ```
 
-移除 GEN 相机专用入口后，完整回归为 **305 passed, 1 skipped**，轻量 CI 为 **25 passed**；变更范围及真实 Orbbec 数据检查见[本次验证记录](docs/ORBBEC_ONLY_VALIDATION_20261113.md)。此前的干净克隆、MP4/MCAP 短片及固定输入数值对比见[融合验收记录](docs/INTEGRATION_VALIDATION_20261113.md)。不同工作流需要相应的模型、数据或硬件依赖。
-
 基于 [WiLoR](https://github.com/Jzboom/WiLoR)、[MANO](https://mano.is.tue.mpg.de/) 和 [Basalt](https://github.com/VladyslavUsenko/basalt)。上游版本与资产信息见 [third_party/manifest.json](third_party/manifest.json)，使用时遵循各项目和模型的许可。
