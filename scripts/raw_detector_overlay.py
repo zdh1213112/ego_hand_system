@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from export_cached_multiview_detections import fingerprint
+from orbbec_io import fingerprint
 
 
 DETECTOR_OVERLAY_STYLE = 'raw_detector_boxes_final_labels_v2'

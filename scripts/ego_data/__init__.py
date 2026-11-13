@@ -1,11 +1,3 @@
-"""Common calibration and dataset contracts for offline stereo recordings."""
-
-from .calibration import CameraCalibration, StereoCalibration
-from .dataset import NormalizedStereoDataset, RectifiedStereoDataset
-
-__all__ = [
-    "CameraCalibration",
-    "StereoCalibration",
-    "NormalizedStereoDataset",
-    "RectifiedStereoDataset",
-]
+"""Orbbec four-camera calibration, synchronization and video access."""
+from .calibration import CameraCalibration
+__all__ = ['CameraCalibration']

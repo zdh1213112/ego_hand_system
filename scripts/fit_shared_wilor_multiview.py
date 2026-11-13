@@ -21,7 +21,7 @@ import torch
 
 from ego_data.calibration import CameraCalibration
 from camera_models.kb import KB_PROJECTION_VERSION
-from gem_shared_geometry import (
+from shared_hand_geometry import (
     associate_hands, camera_domain_penalty_torch, project_base, project_base_torch, rigid_initialization, rotation_exp,
 )
 from mano_conventions import WILOR_RIGHT_CANONICAL
@@ -42,6 +42,8 @@ def signature(path):
 
 def load_mano(model_dir, *, device='cpu'):
     """Load the exact WiLoR MANO wrapper without loading its neural network."""
+    from check_python_environment import import_chumpy_compatibly
+    import_chumpy_compatibly()
     source = mano_wrapper_path()
     spec = importlib.util.spec_from_file_location('_shared_wilor_mano_wrapper', source)
     module = importlib.util.module_from_spec(spec)
@@ -268,7 +270,7 @@ def main():
     if not rows:
         p.error('no synchronized frames')
     inputs = [dataset / 'manifest.json', dataset / 'multiview_frames.csv', args.mano_model_dir / 'MANO_RIGHT.pkl',
-              mano_wrapper_path(), Path(__file__), PROJECT_ROOT / 'scripts/gem_shared_geometry.py']
+              mano_wrapper_path(), Path(__file__), PROJECT_ROOT / 'scripts/shared_hand_geometry.py']
     for camera in cameras:
         inputs.extend([dataset / 'calibration' / f'{camera}.json', args.predictions / camera / 'predictions.jsonl',
                        native_root / camera / 'predictions.jsonl'])

@@ -17,7 +17,7 @@ from fit_shared_wilor_multiview import (
     read_prediction_records, validate_mano_parameters,
     validate_synchronized_records,
 )
-from gem_shared_geometry import project_base, rotation_exp
+from shared_hand_geometry import project_base, rotation_exp
 
 
 @pytest.fixture(scope='module')

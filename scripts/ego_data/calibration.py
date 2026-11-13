@@ -1,4 +1,4 @@
-"""Camera calibration types shared by MCAP, rectification, and rendering."""
+"""Orbbec calibration and camera-to-reference transforms."""
 
 from __future__ import annotations
 
@@ -105,94 +105,6 @@ class CameraCalibration:
         return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
-@dataclass(frozen=True)
-class StereoCalibration:
-    left: CameraCalibration
-    right: CameraCalibration
-    R_left_to_right: np.ndarray
-    t_left_to_right_m: np.ndarray
-
-    def __post_init__(self) -> None:
-        if self.left.image_size != self.right.image_size:
-            raise ValueError("left and right calibration resolutions differ")
-        R = _array(self.R_left_to_right, (3, 3), "R_left_to_right")
-        t = np.asarray(self.t_left_to_right_m, dtype=np.float64).reshape(-1)
-        if t.shape != (3,) or not np.all(np.isfinite(t)):
-            raise ValueError("t_left_to_right_m must contain three finite values")
-        if not np.allclose(R @ R.T, np.eye(3), atol=2e-4) or np.linalg.det(R) < 0.999:
-            raise ValueError("R_left_to_right is not a rotation matrix")
-        if not 0.005 < np.linalg.norm(t) < 1.0:
-            raise ValueError(f"implausible stereo baseline: {np.linalg.norm(t):.6f} m")
-        object.__setattr__(self, "R_left_to_right", R)
-        object.__setattr__(self, "t_left_to_right_m", t)
-
-    @property
-    def baseline_m(self) -> float:
-        return float(np.linalg.norm(self.t_left_to_right_m))
-
-    @classmethod
-    def from_cameras(cls, left: CameraCalibration, right: CameraCalibration) -> "StereoCalibration":
-        R_base_left = left.T_base_camera[:3, :3]
-        R_base_right = right.T_base_camera[:3, :3]
-        t_base_left = left.T_base_camera[:3, 3]
-        t_base_right = right.T_base_camera[:3, 3]
-        R = R_base_right.T @ R_base_left
-        t = R_base_right.T @ (t_base_left - t_base_right)
-        return cls(left, right, R, t)
-
-    def to_dict(self) -> dict:
-        return {
-            "schema_version": 1,
-            "left_camera": self.left.camera_id,
-            "right_camera": self.right.camera_id,
-            "R_left_to_right": self.R_left_to_right.tolist(),
-            "t_left_to_right_m": self.t_left_to_right_m.tolist(),
-            "baseline_m": self.baseline_m,
-            "coordinate_system": "OpenCV optical frame: +x right, +y down, +z forward",
-        }
-
-
-def quaternion_transform(values) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float64).reshape(-1)
-    if values.size != 7:
-        raise ValueError("T_b_c must contain [tx, ty, tz, qx, qy, qz, qw]")
-    translation = values[:3]
-    quaternion = values[3:]
-    norm = np.linalg.norm(quaternion)
-    if norm <= 1e-12:
-        raise ValueError("camera quaternion has zero length")
-    qx, qy, qz, qw = quaternion / norm
-    rotation = np.asarray([
-        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
-        [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
-        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
-    ])
-    result = np.eye(4)
-    result[:3, :3] = rotation
-    result[:3, 3] = translation
-    return result
-
-
-def camera_from_genrobot_message(camera_id: str, message) -> CameraCalibration:
-    model_name = str(message.distortion_model).strip().lower()
-    if model_name not in ("ds", "double_sphere", "double sphere"):
-        raise ValueError(f"GEN camera {camera_id} has unsupported distortion model {model_name!r}")
-    D = np.asarray(message.D, dtype=np.float64)
-    K = np.asarray(message.K, dtype=np.float64)
-    if D.size < 6 or K.size != 9:
-        raise ValueError(f"GEN camera {camera_id} has incomplete K/D calibration")
-    # GEN publishes [fx, fy, cx, cy, xi, alpha] in D.  Preserve it verbatim.
-    return CameraCalibration(
-        camera_id=camera_id,
-        frame_id=str(message.frame_id),
-        model="DS",
-        image_size=(int(message.width), int(message.height)),
-        K=K.reshape(3, 3),
-        distortion=D[:6],
-        T_base_camera=quaternion_transform(message.T_b_c),
-    )
-
-
 def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
     """Load every KB camera in an EGO export, indexed by its source ID."""
     calibration = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -212,7 +124,7 @@ def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
         ], dtype=np.float64)
         D = np.asarray([dist["k1"], dist["k2"], dist["k3"], dist["k4"]])
         # EGO YAML stores reference -> camera, while the common contract stores
-        # camera -> base/reference (the same convention as GEN T_b_c).
+        # camera -> base/reference.
         rotation_reference_camera = np.asarray(
             camera["extrinsics"]["rotation"], dtype=np.float64
         )
@@ -237,12 +149,28 @@ def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
     return result
 
 
-def stereo_from_ego_yaml(path: Path) -> StereoCalibration:
-    cameras = cameras_from_ego_yaml(path)
-    if len(cameras) == 2:
-        left, right = list(cameras.values())
-    elif len(cameras) == 4 and {"cam_0", "cam_1"}.issubset(cameras):
-        left, right = cameras["cam_0"], cameras["cam_1"]
+def load_orbbec_four_calibrations(source):
+    from dataclasses import replace
+    import numpy as np
+    CAMERAS = tuple(f"camera{i}" for i in range(4))
+    if source.is_dir():
+        result = {}
+        for camera in CAMERAS:
+            path = source / f'{camera}.json'
+            payload = json.loads(path.read_text())
+            if 'T_base_camera' not in payload:
+                raise ValueError(f'{path}: explicit T_base_camera extrinsics are required')
+            result[camera] = CameraCalibration.from_dict(payload)
+            if result[camera].camera_id != camera:
+                raise ValueError(f'{path}: camera_id must be {camera}')
     else:
-        raise ValueError("expected EGO stereo calibration or EGO4 cam_0/cam_1")
-    return StereoCalibration.from_cameras(left, right)
+        original = cameras_from_ego_yaml(source)
+        if set(original) != {f'cam_{i}' for i in range(4)}:
+            raise ValueError('Orbbec YAML must contain exactly cam_0..cam_3')
+        result = {camera: replace(original[f'cam_{i}'], camera_id=camera) for i, camera in enumerate(CAMERAS)}
+    if len({c.image_size for c in result.values()}) != 1:
+        raise ValueError('the four camera image sizes must match')
+    centers = np.stack([c.T_base_camera[:3, 3] for c in result.values()])
+    if max(np.linalg.norm(x-y) for x in centers for y in centers) < .005:
+        raise ValueError('four-camera extrinsics have no usable baseline')
+    return result

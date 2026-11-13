@@ -13,13 +13,13 @@ import numpy as np
 
 
 MODULES = (
-    "av", "cv2", "mediapipe", "mcap", "torch", "torchvision", "scipy", "trimesh",
+    "av", "cv2", "mcap", "torch", "torchvision", "scipy", "trimesh",
     "skimage", "pyrender", "pytorch_lightning", "smplx", "yacs", "timm", "einops",
     "xtcocotools", "pandas", "hydra", "pyrootutils", "rich", "webdataset", "gradio",
     "ultralytics", "polars", "psutil", "dill",
 )
 
-EXPECTED_ULTRALYTICS_VERSION = "8.4.56"
+EXPECTED_ULTRALYTICS_VERSION = "8.4.76"
 
 
 def import_chumpy_compatibly() -> None:

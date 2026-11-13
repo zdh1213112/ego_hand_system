@@ -11,8 +11,7 @@
 
 # Python environments and caches
 /.venv/
-/.venv-gem-hand/
-/python_deps/
+/python_deps
 __pycache__/
 *.py[cod]
 *.so
@@ -24,8 +23,6 @@ __pycache__/
 /third_party/*
 !/third_party/README.md
 !/third_party/manifest.json
-!/third_party/MANO
-!/third_party/basalt
 !/third_party/WiLoR
 *.mp4
 *.avi
@@ -34,13 +31,10 @@ __pycache__/
 
 # Downloaded model files are intentionally not redistributed
 /models/*.zip
-/models/semantic/
-#/models/*.task
-#/models/mano/*
+/models/mano/*
 !/models/mano/README.md
 /models/wilor/*
 !/models/wilor/README.md
-#*.pkl
 *.npz
 
 # Editors and operating systems
@@ -55,3 +49,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Isolated local branches
+.worktrees/

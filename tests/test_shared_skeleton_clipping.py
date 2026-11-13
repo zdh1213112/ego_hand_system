@@ -5,8 +5,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from render_shared_gem_multiview import clip_projected_bone, draw_shared_skeleton
-from render_multiview_wilor import _draw_refined_hand
+from render_shared_wilor_multiview import clip_projected_bone, draw_shared_skeleton
 
 
 @pytest.mark.parametrize('a,b,expected', [
@@ -39,13 +38,3 @@ def test_invalid_projection_does_not_connect_to_visible_joint():
     image = np.zeros((100, 100, 3), np.uint8)
     result = draw_shared_skeleton(image, pixels, valid, 0)
     assert result['drawn_bone_count'] == 0 and not image[80].any()
-
-
-@pytest.mark.parametrize('side', [0, 1])
-def test_fully_in_frame_skeleton_matches_existing_style(side):
-    points = np.array([[35 + i % 5 * 6, 30 + i // 5 * 8] for i in range(21)], float)
-    old, new = np.zeros((100, 100, 3), np.uint8), np.zeros((100, 100, 3), np.uint8)
-    _draw_refined_hand(old, points, side, 0, final_only=True)
-    result = draw_shared_skeleton(new, points, np.ones(21, bool), side)
-    np.testing.assert_array_equal(old, new)
-    assert result['clipped_bone_count'] == 0

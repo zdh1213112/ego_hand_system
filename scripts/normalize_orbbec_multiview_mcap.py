@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""Normalize an Orbbec EGO Pro four-camera MCAP for raw WiLoR review.
-
-The newer EGO Pro recorder stores four H.264 streams directly in one MCAP:
-``/camera/left``, ``/camera/left_side``, ``/camera/right`` and
-``/camera/right_side``.  Unlike the older exported Orbbec session, this file
-does not contain camera-info/calibration messages.  This adapter therefore
-remuxes the streams losslessly, synchronizes their device timestamps, and
-marks calibration as unavailable instead of inventing extrinsics.  Raw 2-D
-WiLoR inference and the native 2-D renderer do not need calibration.
-
-If a separately measured calibration is available, ``--calibration-dir`` can
-point to a directory containing ``camera0.json`` ... ``camera3.json``; the
-files are copied into the normalized dataset and the manifest records them.
+"""Normalize Orbbec four-camera H264 MCAP streams and external calibration.
+The shared inference runner requires matching four-camera calibration before
+calling this adapter. Video packets are remuxed without re-encoding.
 """
 
 from __future__ import annotations
@@ -35,7 +25,8 @@ from mcap_protobuf.decoder import DecoderFactory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-from ego_data.genrobot_mcap import H264MatroskaWriter  # noqa: E402
+from ego_data.h264 import H264MatroskaWriter  # noqa: E402
+from orbbec_io import recording_metadata_root  # noqa: E402
 
 
 DEFAULT_TOPICS = {
@@ -313,7 +304,8 @@ def normalize(args: argparse.Namespace) -> Path:
             abs(float(row[f"{camera}_delta_us"]))
             for row in synchronized for camera in cameras if camera != args.reference_camera
         ]
-        source_meta = source.with_name(f"meta_{source.stem}.json")
+        meta_files = sorted(recording_metadata_root(source).glob("meta_*.json"))
+        source_meta = meta_files[0] if len(meta_files) == 1 else source.with_name(f"meta_{source.stem}.json")
         if source_meta.is_file():
             shutil.copy2(source_meta, temporary / "source_meta.json")
         manifest = {

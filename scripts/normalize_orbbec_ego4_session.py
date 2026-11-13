@@ -18,7 +18,7 @@ import numpy as np
 
 from ego_data.calibration import cameras_from_ego_yaml
 from ego_data.pairing import pair_timestamps_ns
-from normalize_orbbec_session import read_timestamps, sha256_file, unique_file
+from orbbec_io import read_timestamps, sha256_file, discover_calibration
 
 
 # Source IDs come from calibration, rather than the order of MP4 filenames.
@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--calibration", type=Path, help="matching Orbbec YAML or camera0..3.json directory")
     parser.add_argument("--reference-camera", choices=tuple(CAMERA_SOURCES), default="camera0")
     parser.add_argument("--max-delta-us", type=int, default=1500)
     parser.add_argument("--max-frames", type=int, default=0, help="limit synchronized rows; 0 means all")
@@ -126,8 +127,16 @@ def normalize(args: argparse.Namespace) -> Path:
     if (not list(session.glob("*_calibration_camera.yaml"))
             and re.fullmatch(r"part\d+", session.name)):
         metadata_root = session.parent
-    calibration_path = unique_file(metadata_root, "_calibration_camera.yaml")
-    source_calibrations = cameras_from_ego_yaml(calibration_path)
+    calibration_path = getattr(args, "calibration", None) or discover_calibration(session)
+    calibration_path = Path(calibration_path).expanduser().resolve()
+    if calibration_path.is_dir():
+        from ego_data.calibration import load_orbbec_four_calibrations
+        loaded = load_orbbec_four_calibrations(calibration_path)
+        source_calibrations = {CAMERA_SOURCES[c][1]: value for c, value in loaded.items()}
+        calibration_files = [calibration_path / f"{c}.json" for c in CAMERA_SOURCES]
+    else:
+        source_calibrations = cameras_from_ego_yaml(calibration_path)
+        calibration_files = [calibration_path]
     expected_ids = {source_id for _, source_id in CAMERA_SOURCES.values()}
     if set(source_calibrations) != expected_ids:
         raise ValueError(f"expected calibration IDs {sorted(expected_ids)}, found {sorted(source_calibrations)}")
@@ -162,7 +171,7 @@ def normalize(args: argparse.Namespace) -> Path:
         for camera in CAMERA_SOURCES:
             directory = temporary / "cameras" / camera
             directory.mkdir(parents=True)
-            shutil.copy2(videos[camera], directory / "video.mp4")
+            (directory / "video.mp4").symlink_to(videos[camera])
             _write_csv(
                 directory / "timestamps.csv",
                 ["frame_index", "timestamp_ns", "timestamp_us"],
@@ -180,7 +189,7 @@ def normalize(args: argparse.Namespace) -> Path:
             raise ValueError(f"expected at most one metadata JSON in {metadata_root}")
         if metadata_files:
             shutil.copy2(metadata_files[0], temporary / "source_meta.json")
-        source_files = [*videos.values(), *pts_files.values(), calibration_path, *metadata_files]
+        source_files = [*videos.values(), *pts_files.values(), *calibration_files, *metadata_files]
         deltas = [abs(float(row[f"{camera}_delta_us"])) for row in synchronized
                   for camera in CAMERA_SOURCES if camera != args.reference_camera]
         manifest = {
@@ -198,16 +207,16 @@ def normalize(args: argparse.Namespace) -> Path:
             "image_size": list(calibrations[args.reference_camera].image_size),
             "fps": 30.0,
             "storage": {"kind": "original_mp4", "video_filename": "video.mp4",
-                        "frame_access": "sequential", "lossless_copy": True},
+                        "frame_access": "sequential", "source_video_links": True},
             "synchronization": {
                 "frame_count": len(synchronized), "max_delta_us": args.max_delta_us,
                 "abs_delta_us_median": float(np.median(deltas)),
                 "abs_delta_us_p95": float(np.percentile(deltas, 95)),
                 "abs_delta_us_max": float(max(deltas)),
             },
-            "calibration": {"available": True, "status": "source_yaml",
-                            "sha256": sha256_file(calibration_path)},
-            "coordinate_system": "Orbbec cam_0 optical reference frame; distances in metres",
+            "calibration": {"available": True, "status": "external_json" if calibration_path.is_dir() else "source_yaml",
+                            "sha256": {str(path): sha256_file(path) for path in calibration_files}},
+            "coordinate_system": ("external calibration reference frame; distances in metres" if calibration_path.is_dir() else "Orbbec cam_0 optical reference frame; distances in metres"),
         }
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         temporary.rename(output)

@@ -11,14 +11,13 @@ import tempfile
 import zipfile
 
 EXPECTED = {
-    "MANO_LEFT.pkl": "c4022f7083f2ca7c78b2b3d595abbab52debd32b09d372b16923a801f0ea6a30",
     "MANO_RIGHT.pkl": "45d60aa3b27ef9107a7afd4e00808f307fd91111e1cfa35afd5c4a62de264767",
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Install licensed MANO_LEFT.pkl and MANO_RIGHT.pkl from a user-provided directory or archive."
+        description="Install licensed MANO_RIGHT.pkl from a user-provided directory or archive."
     )
     parser.add_argument("--source", required=True, type=Path,
                         help="directory, ZIP, or tar archive downloaded by the user")

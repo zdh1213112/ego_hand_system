@@ -20,7 +20,8 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-import wilor_inference as base  # noqa: E402
+import wilor_runtime as base  # noqa: E402
+from inference_common import _top_detections_per_class  # noqa: E402
 from ego_data.dataset import SequentialVideoReader  # noqa: E402
 from wilor.datasets.utils import (  # noqa: E402
     convert_cvimg_to_tensor,
@@ -85,7 +86,7 @@ def parse_args() -> argparse.Namespace:
 def _external_detection(row: dict[str, Any] | None):
     """Build the tiny Ultralytics-like object needed by the crop path.
 
-    SAM3 proposals intentionally have no handedness class.  They are marked
+    External proposals without a handedness class are marked
     ``-1`` and WiLoR still evaluates both handedness hypotheses for every
     proposal, exactly like the normal dual-hypothesis detector path.
     """
@@ -378,17 +379,6 @@ def _gpu_crop_samples(frames, datasets, model_cfg, device):
     return samples
 
 
-def _top_detections_per_class(
-    confidences: np.ndarray, detector_sides: np.ndarray, limit: int,
-) -> np.ndarray:
-    if limit == 0:
-        return np.arange(len(confidences), dtype=np.int64)
-    selected = []
-    for side in np.unique(detector_sides):
-        candidates = np.flatnonzero(detector_sides == side)
-        ranked = candidates[np.argsort(-confidences[candidates], kind="stable")]
-        selected.extend(ranked[:limit].tolist())
-    return np.asarray(sorted(selected), dtype=np.int64)
 
 
 def _prepare_dual_batched(

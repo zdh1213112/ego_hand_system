@@ -85,7 +85,7 @@ fi
 
 printf '[python-env] installing ultralytics without its duplicate OpenCV distribution\n'
 "${PIP[@]}" install --upgrade "${NETWORK_OPTIONS[@]}" \
-    --index-url "${PYPI_INDEX}" --no-deps ultralytics==8.4.56
+    --index-url "${PYPI_INDEX}" --no-deps ultralytics==8.4.76
 
 printf '[python-env] validating imports and package invariants\n'
 # Import validation does not perform network requests. Do not let a shell-level
