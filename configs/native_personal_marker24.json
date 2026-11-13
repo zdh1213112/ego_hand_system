@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "personal_marker24_optimization": {
+    "enabled": true,
+    "placement": "glove_marker_placement.json",
+    "dorsal_reference": {
+      "left": {"camera": "camera1", "sync": 616},
+      "right": {"camera": "camera2", "sync": 584}
+    },
+    "holdout": [512, 704],
+    "calibration_frames": 48,
+    "calibration_steps": 120,
+    "contour_steps": 120,
+    "pose_scope": "sampled_sequence",
+    "diagnostics": false,
+    "diagnostic_steps": 100,
+    "export_optimized": true
+  }
+}

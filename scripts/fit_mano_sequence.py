@@ -123,6 +123,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--silhouette-input", type=Path,
                         help="optional native RGB contour and visible-boundary constraints NPZ")
     parser.add_argument("--w-silhouette", type=float, default=0.0)
+    parser.add_argument("--multiview-marker-bundle", type=Path)
+    parser.add_argument("--multiview-weight", type=float, default=0.25)
+    parser.add_argument("--multiview-sigma-px", type=float, default=4.0)
+    parser.add_argument("--multiview-max-step-mm", type=float, default=3.0)
     parser.add_argument("--no-video", action="store_true")
     return parser.parse_args()
 
@@ -156,9 +160,15 @@ def canonicalize_observations(observations: dict, handedness: str) -> dict:
     """Put a physical track into WiLoR's MANO_RIGHT optimization space."""
     canonical = dict(observations)
     canonical["positions"] = mirror_left_points(observations["positions"], handedness)
-    canonical["rotation"] = canonical_projection_rotation(
-        observations["rotation"], handedness
-    )
+    if "native_views" in observations:
+        canonical["native_views"] = {
+            view: {**params, "rotation": canonical_projection_rotation(params["rotation"], handedness)}
+            for view, params in observations["native_views"].items()
+        }
+    else:
+        canonical["rotation"] = canonical_projection_rotation(
+            observations["rotation"], handedness
+        )
     return canonical
 
 
@@ -199,21 +209,25 @@ def import_mano(source: Path):
 
 
 def load_input(path: Path) -> dict[str, np.ndarray]:
-    required = {
-        "positions_left_camera_m", "valid", "confidence", "track_ids", "handedness",
-        "left_rectified_px", "right_rectified_px", "left_to_rectified_rotation",
-        "projection_left_rectified", "projection_right_rectified", "pair_indices",
-    }
-    with np.load(path) as archive:
-        missing = required - set(archive.files)
-        if missing:
-            raise RuntimeError(f"missing MANO input arrays: {sorted(missing)}")
+    with np.load(path, allow_pickle=False) as archive:
         data = {name: archive[name].copy() for name in archive.files}
-    positions = data["positions_left_camera_m"]
-    valid = data["valid"]
+    native = str(data.get("image_space", "physical_rectified")) == "native_raw"
+    required = {"valid", "confidence", "track_ids", "handedness", "pair_indices"}
+    if native:
+        required |= {"positions_reference_camera_m", "reference_camera"}
+        required |= {f"{view}_native_{field}" for view in ("left", "right") for field in ("px", "valid")}
+        required |= {f"native_{view}_{field}" for view in ("left", "right") for field in ("rotation", "translation", "K", "D")}
+        positions_key = "positions_reference_camera_m"
+    else:
+        required |= {"positions_left_camera_m", "left_rectified_px", "right_rectified_px",
+                     "left_to_rectified_rotation", "projection_left_rectified", "projection_right_rectified"}
+        positions_key = "positions_left_camera_m"
+    if required - data.keys():
+        raise RuntimeError(f"missing MANO input arrays: {sorted(required - data.keys())}")
+    positions = data[positions_key]
     if positions.ndim != 4 or positions.shape[2:] != (21, 3):
         raise RuntimeError(f"unexpected positions shape: {positions.shape}")
-    if valid.shape != positions.shape[:-1]:
+    if data["valid"].shape != positions.shape[:-1]:
         raise RuntimeError("valid mask shape disagrees with positions")
     return data
 
@@ -619,13 +633,30 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     right_px_valid = torch.as_tensor(observations.get(
         "right_px_valid", np.isfinite(observations["right_px"]).all(axis=-1)
     ), dtype=torch.bool, device=device)
-    rotation = torch.as_tensor(observations["rotation"], dtype=torch.float32, device=device)
-    p1 = torch.as_tensor(observations["p1"], dtype=torch.float32, device=device)
-    p2 = torch.as_tensor(observations["p2"], dtype=torch.float32, device=device)
+    if "native_views" in observations:
+        if getattr(args, "image_rigid_alignment", False):
+            raise ValueError("legacy perspective image-rigid alignment is unavailable for native KB input")
+        from native_camera_geometry import project_native_torch
+        native_views = {view: {key: torch.as_tensor(value, dtype=torch.float32, device=device)
+                              for key, value in params.items()}
+                        for view, params in observations["native_views"].items()}
+        def predict_views(points):
+            return tuple(project_native_torch(points, **native_views[view]) for view in ("left", "right"))
+    else:
+        rotation = torch.as_tensor(observations["rotation"], dtype=torch.float32, device=device)
+        p1 = torch.as_tensor(observations["p1"], dtype=torch.float32, device=device)
+        p2 = torch.as_tensor(observations["p2"], dtype=torch.float32, device=device)
+        def predict_views(points):
+            return project_rectified(points, rotation, p1), project_rectified(points, rotation, p2)
     frame_count = target.shape[0]
     marker_indices = observations.get("surface_marker_vertex_indices")
     marker_indices = (torch.as_tensor(marker_indices, dtype=torch.long, device=device)
                       if marker_indices is not None else None)
+
+    multiview = None
+    if "multiview_bundle" in observations:
+        from multiview_mano_constraints import MultiviewMarkerConstraints
+        multiview = MultiviewMarkerConstraints(observations["multiview_bundle"], observations["multiview_side"], observations["multiview_pairs"], device)
 
     rgb = observations.get("rgb_silhouette")
     if rgb is not None:
@@ -649,6 +680,9 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     }
 
     initial = observations.get("initial")
+    baseline_parameters = None
+    if multiview is not None and initial is not None:
+        baseline_parameters = {k: torch.as_tensor(initial[k], dtype=torch.float32, device=device).clone() for k in ("hand_pose_pca", "global_orient", "translation")}
     if initial is not None:
         initial = repair_low_support_initial(
             initial, frame_support.detach().cpu().numpy()
@@ -686,6 +720,11 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
     if initial is None:
         betas = torch.zeros((1, 10), device=device, requires_grad=True)
 
+    baseline_vertices = baseline_joints = None
+    if multiview is not None:
+        with torch.no_grad():
+            baseline_vertices, baseline_joints, _ = run_model(model, betas.expand(frame_count, -1), baseline_parameters["global_orient"], baseline_parameters["hand_pose_pca"], baseline_parameters["translation"])
+
     quality = (fit_valid.float() * confidence).sum(dim=1)
     shape_count = min(args.shape_frames, frame_count)
     shape_ids = torch.topk(quality, k=shape_count).indices.sort().values
@@ -704,8 +743,7 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         fit_points = sample_observation_points(vertices, joints, marker_indices)
         loss3d = robust_weighted_loss(fit_points - target[ids], weights3d, 0.006)
 
-        left_prediction = project_rectified(fit_points, rotation, p1)
-        right_prediction = project_rectified(fit_points, rotation, p2)
+        left_prediction, right_prediction = predict_views(fit_points)
         weights2d_left = image_observation_weights(
             confidence[ids], left_px[ids], left_px_valid[ids] & fit_valid[ids]
         )
@@ -777,6 +815,9 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             + args.w_pose * pose_prior + args.w_shape * shape_prior + temporal
             + getattr(args, "w_silhouette", 0.0) * silhouette_loss
         )
+        if multiview is not None:
+            total = total + args.multiview_weight * 0.006 * multiview.loss(multiview.centres(vertices), ids, args.multiview_sigma_px)
+            total = total + 0.006 * ((joints-baseline_joints[ids])/.002).square().mean()
         return total, (loss3d, loss2d, pinch_loss, contact_tip_loss, pose_prior, shape_prior, temporal), vertices, joints
 
     if args.shape_iterations > 0:
@@ -861,6 +902,20 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             repaired_final["translation"], dtype=transl.dtype, device=device
         ))
 
+    refinement_safety = {}
+    if multiview is not None:
+        from multiview_mano_constraints import safe_refinement_mask
+        with torch.no_grad():
+            candidate_vertices, candidate_joints, _ = run_model(model, betas.expand(frame_count, -1), orient, pose, transl)
+            base_rgb = torch.linalg.vector_norm(multiview.pixel_errors(multiview.centres(baseline_vertices), all_ids), dim=-1)
+            candidate_rgb = torch.linalg.vector_norm(multiview.pixel_errors(multiview.centres(candidate_vertices), all_ids), dim=-1)
+            arrays = [baseline_joints, candidate_joints, baseline_vertices, candidate_vertices, target, fit_valid, base_rgb, candidate_rgb, multiview.confidence, multiview.train]
+            accept, rejected = safe_refinement_mask(*[x.cpu().numpy() for x in arrays], observations['multiview_pairs'], max_step_m=args.multiview_max_step_mm/1000)
+            keep = torch.as_tensor(accept, device=device)
+            for parameter, key in [(pose,'hand_pose_pca'), (orient,'global_orient'), (transl,'translation')]:
+                parameter[~keep] = baseline_parameters[key][~keep]
+            refinement_safety = dict(strategy='baseline_anchored_joint_v2', accepted_frames=int(accept.sum()), baseline_fallback_frames=int((~accept).sum()), max_step_mm=args.multiview_max_step_mm, correction_jump_limit_mm=1., rejection_counts=rejected)
+
     with torch.no_grad():
         vertices, joints, model_output = run_model(
             model, betas.expand(frame_count, -1), orient, pose, transl
@@ -881,8 +936,7 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
         fit_points = sample_observation_points(vertices, joints, marker_indices)
         observation_errors = torch.linalg.vector_norm(fit_points - target, dim=-1)
         observation_errors = torch.where(fit_valid, observation_errors, torch.nan)
-        left_prediction = project_rectified(fit_points, rotation, p1)
-        right_prediction = project_rectified(fit_points, rotation, p2)
+        left_prediction, right_prediction = predict_views(fit_points)
         left_pixel_error = torch.linalg.vector_norm(left_prediction - left_px, dim=-1)
         right_pixel_error = torch.linalg.vector_norm(right_prediction - right_px, dim=-1)
         left_pixel_error = torch.where(torch.isfinite(left_px).all(dim=-1), left_pixel_error, torch.nan)
@@ -900,6 +954,8 @@ def optimize_track(model, observations: dict, args: argparse.Namespace, device):
             "observation_error_m": observation_errors.cpu().numpy(),
             "observation_points": fit_points.cpu().numpy(),
             "fit_target": np.asarray("surface_marker_anchors" if marker_indices is not None else "mano_joints"),
+            "refinement_safety_json": np.asarray(json.dumps(refinement_safety)),
+            "multiview_diagnostics_json": np.asarray(json.dumps(multiview.diagnostics(multiview.centres(vertices))) if multiview is not None else "{}"),
             "surface_marker_vertex_indices": (marker_indices.cpu().numpy() if marker_indices is not None else np.asarray([], dtype=np.int64)),
             "left_reprojection_error_px": left_pixel_error.cpu().numpy(),
             "right_reprojection_error_px": right_pixel_error.cpu().numpy(),
@@ -1087,6 +1143,16 @@ def main() -> int:
             flush=True,
         )
     data = load_input(args.input.resolve())
+    multiview_bundle = None
+    if args.multiview_marker_bundle is not None:
+        if args.initial_output is None or args.w_2d != 0 or args.surface_marker_anchors is not None or args.silhouette_input is not None or args.image_rigid_alignment or args.w_pinch or args.w_contact_tips:
+            raise ValueError("Multiview marker refinement requires warm-start, w_2d=0 and no legacy surface/silhouette/contact modes")
+        if not np.isfinite(args.multiview_weight) or args.multiview_weight <= 0 or not np.isfinite(args.multiview_sigma_px) or args.multiview_sigma_px <= 0:
+            raise ValueError("Multiview weight and pixel sigma must be positive and finite")
+        if args.shape_iterations != 0 or not np.isfinite(args.multiview_max_step_mm) or not 0 < args.multiview_max_step_mm <= 3:
+            raise ValueError("Anchored refinement requires frozen shape and max step in (0,3] mm")
+        from multiview_mano_constraints import load_bundle
+        multiview_bundle = load_bundle(args.multiview_marker_bundle, data)
     selected_pairs = select_pair_range(data, args)
     if not len(selected_pairs):
         raise RuntimeError("selected pair range is empty")
@@ -1096,14 +1162,13 @@ def main() -> int:
     initial_output = args.initial_output.resolve() if args.initial_output else None
     summaries = []
     start = time.perf_counter()
-    left_pixel_key = (
-        "left_rectified_px_filtered"
-        if "left_rectified_px_filtered" in data else "left_rectified_px"
-    )
-    right_pixel_key = (
-        "right_rectified_px_filtered"
-        if "right_rectified_px_filtered" in data else "right_rectified_px"
-    )
+    native_input = str(data.get("image_space", "physical_rectified")) == "native_raw"
+    left_source = "left_native_px" if native_input else "left_rectified_px"
+    right_source = "right_native_px" if native_input else "right_rectified_px"
+    left_pixel_key = left_source + "_filtered" if left_source + "_filtered" in data else left_source
+    right_pixel_key = right_source + "_filtered" if right_source + "_filtered" in data else right_source
+    left_valid_key = "left_native_valid" if native_input else "left_rectified_valid"
+    right_valid_key = "right_native_valid" if native_input else "right_rectified_valid"
 
     for track_slot, track_id_value in enumerate(data["track_ids"]):
         track_id = int(track_id_value)
@@ -1112,8 +1177,8 @@ def main() -> int:
         handedness = str(data["handedness"][track_slot])
         track_has_data = (
             np.any(data["valid"][track_slot, selected_pairs], axis=1)
-            | np.any(np.isfinite(data["left_rectified_px"][track_slot, selected_pairs]).all(axis=-1), axis=1)
-            | np.any(np.isfinite(data["right_rectified_px"][track_slot, selected_pairs]).all(axis=-1), axis=1)
+            | np.any(np.isfinite(data[left_source][track_slot, selected_pairs]).all(axis=-1), axis=1)
+            | np.any(np.isfinite(data[right_source][track_slot, selected_pairs]).all(axis=-1), axis=1)
         )
         active = np.flatnonzero(track_has_data)
         if not len(active):
@@ -1125,7 +1190,7 @@ def main() -> int:
             flat_hand_mean=False,
         ).to(device)
         observations = {
-            "positions": data["positions_left_camera_m"][track_slot, track_pairs],
+            "positions": data["positions_reference_camera_m" if native_input else "positions_left_camera_m"][track_slot, track_pairs],
             "valid": data["valid"][track_slot, track_pairs],
             "observed": data.get(
                 "observed", data["valid"]
@@ -1134,22 +1199,30 @@ def main() -> int:
             "left_px": data[left_pixel_key][track_slot, track_pairs],
             "right_px": data[right_pixel_key][track_slot, track_pairs],
             "left_px_valid": data.get(
-                "left_rectified_valid",
-                np.isfinite(data["left_rectified_px"]).all(axis=-1),
+                left_valid_key,
+                np.isfinite(data[left_source]).all(axis=-1),
             )[track_slot, track_pairs],
             "right_px_valid": data.get(
-                "right_rectified_valid",
-                np.isfinite(data["right_rectified_px"]).all(axis=-1),
+                right_valid_key,
+                np.isfinite(data[right_source]).all(axis=-1),
             )[track_slot, track_pairs],
-            "rotation": data["left_to_rectified_rotation"],
-            "p1": data["projection_left_rectified"],
-            "p2": data["projection_right_rectified"],
         }
+        if native_input:
+            observations["native_views"] = {
+                view: {key: data[f"native_{view}_{field}"] for key, field in
+                       (("rotation", "rotation"), ("translation", "translation"), ("K", "K"), ("distortion", "D"))}
+                for view in ("left", "right")
+            }
+        else:
+            observations.update(rotation=data["left_to_rectified_rotation"],
+                                p1=data["projection_left_rectified"], p2=data["projection_right_rectified"])
         if surface_anchors is not None:
             if handedness.lower() != "left":
                 raise ValueError("these verified surface anchors belong to the physical left hand")
             observations["surface_marker_vertex_indices"] = surface_anchors
         observations = canonicalize_observations(observations, handedness)
+        if multiview_bundle is not None:
+            observations.update(multiview_bundle=multiview_bundle, multiview_side=0 if handedness.lower()=="left" else 1, multiview_pairs=track_pairs)
         if silhouette_data is not None:
             np.testing.assert_array_equal(silhouette_data["pair_indices"], data["pair_indices"])
             rgb = {key: silhouette_data[key].copy() for key in
@@ -1200,6 +1273,8 @@ def main() -> int:
             mano_convention=np.asarray(args.mano_convention),
             mano_model=np.asarray("MANO_RIGHT.pkl"),
             geometry_space=np.asarray("right_canonical"),
+            reference_camera=data.get("reference_camera", np.asarray("legacy_left_camera")),
+            projection_space=np.asarray("native_raw" if native_input else "physical_rectified"),
             **result,
         )
         write_track_csv(
@@ -1238,6 +1313,8 @@ def main() -> int:
             "loss": result["loss"],
             "silhouette_loss": result["silhouette_loss"],
             "fit_target": str(result["fit_target"]),
+            "multiview_rgb_errors": json.loads(str(result["multiview_diagnostics_json"])),
+            "refinement_safety": json.loads(str(result["refinement_safety_json"])),
             "observation_error_median_mm": float(np.nanmedian(result["observation_error_m"]) * 1000),
             "observation_error_p95_mm": float(np.nanpercentile(result["observation_error_m"], 95) * 1000),
             "joint_error_median_mm": float(np.median(finite_errors)),
@@ -1253,9 +1330,19 @@ def main() -> int:
         raise RuntimeError("no tracks were fitted")
     summary = {
         "stage": "mano_sequence_fitting", "input": str(args.input.resolve()),
+        "projection_space": "native_raw" if native_input else "physical_rectified",
+        "camera_calibrations": json.loads(str(data["camera_calibrations_json"])) if "camera_calibrations_json" in data else None,
+        "reference_camera": str(data.get("reference_camera", "legacy_left_camera")),
         "mano_source": str(source), "mano_revision": revision, "model_dir": str(model_dir),
         "mano_convention": args.mano_convention,
         "fit_target": "surface_marker_anchors" if surface_anchors is not None else "mano_joints",
+        "multiview_optimization_enabled": multiview_bundle is not None,
+        "multiview_strategy": "baseline_anchored_joint_v2" if multiview_bundle is not None else None,
+        "multiview_observation_source": "independent_rgb_marker_detections" if multiview_bundle is not None else None,
+        "multiview_marker_bundle": str(args.multiview_marker_bundle.resolve()) if multiview_bundle is not None else None,
+        "multiview_rgb_weight": args.multiview_weight if multiview_bundle is not None else None,
+        "multiview_sigma_px": args.multiview_sigma_px if multiview_bundle is not None else None,
+        "marker_attachment_status": "estimated_from_baseline_not_independently_calibrated" if multiview_bundle is not None else None,
         "mano_model": "MANO_RIGHT.pkl",
         "mano_model_by_side": {
             "left": "MANO_RIGHT.pkl", "right": "MANO_RIGHT.pkl",

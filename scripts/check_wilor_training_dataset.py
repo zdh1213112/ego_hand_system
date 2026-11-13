@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from mano_conventions import mirror_left_points
+from wilor_label_projection import project_label_points
 
 
 EXPECTED_KEYS = (
@@ -58,8 +59,15 @@ def _array(value: Any, dtype: np.dtype, shape: tuple[int, ...], name: str) -> No
 
 
 def _contract(sample: dict[str, Any], torch) -> None:
-    if tuple(sample) != EXPECTED_KEYS:
-        raise ValueError(f"keys: expected {EXPECTED_KEYS}, got {tuple(sample)}")
+    expected = EXPECTED_KEYS + (("image_space", "camera_model", "distortion") if sample.get("image_space") == "native_raw" else ())
+    if tuple(sample) != expected:
+        raise ValueError(f"keys: expected {expected}, got {tuple(sample)}")
+    if sample.get("image_space") == "native_raw":
+        if sample.get("camera_model") != "KB":
+            raise ValueError("native label requires KB camera model")
+        _array(sample["distortion"], np.dtype("float64"), (4,), "distortion")
+        if not np.isfinite(sample["distortion"]).all():
+            raise ValueError("nonfinite distortion")
     _array(sample["bbox"], np.dtype("float64"), (4,), "bbox")
     _array(sample["vertices"], np.dtype("float32"), (778, 3), "vertices")
     _array(sample["joints_3d"], np.dtype("float32"), (21, 3), "joints_3d")
@@ -188,12 +196,12 @@ def main() -> int:
     label_root = root / "labels"
     images = sorted(image_root.glob("*.jpg"))
     labels = sorted(label_root.glob("*.npy"))
-    if not images or [path.stem for path in images] != [path.stem for path in labels]:
-        raise ValueError("images/*.jpg and labels/*.npy must be non-empty one-to-one pairs")
+    if not images or not labels:
+        raise ValueError("images and labels must be nonempty")
     summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
     schema_version = int(summary.get("schema_version", -1))
-    if schema_version not in (4, 5):
-        raise ValueError("dataset must use physical-label schema_version 4 or 5")
+    if schema_version not in (4, 5, 6):
+        raise ValueError("dataset must use physical-label schema_version 4, 5 or 6")
     if int(summary["sample_count"]) != len(labels):
         raise ValueError("summary sample_count disagrees with paired files")
     index_rows = [
@@ -208,6 +216,20 @@ def main() -> int:
     if len(index_by_stem) != len(index_rows):
         raise ValueError("index.jsonl contains duplicate label names")
 
+    if {row["image"] for row in index_rows} != {f"images/{p.name}" for p in images}:
+        raise ValueError("image files disagree with frame references")
+    if {row["label"] for row in index_rows} != {f"labels/{p.name}" for p in labels}:
+        raise ValueError("label files disagree with instance references")
+    if int(summary["image_count"]) != len(images) or int(summary["label_count"]) != len(labels):
+        raise ValueError("summary image/instance counts mismatch")
+    frame_sides = {}
+    for row in index_rows:
+        sides = frame_sides.setdefault(row["image"], set())
+        if int(row["side"]) in sides:
+            raise ValueError("duplicate physical hand in frame")
+        sides.add(int(row["side"]))
+    if summary.get("annotation_policy") == "require_both_hands" and any(s != {0, 1} for s in frame_sides.values()):
+        raise ValueError("dual-hand dataset contains incomplete frame")
     import torch
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device == "auto":
@@ -224,6 +246,8 @@ def main() -> int:
     if args.reference is not None:
         reference = np.load(args.reference.resolve(), allow_pickle=True).item()
         _contract(reference, torch)
+        if reference.get("image_space", "physical_rectified") != summary.get("image_space"):
+            raise ValueError("reference and export use different image spaces")
         reference_signature = _signature(reference)
     selected = labels[: args.max_samples or None]
     maximum_projection_error = 0.0
@@ -234,7 +258,7 @@ def main() -> int:
         _contract(sample, torch)
         if reference_signature is not None and _signature(sample) != reference_signature:
             raise ValueError(f"{label_path}: schema signature differs from reference")
-        image_path = image_root / f"{label_path.stem}.jpg"
+        image_path = root / index_by_stem[label_path.stem]["image"]
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError(f"cannot decode image: {image_path}")
@@ -249,7 +273,7 @@ def main() -> int:
         homogeneous = (sample["K"] @ camera_vertices.T).T
         if np.any(homogeneous[:, 2] <= 0):
             raise ValueError(f"{label_path}: vertices behind camera")
-        projected = homogeneous[:, :2] / homogeneous[:, 2:3]
+        projected = project_label_points(camera_vertices, sample)
         stored = sample["joints_2d"].detach().cpu().numpy()
         error = float(np.max(np.abs(projected - stored)))
         maximum_projection_error = max(maximum_projection_error, error)
@@ -265,8 +289,23 @@ def main() -> int:
         physical_side = int(float(sample["side"]))
         if int(index_row.get("physical_side", -1)) != physical_side:
             raise ValueError(f"{label_path}: physical_side disagrees with label side")
-        if index_row.get("stored_image_space") != "physical_rectified":
-            raise ValueError(f"{label_path}: image is not marked physical_rectified")
+        expected_space = "native_raw" if schema_version == 6 else "physical_rectified"
+        if sample.get("image_space", "physical_rectified") != expected_space:
+            raise ValueError("label image space disagrees with dataset schema")
+        if expected_space == "native_raw":
+            if "camera_calibrations_by_source" in summary:
+                group = str(index_row["calibration_group"])
+                if group != str(index_row["source_dataset_id"]):
+                    raise ValueError("calibration group/source dataset mismatch")
+                cal = summary["camera_calibrations_by_source"][group][index_row["camera"]]
+            else:
+                cal = summary["camera_calibrations"][index_row["camera"]]
+            if cal["model"] != "KB" or cal["image_size"] != [width, height]:
+                raise ValueError("camera calibration model/size mismatch")
+            np.testing.assert_allclose(sample["K"], cal["K"], rtol=1e-6)
+            np.testing.assert_allclose(sample["distortion"], cal["distortion"], rtol=1e-10)
+        if index_row.get("stored_image_space") != expected_space:
+            raise ValueError(f"{label_path}: image space disagrees with schema")
         if bool(index_row.get("stored_image_horizontally_flipped")):
             raise ValueError(f"{label_path}: physical image must not be flipped")
         if index_row.get("mano_parameter_space") != "right_canonical":
@@ -288,8 +327,8 @@ def main() -> int:
             raise ValueError(
                 "mano_pose_representation must be rotation_matrix_full_mean"
             )
-        if summary.get("image_space") != "physical_rectified":
-            raise ValueError("training images must remain in physical rectified space")
+        if summary.get("image_space") != ("native_raw" if schema_version == 6 else "physical_rectified"):
+            raise ValueError("summary image space disagrees with schema")
         if summary.get("geometry_space") != "physical_side":
             raise ValueError("vertices and joints must remain in physical-side space")
         if summary.get("mano_parameter_space") != "right_canonical":
@@ -322,7 +361,7 @@ def main() -> int:
         "validated_sample_count": len(selected),
         "total_sample_count": len(labels),
         "paired_images": len(images),
-        "schema": "000865-compatible",
+        "schema": "native-kb-v6" if schema_version == 6 else "000865-compatible",
         "reference_compared": str(args.reference.resolve()) if args.reference else None,
         "maximum_projection_error_px": maximum_projection_error,
         "mano_model_by_side": mano_model_by_side,

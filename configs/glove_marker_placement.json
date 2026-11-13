@@ -1,0 +1,1849 @@
+{
+  "schema": "ego_marker_placement_v1",
+  "purpose": "anatomical_region_prior_not_metric_calibration",
+  "marker_diameter_mm": 4,
+  "mount": "directly_on_glove",
+  "hands": {
+    "left": {
+      "WristM": {
+        "status": "suggested",
+        "region": "wrist_center",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.20000001564191255,
+          "y": 0.6462182226933931,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 0,
+          "marker_name": "WristM",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            811.0531060544627,
+            944.7776956342709
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "WristIn": {
+        "status": "suggested",
+        "region": "unknown",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.2097268450846593,
+          "y": 0.829092064914319,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 1,
+          "marker_name": "WristIn",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            815.5654883992921,
+            997.2912385005809
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "WristOut": {
+        "status": "suggested",
+        "region": "unknown",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.13180858741714513,
+          "y": 0.5621530129777308,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 2,
+          "marker_name": "WristOut",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            788.6057712463322,
+            921.2136086986533
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "HandOffset": {
+        "status": "suggested",
+        "region": "palm",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.34630052093107594,
+          "y": 0.5774192878704254,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 3,
+          "marker_name": "HandOffset",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            862.8199802421523,
+            925.5644970430712
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb1": {
+        "status": "suggested",
+        "region": "thumb_base",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.37483317845730013,
+          "y": 0.8227377807994153,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 4,
+          "marker_name": "FingerThumb1",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            872.6922797462258,
+            995.4802675278333
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb2": {
+        "status": "suggested",
+        "region": "thumb_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5015480080354752,
+          "y": 0.8324024759579711,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 5,
+          "marker_name": "FingerThumb2",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            916.5356107802744,
+            998.2347056480218
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb3": {
+        "status": "suggested",
+        "region": "thumb_ip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.6073242315656787,
+          "y": 0.8403971133635207,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 6,
+          "marker_name": "FingerThumb3",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            953.1341841217248,
+            1000.5131773086034
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb4": {
+        "status": "suggested",
+        "region": "thumb_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.7317059548365811,
+          "y": 0.8144238223990613,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 7,
+          "marker_name": "FingerThumb4",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            996.170260373457,
+            993.1107893837325
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex1": {
+        "status": "suggested",
+        "region": "index_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5194737037195218,
+          "y": 0.6141421025881858,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 8,
+          "marker_name": "FingerIndex1",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            922.7379014869546,
+            936.030499237633
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex2": {
+        "status": "suggested",
+        "region": "index_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.6997802409386068,
+          "y": 0.5320184179710742,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 9,
+          "marker_name": "FingerIndex2",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            985.123963364758,
+            912.6252491217562
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex3": {
+        "status": "suggested",
+        "region": "index_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.8075938438816199,
+          "y": 0.46022634867341733,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 10,
+          "marker_name": "FingerIndex3",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            1022.4274699830405,
+            892.1645093719239
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex4": {
+        "status": "suggested",
+        "region": "index_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.869042809539121,
+          "y": 0.412156959171125,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 11,
+          "marker_name": "FingerIndex4",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            1043.6888121005359,
+            878.4647333637706
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle1": {
+        "status": "suggested",
+        "region": "middle_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.4683006652167628,
+          "y": 0.5251037510341041,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 12,
+          "marker_name": "FingerMiddle1",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            905.0320301649999,
+            910.6545690447197
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle2": {
+        "status": "suggested",
+        "region": "middle_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.669495584647585,
+          "y": 0.4182072244576259,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 13,
+          "marker_name": "FingerMiddle2",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            974.6454722880644,
+            880.1890589704234
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle3": {
+        "status": "suggested",
+        "region": "middle_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.7797675064774001,
+          "y": 0.3469594441388856,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 14,
+          "marker_name": "FingerMiddle3",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            1012.7995572411804,
+            859.8834415795824
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle4": {
+        "status": "suggested",
+        "region": "middle_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.8415590116658564,
+          "y": 0.30398214513314153,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 15,
+          "marker_name": "FingerMiddle4",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            1034.1794180363863,
+            847.6349113629453
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing1": {
+        "status": "suggested",
+        "region": "ring_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.4239271355830382,
+          "y": 0.4470157308877062,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 16,
+          "marker_name": "FingerRing1",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            889.6787889117312,
+            888.3994833029963
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing2": {
+        "status": "suggested",
+        "region": "ring_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5795252977685573,
+          "y": 0.33949727954283143,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 17,
+          "marker_name": "FingerRing2",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            943.5157530279208,
+            857.756724669707
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing3": {
+        "status": "suggested",
+        "region": "ring_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.6850249089991032,
+          "y": 0.2541510432774358,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 18,
+          "marker_name": "FingerRing3",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            980.0186185136897,
+            833.4330473340692
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing4": {
+        "status": "suggested",
+        "region": "ring_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.7464587275185972,
+          "y": 0.19742437819714811,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 19,
+          "marker_name": "FingerRing4",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            1001.2747197214346,
+            817.2659477861872
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky1": {
+        "status": "suggested",
+        "region": "pinky_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.39013815365514365,
+          "y": 0.3733754523565574,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 20,
+          "marker_name": "FingerPinky1",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            877.9878011646797,
+            867.4120039216189
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky2": {
+        "status": "suggested",
+        "region": "pinky_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.49752257610693196,
+          "y": 0.28242040565918924,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 21,
+          "marker_name": "FingerPinky2",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            915.1428113329985,
+            841.4898156128689
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky3": {
+        "status": "suggested",
+        "region": "pinky_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5600141356612514,
+          "y": 0.21275670294479657,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 22,
+          "marker_name": "FingerPinky3",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            936.764890938793,
+            821.635660339267
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky4": {
+        "status": "suggested",
+        "region": "pinky_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.6094245755677585,
+          "y": 0.15849797078302433,
+          "source": "photo",
+          "image": {
+            "name": "left_camera1_sync000616.png",
+            "width": 346,
+            "height": 285
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 23,
+          "marker_name": "FingerPinky4",
+          "camera": "camera1",
+          "sync": 616,
+          "original_pixel": [
+            953.8609031464445,
+            806.1719216731619
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000185.jpg",
+          "crop_xyxy": [
+            743,
+            761,
+            1089,
+            1046
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      }
+    },
+    "right": {
+      "WristM": {
+        "status": "suggested",
+        "region": "wrist_center",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.8229048391951447,
+          "y": 0.5255840517015309,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 0,
+          "marker_name": "WristM",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            803.0580292157647,
+            1011.7775517172654
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "WristIn": {
+        "status": "suggested",
+        "region": "unknown",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.8802013017099128,
+          "y": 0.6432566353648175,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 1,
+          "marker_name": "WristIn",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            824.7160920463471,
+            1047.5500171509045
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "WristOut": {
+        "status": "suggested",
+        "region": "unknown",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.8634503776349151,
+          "y": 0.35517970109941194,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 2,
+          "marker_name": "WristOut",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            818.3842427459979,
+            959.9746291342212
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "HandOffset": {
+        "status": "suggested",
+        "region": "palm",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.6724521257365755,
+          "y": 0.4291121429180858,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 3,
+          "marker_name": "HandOffset",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            746.1869035284255,
+            982.4500914470981
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb1": {
+        "status": "suggested",
+        "region": "thumb_base",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.7358639728410165,
+          "y": 0.6853890958596832,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 4,
+          "marker_name": "FingerThumb1",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            770.1565817339042,
+            1060.3582851413437
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb2": {
+        "status": "suggested",
+        "region": "thumb_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.6370008107276772,
+          "y": 0.7588145495854691,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 5,
+          "marker_name": "FingerThumb2",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            732.786306455062,
+            1082.6796230739826
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb3": {
+        "status": "suggested",
+        "region": "thumb_ip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5360976330956965,
+          "y": 0.8020580405217901,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 6,
+          "marker_name": "FingerThumb3",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            694.6449053101733,
+            1095.8256443186242
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerThumb4": {
+        "status": "suggested",
+        "region": "thumb_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.43041752426597124,
+          "y": 0.849778599616663,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 7,
+          "marker_name": "FingerThumb4",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            654.6978241725371,
+            1110.3326942834656
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex1": {
+        "status": "suggested",
+        "region": "index_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.507796341637659,
+          "y": 0.5831772686583762,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 8,
+          "marker_name": "FingerIndex1",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            683.9470171390351,
+            1029.2858896721464
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex2": {
+        "status": "suggested",
+        "region": "index_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.32163003311808114,
+          "y": 0.5710008219920484,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 9,
+          "marker_name": "FingerIndex2",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            613.5761525186347,
+            1025.5842498855827
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex3": {
+        "status": "suggested",
+        "region": "index_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.21105655973542886,
+          "y": 0.5469827145022358,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 10,
+          "marker_name": "FingerIndex3",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            571.7793795799921,
+            1018.2827452086797
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerIndex4": {
+        "status": "suggested",
+        "region": "index_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.13836331062406082,
+          "y": 0.5207210519185798,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 11,
+          "marker_name": "FingerIndex4",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            544.301331415895,
+            1010.2991997832482
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle1": {
+        "status": "suggested",
+        "region": "middle_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5194931304074399,
+          "y": 0.47172483940431603,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 12,
+          "marker_name": "FingerMiddle1",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            688.3684032940123,
+            995.4043511789121
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle2": {
+        "status": "suggested",
+        "region": "middle_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.31734295882893276,
+          "y": 0.4299648052748592,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 13,
+          "marker_name": "FingerMiddle2",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            611.9556384373366,
+            982.7093008035572
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle3": {
+        "status": "suggested",
+        "region": "middle_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.1909836432661734,
+          "y": 0.39382867240976754,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 14,
+          "marker_name": "FingerMiddle3",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            564.1918171546135,
+            971.7239164125693
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerMiddle4": {
+        "status": "suggested",
+        "region": "middle_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.12061359291099641,
+          "y": 0.3655861609350019,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 15,
+          "marker_name": "FingerMiddle4",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            537.5919381203566,
+            963.1381929242406
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing1": {
+        "status": "suggested",
+        "region": "ring_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5354479021416731,
+          "y": 0.38507601529519064,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 16,
+          "marker_name": "FingerRing1",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            694.3993070095524,
+            969.063108649738
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing2": {
+        "status": "suggested",
+        "region": "ring_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.3637040068244343,
+          "y": 0.3237829565195227,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 17,
+          "marker_name": "FingerRing2",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            629.4801145796362,
+            950.4300187819349
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing3": {
+        "status": "suggested",
+        "region": "ring_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.2540344669709356,
+          "y": 0.2881941670696264,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 18,
+          "marker_name": "FingerRing3",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            588.0250285150137,
+            939.6110267891664
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerRing4": {
+        "status": "suggested",
+        "region": "ring_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.1814145779896436,
+          "y": 0.264709386301755,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 19,
+          "marker_name": "FingerRing4",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            560.5747104800853,
+            932.4716534357335
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky1": {
+        "status": "suggested",
+        "region": "pinky_mcp",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.5619856220532913,
+          "y": 0.30577519673619014,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 20,
+          "marker_name": "FingerPinky1",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            704.4305651361441,
+            944.9556598078018
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky2": {
+        "status": "suggested",
+        "region": "pinky_pip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.44150436285306427,
+          "y": 0.22319382681833208,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 21,
+          "marker_name": "FingerPinky2",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            658.8886491584583,
+            919.850923352773
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky3": {
+        "status": "suggested",
+        "region": "pinky_dip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.3679336810508996,
+          "y": 0.1888926133557891,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 22,
+          "marker_name": "FingerPinky3",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            631.07893143724,
+            909.4233544601599
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      },
+      "FingerPinky4": {
+        "status": "suggested",
+        "region": "pinky_tip",
+        "surface": "dorsal",
+        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "point": {
+          "view": "dorsal",
+          "x": 0.29934156652250377,
+          "y": 0.1503838813021534,
+          "source": "photo",
+          "image": {
+            "name": "right_camera2_sync000584.png",
+            "width": 378,
+            "height": 304
+          }
+        },
+        "suggestion": {
+          "method": "raw_nokov24_projection",
+          "marker_index": 23,
+          "marker_name": "FingerPinky4",
+          "camera": "camera2",
+          "sync": 584,
+          "original_pixel": [
+            605.1511121455064,
+            897.7166999158546
+          ],
+          "source_image": "/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/fourview_192916/native_labels/export/merged/images/00000180.jpg",
+          "crop_xyxy": [
+            492,
+            852,
+            870,
+            1156
+          ],
+          "occlusion_checked": false,
+          "region_is_unverified": true
+        }
+      }
+    }
+  },
+  "prefill_version": "nokov24_20261111_v1",
+  "updated_at": "2026-11-12T02:12:32.664Z",
+  "coordinate_convention": "x,y normalized in the selected image/view; schematic points are anatomical hints only",
+  "unconfirmed_markers": {
+    "left": [
+      "WristM",
+      "WristIn",
+      "WristOut",
+      "HandOffset",
+      "FingerThumb1",
+      "FingerThumb2",
+      "FingerThumb3",
+      "FingerThumb4",
+      "FingerIndex1",
+      "FingerIndex2",
+      "FingerIndex3",
+      "FingerIndex4",
+      "FingerMiddle1",
+      "FingerMiddle2",
+      "FingerMiddle3",
+      "FingerMiddle4",
+      "FingerRing1",
+      "FingerRing2",
+      "FingerRing3",
+      "FingerRing4",
+      "FingerPinky1",
+      "FingerPinky2",
+      "FingerPinky3",
+      "FingerPinky4"
+    ],
+    "right": [
+      "WristM",
+      "WristIn",
+      "WristOut",
+      "HandOffset",
+      "FingerThumb1",
+      "FingerThumb2",
+      "FingerThumb3",
+      "FingerThumb4",
+      "FingerIndex1",
+      "FingerIndex2",
+      "FingerIndex3",
+      "FingerIndex4",
+      "FingerMiddle1",
+      "FingerMiddle2",
+      "FingerMiddle3",
+      "FingerMiddle4",
+      "FingerRing1",
+      "FingerRing2",
+      "FingerRing3",
+      "FingerRing4",
+      "FingerPinky1",
+      "FingerPinky2",
+      "FingerPinky3",
+      "FingerPinky4"
+    ]
+  },
+  "missing_markers": {
+    "left": [],
+    "right": []
+  }
+}

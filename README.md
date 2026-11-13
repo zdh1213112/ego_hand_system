@@ -150,6 +150,12 @@ export EGO_WILOR_BATCH_SIZE=4
 ./scripts/run_offline.sh all
 ```
 
+### EGO + NOKOV 原图标签流程
+
+原始数据准备、双手同步与标定要求、MANO 拟合、原图标签导出、检查及预览的具体操作，见
+[《EGO + NOKOV 双手原图标签流程》](docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)。
+直接执行见 [精简命令清单](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。
+
 ### GEN 六目 WiLoR 实验
 
 完整设计、算法改进、指标、左右手身份修复和排错记录见
@@ -540,9 +546,12 @@ wilor_training_labels_physical_v1/dataset/
 └── summary.json
 ```
 
-`images` 和 `labels` 文件名严格一一对应。图片是 `camera2/3` 的共同针孔校正图像；物理
-左手样本会在校正后水平翻转到 WiLoR 右手规范空间，标签内的 `K` 同步变换。训练读取器
-不得再依据 `side=0` 重复翻转图片或标签。不能把原始 DS 鱼眼图片和针孔 `K` 混用。每个标签会严格对照
+`images` 和 `labels` 文件名严格一一对应。此处描述默认 `physical_rectified` 模式：
+图片是所选双目相机的共同针孔校正图像，保存时保持物理左右手，不做水平翻转；标签的
+`vertices`、`joints_3d` 和 `trans` 同样处于物理侧坐标，MANO 参数使用右手规范空间。
+训练读取器可依据 `side=0` 将左手裁剪规范化，不能在已规范化的数据上重复镜像。
+原图 KB 标签使用上面的 `native_raw` 入口；不能把原始鱼眼图片和单纯的针孔投影混用。
+默认矫正标签会严格对照
 `/home/zdh/tool/npy_decoder/000865.npy` 校验字段顺序、类型、dtype 和 shape，并验证
 `vertices + trans` 经 `K` 投影后与 `joints_2d[778,2]` 一致，并用导出时相同的
 `MANO_RIGHT.pkl` 重放左右手全部参数，严格比对 778 顶点和 21 关节。六目融合

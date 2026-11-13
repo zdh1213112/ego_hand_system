@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export paired rectified images and 000865-compatible WiLoR training labels."""
+"""Export rectified schema-4 or native KB schema-6 WiLoR training labels."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+import sys
 from typing import Any
 
 import cv2
@@ -17,6 +18,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from ego_data.dataset import SequentialVideoReader
+from ego_data.calibration import CameraCalibration, StereoCalibration
+from wilor_label_projection import project_label_points
+from wilor_frame_annotations import require_both_hands, assign_image_paths, write_frame_index
 from mano_conventions import (
     MIRROR_X,
     WILOR_RIGHT_CANONICAL,
@@ -27,10 +31,13 @@ from mano_conventions import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image-space", choices=("physical_rectified", "native_raw"), default="physical_rectified")
+    parser.add_argument("--require-both-hands", action="store_true", help="keep a camera frame only if both physical hands pass quality checks")
     parser.add_argument("--fusion", required=True, type=Path)
     parser.add_argument("--mano-fit", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
-    parser.add_argument("--rectification", required=True, type=Path)
+    parser.add_argument("--rectification", type=Path, help="required only for physical_rectified export")
+    parser.add_argument("--reference-camera", default="camera0")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cameras", nargs="+", default=["camera2", "camera3"])
     parser.add_argument(
@@ -356,6 +363,28 @@ def _limit_to_sync_groups(
 
 def main() -> int:
     args = parse_args()
+    if args.image_space == "native_raw":
+        # Backward-compatible command spelling; native export never reads the
+        # optional legacy rectification argument or computes rectified geometry.
+        from export_native_wilor_training_dataset import main as export_native
+        forwarded = []
+        for key in ("fusion", "mano_fit", "dataset", "output", "reference_camera",
+                    "sample_stride", "max_samples", "bbox_margin", "min_visible_vertex_fraction",
+                    "max_nokov_fit_median_mm", "max_nokov_fit_p95_mm",
+                    "max_reprojection_median_px", "max_reprojection_p95_px", "jpeg_quality", "view_filter"):
+            forwarded += ["--" + key.replace("_", "-"), str(getattr(args, key))]
+        forwarded += ["--cameras", *args.cameras]
+        if args.require_both_hands:
+            forwarded += ["--require-both-hands"]
+        previous = sys.argv
+        try:
+            sys.argv = [previous[0], *forwarded]
+            export_native()
+        finally:
+            sys.argv = previous
+        return 0
+    if args.rectification is None:
+        raise ValueError("physical_rectified export requires --rectification")
     if args.max_samples < 0:
         raise ValueError("max-samples must be non-negative")
     if args.sample_stride < 0:
@@ -422,6 +451,7 @@ def main() -> int:
         right_camera = str(archive["right_camera"].item())
         rectification = {
             "R1": archive["R1"].astype(np.float32),
+            "R2": archive["R2"].astype(np.float32),
             "P1": archive["P1"].astype(np.float32),
             "P2": archive["P2"].astype(np.float32),
             "map_left_x": archive["map_left_x"].astype(np.float32),
@@ -434,8 +464,23 @@ def main() -> int:
         raise ValueError(
             f"rectification supports only {left_camera}/{right_camera}, got {cameras}"
         )
+    native = args.image_space == "native_raw"
+    calibrations = {c: CameraCalibration.load(dataset / "calibration" / f"{c}.json") for c in cameras} if native else {}
+    if native and any(c.model != "KB" for c in calibrations.values()):
+        raise ValueError("native_raw export currently requires KB cameras")
+    export_size = tuple(manifest["image_size"]) if native else rectification["image_size"]
     K = rectification["P1"][:, :3].copy().astype(np.float32)
     right_offset = np.linalg.solve(K, rectification["P2"][:, 3]).astype(np.float32)
+    if native:
+        left_cal = CameraCalibration.load(dataset / "calibration" / f"{left_camera}.json")
+        right_cal = CameraCalibration.load(dataset / "calibration" / f"{right_camera}.json")
+        stereo = StereoCalibration.from_cameras(left_cal, right_cal)
+        np.testing.assert_allclose(rectification["R2"] @ stereo.R_left_to_right,
+                                   rectification["R1"], atol=2e-5)
+        np.testing.assert_allclose(rectification["R2"] @ stereo.t_left_to_right_m,
+                                   right_offset, atol=2e-5)
+        if any(cal.image_size != export_size for cal in calibrations.values()):
+            raise ValueError("native camera size disagrees with source video")
     canonical_rotation = {
         side: canonical_rectification_rotation(rectification["R1"], side)
         for side in (0, 1)
@@ -594,9 +639,30 @@ def main() -> int:
                     canonical_trans, side
                 ).astype(np.float32)
                 sample_K = K.copy()
+                sample_vertices = physical_vertices.copy()
+                sample_joints = physical_joints.copy()
+                sample_global = global_rectified.copy()
+                native_info = {}
+                if native:
+                    camera_cal = calibrations[camera]
+                    inverse = rectification["R1" if camera == left_camera else "R2"].T
+                    canonical_inverse = canonical_rectification_rotation(inverse, side)
+                    nv, nj, nt, native_root_offset = _rectify_mano_geometry(
+                        mirror_left_points(sample_vertices, side),
+                        mirror_left_points(sample_joints, side),
+                        mirror_left_points(trans, side), canonical_inverse,
+                    )
+                    sample_vertices = mirror_left_points(nv, side)
+                    sample_joints = mirror_left_points(nj, side)
+                    trans = mirror_left_points(nt, side)
+                    sample_global = (canonical_inverse @ sample_global[0])[None].astype(np.float32)
+                    sample_K = camera_cal.K.astype(np.float32)
+                    native_info = {"image_space": "native_raw", "camera_model": "KB",
+                                   "distortion": camera_cal.distortion.astype(np.float64)}
+                projection_info = {"K": sample_K, **native_info}
                 try:
-                    projected = _project(physical_vertices, trans, sample_K)
-                    projected_joints = _project(physical_joints, trans, sample_K)
+                    projected = project_label_points(sample_vertices + trans[None], projection_info).astype(np.float32)
+                    projected_joints = project_label_points(sample_joints + trans[None], projection_info).astype(np.float32)
                 except ValueError as error:
                     rejected.append({
                         "sync_index": sync_index, "side": side, "camera": camera,
@@ -604,16 +670,16 @@ def main() -> int:
                     })
                     continue
                 if args.view_filter == "complete21" and not _all_points_inside(
-                    projected_joints, rectification["image_size"]
+                    projected_joints, export_size
                 ):
                     rejected.append({
                         "sync_index": sync_index, "side": side, "camera": camera,
-                        "reason": "rectified_mano_joints_not_complete21",
+                        "reason": "exported_mano_joints_not_complete21",
                         "inlier_joint_count": inlier_joint_count,
                     })
                     continue
                 bbox = _mesh_bbox(
-                    projected, rectification["image_size"], args.bbox_margin,
+                    projected, export_size, args.bbox_margin,
                     args.min_visible_vertex_fraction,
                 )
                 if bbox is None:
@@ -624,18 +690,19 @@ def main() -> int:
                     continue
                 sample = {
                     "bbox": bbox,
-                    "vertices": physical_vertices.copy(),
-                    "joints_3d": physical_joints.copy(),
+                    "vertices": sample_vertices.copy(),
+                    "joints_3d": sample_joints.copy(),
                     "joints_2d_array": projected,
                     "side": np.asarray(float(side), dtype=np.float32),
                     "trans": trans,
                     "K": sample_K.copy(),
                     "mano": {
-                        "global_orient": global_rectified.copy(),
+                        "global_orient": sample_global.copy(),
                         "hand_pose": hand_pose.copy(),
                         "betas": track["betas"].astype(np.float32).copy(),
                     },
                 }
+                sample.update(native_info)
                 pending.append({
                     "sync_index": sync_index,
                     "side": side,
@@ -651,7 +718,8 @@ def main() -> int:
                         "side": side,
                         "handedness": "right" if side else "left",
                         "physical_side": side,
-                        "stored_image_space": "physical_rectified",
+                        "stored_image_space": args.image_space,
+                        "fit_reprojection_space": "physical_rectified",
                         "stored_image_horizontally_flipped": False,
                         "mano_parameter_space": "right_canonical",
                         "view_filter": args.view_filter,
@@ -662,9 +730,13 @@ def main() -> int:
                         "fit_nokov_joint_p95_mm": fit_joint_p95_mm if nokov_reference else None,
                         "fusion_mode": hand.get("fusion_mode"),
                         "mano_root_offset_m": root_offset.tolist(),
+                        "native_root_offset_m": native_root_offset.tolist() if native else None,
                     },
                 })
 
+    if args.require_both_hands:
+        pending, incomplete_frames = require_both_hands(pending)
+        rejected.extend(incomplete_frames)
     pending.sort(
         key=lambda item: (item["sync_index"], item["side"], camera_order[item["camera"]])
     )
@@ -683,12 +755,13 @@ def main() -> int:
         "exported_sync_count": len({int(item["sync_index"]) for item in pending}),
         "exported_sample_count": len(pending),
     })
+    assign_image_paths(pending, shared=native)
     for index, item in enumerate(pending):
         stem = f"{index:06d}"
         item["stem"] = stem
         item["metadata"].update({
             "index": index,
-            "image": f"images/{stem}.jpg",
+            "image": f"images/{item['image_stem']}.jpg",
             "label": f"labels/{stem}.npy",
             "sampling_mode": sampling["mode"],
             "sample_stride": args.sample_stride,
@@ -723,6 +796,8 @@ def main() -> int:
                 "K": stored["K"],
                 "mano": stored["mano"],
             }
+            if native:
+                sample.update({key: stored[key] for key in ("image_space", "camera_model", "distortion")})
             np.save(label_root / f"{item['stem']}.npy", sample, allow_pickle=True)
 
         image_size = tuple(manifest["image_size"])
@@ -747,21 +822,25 @@ def main() -> int:
                     else:
                         map_x = rectification["map_right_x"]
                         map_y = rectification["map_right_y"]
-                    rectified = cv2.remap(
+                    rectified = frame if native else cv2.remap(
                         frame, map_x, map_y, cv2.INTER_LINEAR,
                         borderMode=cv2.BORDER_CONSTANT,
                     )
+                    written_images = set()
                     for item in grouped[sync_index]:
-                        image_path = image_root / f"{item['stem']}.jpg"
-                        if not cv2.imwrite(
-                            str(image_path), rectified,
+                        image_path = image_root / f"{item['image_stem']}.jpg"
+                        if image_path not in written_images and not cv2.imwrite(
+                            str(image_path), frame if native else rectified,
                             [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
                         ):
                             raise RuntimeError(f"cannot write image: {image_path}")
+                        written_images.add(image_path)
                         item["metadata"]["source_frame_index"] = source_index
+                        item["metadata"]["reference_timestamp_ns"] = int(sync_rows[sync_index]["reference_timestamp_ns"])
             finally:
                 reader.close()
 
+        write_frame_index(temporary / "frames.jsonl", [item["metadata"] for item in pending])
         (temporary / "index.jsonl").write_text(
             "".join(
                 json.dumps(item["metadata"], ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -784,9 +863,9 @@ def main() -> int:
             camera: sum(item["camera"] == camera for item in pending) for camera in cameras
         }
         summary = {
-            # The .npy physical-label contract is unchanged by sampling. Keep
-            # its schema version at 4; sampling details live in `sampling`.
-            "schema_version": 4,
+            # Schema 6 adds explicit native camera projection metadata.
+            # Legacy rectified exports retain their schema-4 contract.
+            "schema_version": 6 if native else 4,
             "stage": "six_view_refined_wilor_training_dataset",
             "schema_reference": "000865.npy",
             "fit_target_semantics": fit_target,
@@ -797,6 +876,8 @@ def main() -> int:
                 "mask_semantics": "automatic native RGB white-glove contours" if rgb_refined else None,
             },
             "sample_count": len(pending),
+            "image_layout": "shared_camera_frames" if native else "per_hand",
+            "annotation_policy": "require_both_hands" if args.require_both_hands else "available_hands",
             "sampling": sampling,
             "max_samples": args.max_samples,
             "image_count": len(list(image_root.glob("*.jpg"))),
@@ -804,8 +885,13 @@ def main() -> int:
             "side_counts": side_counts,
             "camera_counts": camera_counts,
             "rejected_count": len(rejected),
-            "image_size": list(rectification["image_size"]),
-            "K": K.tolist(),
+            "image_size": list(export_size),
+            "K": None if native else K.tolist(),
+            "camera_calibrations": {c: {**cal.to_dict(), "sha256": _sha256(dataset / "calibration" / f"{c}.json")} for c, cal in calibrations.items()},
+            "source_dataset": str(dataset),
+            "source_fit": str(fit_root),
+            "source_rectification": str(args.rectification.resolve()),
+            "projection_fields": {"joints_2d": "778 mesh vertex pixels (legacy field name)", "joints_3d": "21 physical-side model joints; add trans for camera coordinates"},
             "cameras": list(cameras),
             "view_filter": args.view_filter,
             "source": (
@@ -821,7 +907,7 @@ def main() -> int:
             },
             "mano_pose_representation": "rotation_matrix_full_mean",
             "mano_model": "MANO_RIGHT.pkl",
-            "image_space": "physical_rectified",
+            "image_space": args.image_space,
             "geometry_space": "physical_side",
             "mano_parameter_space": "right_canonical",
             "side_semantics": "physical_identity",
@@ -837,7 +923,7 @@ def main() -> int:
                 "max_nokov_fit_p95_mm": args.max_nokov_fit_p95_mm if nokov_reference else None,
             },
         }
-        if summary["image_count"] != len(pending) or summary["label_count"] != len(pending):
+        if summary["image_count"] != len({item["image_stem"] for item in pending}) or summary["label_count"] != len(pending):
             raise RuntimeError("paired image/label count mismatch before finalizing output")
         (temporary / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

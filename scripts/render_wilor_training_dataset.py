@@ -11,6 +11,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from wilor_label_projection import project_label_points
 from render_wilor_predictions import HAND_CONNECTIONS, LEFT_COLOR, RIGHT_COLOR
 
 
@@ -50,7 +51,7 @@ def _project_label_joints(sample: dict[str, Any]) -> np.ndarray:
     homogeneous = (intrinsics @ camera.T).T
     if not np.isfinite(homogeneous).all() or np.any(homogeneous[:, 2] <= 1e-8):
         raise ValueError("cannot project exported 21-joint hand")
-    return homogeneous[:, :2] / homogeneous[:, 2:3]
+    return project_label_points(camera, sample)
 
 
 def _draw_sample(frame: np.ndarray, sample: dict[str, Any], metadata: dict[str, Any]) -> None:
