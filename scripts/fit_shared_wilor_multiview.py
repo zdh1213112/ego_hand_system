@@ -20,8 +20,9 @@ import numpy as np
 import torch
 
 from ego_data.calibration import CameraCalibration
+from camera_models.kb import KB_PROJECTION_VERSION
 from gem_shared_geometry import (
-    associate_hands, project_base, project_base_torch, rigid_initialization, rotation_exp,
+    associate_hands, camera_domain_penalty_torch, project_base, project_base_torch, rigid_initialization, rotation_exp,
 )
 from mano_conventions import WILOR_RIGHT_CANONICAL
 
@@ -170,17 +171,17 @@ def fit_batch(items, shape, layer, calibrations, *, device, steps):
     for _ in range(steps):
         optimizer.zero_grad(set_to_none=True)
         points, _, _, _, _ = decode()
-        projections, depths = [], []
+        projections, domain_penalties = [], []
         for camera in cameras:
             xy, _, xyz = project_base_torch(calibrations[camera], points)
             projections.append(xy)
-            depths.append(xyz[..., 2])
+            domain_penalties.append(camera_domain_penalty_torch(calibrations[camera], xyz))
         residual = (torch.stack(projections, dim=1) - observed) / 10.
         robust = (torch.sqrt(1 + residual.square()) - 1).sum(-1)
         image_loss = (robust * weights).sum() / weights.sum().clamp_min(1)
         delta3d = (points - targets) / .04
         geometry_loss = ((torch.sqrt(1 + delta3d.square()) - 1).sum(-1) * target_mask).sum() / target_mask.sum().clamp_min(1)
-        depth_loss = (torch.relu(.02 - torch.stack(depths, 1)).square() * weights).sum() / weights.sum().clamp_min(1)
+        depth_loss = (torch.stack(domain_penalties, 1) * weights).sum() / weights.sum().clamp_min(1)
         loss = image_loss + .15 * geometry_loss + .12 * finger_delta.square().mean() + .10 * log_scale.square().mean() + 100 * depth_loss
         if not torch.isfinite(loss):
             raise FloatingPointError('non-finite shared MANO fit loss')
@@ -276,12 +277,13 @@ def main():
               'max_detections': args.max_detections, 'threshold_px': args.reprojection_threshold_px,
               'device': args.device, 'mano_model_dir': str(args.mano_model_dir.resolve()),
               'mano_convention': WILOR_RIGHT_CANONICAL, 'min_supporting_views': 2,
-              'no_independent_view_fallback': True}
+              'no_independent_view_fallback': True, 'camera_projection_style': KB_PROJECTION_VERSION}
     if output.exists():
         if not (output / 'summary.json').is_file() or not (output / 'shared_pose.pt').is_file():
             raise RuntimeError(f'incomplete shared output exists: {output}; use a new output directory')
         if json.loads((output / 'run_config.json').read_text()) != config:
-            raise RuntimeError(f'shared configuration changed: use a new output directory instead of {output}')
+            raise RuntimeError(f'shared configuration changed: use a new output directory instead of {output} '
+                               'for refitting; to reproject saved geometry only, run render_shared_wilor_multiview.py')
         print(f'[shared MANO] reuse completed fit: {output}', flush=True)
         return
     started = time.perf_counter()

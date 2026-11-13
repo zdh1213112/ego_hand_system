@@ -33,6 +33,7 @@ while (($#)); do
       echo "GEM options: --gem-root DIR --checkpoint FILE --soma-assets DIR --gem-python FILE"
       echo "Detector, camera selection, fusion, assists, video and all other flags follow the WiLoR experiment."
       echo "--gem-mode shared|independent|both (default shared): choose shared SOMA fitting or per-camera geometry."
+      echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos; both keeps both branches."
       echo "Shared mode projects one fitted skeleton/mesh into every raw view, without native-2D fallback."
       echo "--shared-steps N (100), --shared-batch-size N (32) configure shared SOMA fitting."
       echo "--final-renderer controls only independent-mode video; --final-video enables the chosen final video(s)."

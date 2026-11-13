@@ -5,6 +5,7 @@ import itertools
 import numpy as np
 
 from camera_models import project_points, unproject_points
+from camera_models.kb import theta_limit
 
 
 def project_base(camera, points):
@@ -160,7 +161,9 @@ def project_base_torch(camera, points):
         k1, k2, k3, k4 = camera.distortion
         radial = theta * (1 + theta2 * (k1 + theta2 * (k2 + theta2 * (k3 + theta2 * k4)))) / r
         u, v = camera.fx * x * radial + camera.cx, camera.fy * y * radial + camera.cy
-        valid = z > 1e-6
+        valid = (torch.isfinite(xyz).all(dim=-1)
+                 & (torch.linalg.vector_norm(xyz, dim=-1) > 1e-12)
+                 & ((x != 0) | (y != 0) | (z > 0)) & (theta < theta_limit(camera)))
     elif camera.model == 'DS':
         fx, fy, cx, cy, xi, alpha = camera.distortion
         d1 = torch.linalg.vector_norm(xyz, dim=-1).clamp_min(1e-8)
@@ -173,3 +176,16 @@ def project_base_torch(camera, points):
         u, v = camera.fx * x / z.clamp_min(1e-6) + camera.cx, camera.fy * y / z.clamp_min(1e-6) + camera.cy
         valid = z > 1e-6
     return torch.stack((u, v), dim=-1), valid, xyz
+
+
+def camera_domain_penalty_torch(camera, xyz):
+    """Keep fits in the camera's domain without forcing KB rays into z > 0."""
+    import torch
+    if camera.model == 'KB':
+        distance = torch.linalg.vector_norm(xyz, dim=-1)
+        radius = torch.sqrt(xyz[..., 0].square() + xyz[..., 1].square() + 1e-16)
+        theta = torch.atan2(radius, xyz[..., 2])
+        outside = torch.relu(theta - (theta_limit(camera) - 1e-6)) * distance
+        return torch.relu(.02 - distance).square() + outside.square()
+    # Preserve the existing depth constraint for the other camera models.
+    return torch.relu(.02 - xyz[..., 2]).square()

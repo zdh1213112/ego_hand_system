@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from ego_data.calibration import CameraCalibration
+from camera_models.kb import KB_PROJECTION_VERSION
 from ego_data.dataset import SequentialVideoReader
 from gem_shared_geometry import project_base
 from gem_multiview_inference import SOMA_TO_21
@@ -55,8 +56,8 @@ def draw_shared_skeleton(image, pixels, valid, side):
     color = (255, 255, 0) if side == 0 else (0, 255, 255)
     drawn, clipped = 0, 0
     for first, second in HAND_CONNECTIONS:
-        # Invalid projections (including behind-camera points) cannot define
-        # an edge. Being outside the image alone does not invalidate a point.
+        # Points outside the camera model's valid domain cannot define an
+        # edge. Being outside the image alone does not invalidate a point.
         if not (valid[first] and valid[second]):
             continue
         segment = clip_projected_bone(pixels[first], pixels[second], width, height)
@@ -127,7 +128,8 @@ def main(*, expected_format=None):
               'shared_mtime_ns': (args.shared / 'shared_pose.pt').stat().st_mtime_ns,
               'dataset': str(dataset), 'cameras': cameras, 'frame_count': len(rows),
               'tile_width': args.tile_width, 'mesh_style': MESH_STYLE, 'video_codec': args.video_codec,
-              'skeleton_render_style': SKELETON_RENDER_STYLE}
+              'skeleton_render_style': SKELETON_RENDER_STYLE,
+              'camera_projection_style': KB_PROJECTION_VERSION}
     if detector_overlay is not None:
         config['detector_overlay'] = detector_overlay.config
     meta = output.with_suffix('.json')

@@ -12,6 +12,8 @@ from render_gem_multiview import draw_mesh_surface
 from shared_mesh_overlay import (SharedManoMeshOverlay, draw_shared_mesh,
                                  mesh_projection_fingerprint)
 from validate_matching_wilor_mesh import audit_mesh
+from camera_models import project_points
+from render_shared_gem_multiview import draw_shared_skeleton
 
 
 def calibration(model, offset):
@@ -41,6 +43,21 @@ def test_shared_mesh_layer_matches_original_renderer_pixels(model, side):
     _, moved_fingerprint = draw_shared_mesh(after.copy(), hand, topology, moved)
     assert fingerprint != moved_fingerprint
     assert fingerprint != mesh_projection_fingerprint(xyz, topology['left' if side else 'right'], cal)
+
+
+def test_shared_mesh_and_skeleton_draw_visible_kb_negative_z_geometry():
+    cal = CameraCalibration('wide', 'optical', 'KB', (320, 200),
+        [[60, 0, 160], [0, 60, 100], [0, 0, 1]], [0, 0, 0, 0], np.eye(4))
+    vertices = np.array([[1., -.15, -.05], [1., .15, -.05], [1., 0, -.25]])
+    image = np.zeros((200, 320, 3), np.uint8)
+    drawn, _ = draw_shared_mesh(image, {'side': 1, 'vertices_base_m': vertices},
+                                {'right': [[0, 1, 2]]}, cal)
+    assert drawn and image.any()
+    points = np.full((21, 3), np.nan)
+    points[0], points[5] = vertices[:2]
+    xy, valid = project_points(cal, points)
+    result = draw_shared_skeleton(image, xy, valid, 1)
+    assert result['visible_joint_count'] == 2 and result['drawn_bone_count'] == 1
 
 
 def test_overlay_uses_shared_hand_coverage_and_rejects_wrong_dataset(tmp_path):

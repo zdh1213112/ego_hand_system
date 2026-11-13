@@ -30,7 +30,8 @@ while (($#)); do
       echo "  --undistort-fov-deg N   Horizontal pinhole FOV (default 120; 0 < N < 175)."
       echo "  --undistort-width W --undistort-height H   Optional even output resolution."
       echo "  --original-video      Also render a hybrid final video on the original fisheye frames."
-      echo "                        Maps 3D, native-2D fallback and boxes; disabled by --no-video/--stop-after-inference."
+      echo "                        For legacy/both modes; maps 3D, native-2D fallback and boxes."
+      echo "                        Disabled by shared mode, --no-video or --stop-after-inference."
       echo "Default resolution matches input; FFV1 storage is lossless. Extrinsics/timestamps are preserved."
       echo "All baseline options below are forwarded unchanged. Use a separate output directory for each FOV."
       bash "$ROOT/scripts/run_multiview_wilor_experiment.sh" --help

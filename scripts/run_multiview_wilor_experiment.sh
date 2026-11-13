@@ -93,6 +93,7 @@ TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}
 usage() {
   echo "Optional: --final-video generates the final video(s) selected by --wilor-mode; disabled by default."
   echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
+  echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos. Both keeps both branches."
   echo "Shared MANO fitting: --shared-steps N (100), --shared-batch-size N (32). --no-diagnostic-video skips only the diagnostic video."
   echo "With the default hybrid renderer, final_only_Nview.mp4 uses the original skeleton and per-camera WiLoR meshes. Shared mode has its own final_shared_Nview.mp4."
   echo "WiLoR --external-boxes DIR reuses saved detector boxes (DIR/camera*/predictions.jsonl) and does not reload YOLO weights."
@@ -194,11 +195,19 @@ case "$WILOR_MODE" in legacy|shared|both) ;; *) echo "--wilor-mode must be legac
   echo "Shared steps/batch size must be positive integers" >&2; exit 2;
 }
 
+# Shared fitting reads calibrated per-camera predictions directly. The
+# independent fusion/temporal branch is needed only for legacy/independent/both.
+RUN_LEGACY_BRANCH=1
+if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" == shared ]] ||
+   [[ "$POSE_BACKEND" == gem && "$GEM_MODE" == shared ]]; then
+  RUN_LEGACY_BRANCH=0
+fi
+
 if ! [[ "$ORIGINAL_VIDEO_ENABLED" =~ ^[01]$ ]]; then
   echo "EGO_WILOR_ORIGINAL_VIDEO must be 0 or 1" >&2
   exit 2
 fi
-if ((ORIGINAL_VIDEO_ENABLED)) && [[ -z "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
+if ((RUN_LEGACY_BRANCH && ORIGINAL_VIDEO_ENABLED)) && [[ -z "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
   echo "Original-frame rendering requires the undistorted experiment entry point" >&2
   exit 2
 fi
@@ -671,7 +680,9 @@ fi
 if ((SAM3_GLOVE_ASSIST)); then
   require_complete_or_absent "$SAM3_PREDICTIONS" summary.json
 fi
-require_complete_or_absent "$FUSION" summary.json
+if ((RUN_LEGACY_BRANCH)); then
+  require_complete_or_absent "$FUSION" summary.json
+fi
 
 if [[ ! -f "$NORMALIZED/manifest.json" ]]; then
   echo "[multiview] normalize and synchronize ${CAMERAS[*]}"
@@ -799,7 +810,7 @@ elif ((SAM3_GLOVE_ASSIST)); then
   echo "[multiview] reuse SAM3-assisted $POSE_LABEL predictions"
 fi
 
-if [[ ! -f "$FUSION/summary.json" ]]; then
+if ((RUN_LEGACY_BRANCH)) && [[ ! -f "$FUSION/summary.json" ]]; then
   if [[ -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
     echo "[multiview] fuse calibrated undistorted pinhole rays with RANSAC"
   elif [[ "$INPUT_KIND" == "session" ]]; then
@@ -865,8 +876,10 @@ if [[ ! -f "$FUSION/summary.json" ]]; then
     --temporal-hand-identity-swap-min-cost 0.90
   )
   run_python "$ROOT/scripts/fuse_multiview_wilor_guided.py" "${FUSION_ARGS[@]}"
-else
+elif ((RUN_LEGACY_BRANCH)); then
   echo "[multiview] reuse fused result"
+else
+  echo "[multiview] shared-only mode: skip independent fusion and temporal processing"
 fi
 
 if [[ "$POSE_BACKEND" == gem && "$GEM_MODE" != independent ]]; then
@@ -909,7 +922,7 @@ if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" != legacy ]]; then
   fi
 fi
 
-if [[ "$NO_VIDEO" == 0 && "$NO_DIAGNOSTIC_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
+if ((RUN_LEGACY_BRANCH)) && [[ "$NO_VIDEO" == 0 && "$NO_DIAGNOSTIC_VIDEO" == 0 && ! -f "$VIDEO" ]]; then
   echo "[multiview] render ${#CAMERAS[@]}-view diagnostic video"
   run_python "$ROOT/scripts/render_multiview_wilor.py" \
     --dataset "$NORMALIZED" --fusion "$FUSION" \
@@ -938,7 +951,7 @@ if [[ "$POSE_BACKEND" == wilor ]]; then
 fi
 
 RENDER_FINAL=0
-if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && ( "$POSE_BACKEND" != gem || "$GEM_MODE" != shared ) && ( "$POSE_BACKEND" != wilor || "$WILOR_MODE" != shared ) ]]; then
+if ((RUN_LEGACY_BRANCH)) && [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 ]]; then
   if [[ ! -f "$FINAL_VIDEO" ]]; then
     RENDER_FINAL=1
   elif [[ "$FINAL_RENDERER" == hybrid ]]; then
@@ -985,7 +998,7 @@ if [[ "$RENDER_FINAL" == 1 ]]; then
   fi
 fi
 
-if [[ "$NO_VIDEO" == 0 && "$ORIGINAL_VIDEO_ENABLED" == 1 ]]; then
+if ((RUN_LEGACY_BRANCH)) && [[ "$NO_VIDEO" == 0 && "$ORIGINAL_VIDEO_ENABLED" == 1 ]]; then
   if [[ ! -f "$ORIGINAL_VIDEO" || ! -f "${ORIGINAL_VIDEO%.mp4}.json" ]]; then
     echo "[multiview] render undistorted results on original fisheye frames (hybrid 3D/2D)"
     run_python "$ROOT/scripts/render_hybrid_multiview.py" \
@@ -996,8 +1009,10 @@ if [[ "$NO_VIDEO" == 0 && "$ORIGINAL_VIDEO_ENABLED" == 1 ]]; then
   fi
 fi
 
-echo "[multiview] finished: $FUSION"
-cat "$FUSION/summary.json"
+if ((RUN_LEGACY_BRANCH)); then
+  echo "[multiview] finished: $FUSION"
+  cat "$FUSION/summary.json"
+fi
 if [[ "$POSE_BACKEND" == gem && "$GEM_MODE" != independent ]]; then
   echo "[multiview] shared SOMA result: $SHARED_FUSION"
   cat "$SHARED_FUSION/summary.json"

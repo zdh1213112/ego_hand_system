@@ -9,7 +9,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from ego_data.calibration import CameraCalibration
 from gem_shared_geometry import (associate_hands, project_base, project_base_torch,
-                                 rigid_initialization, rotation_exp)
+                                 camera_domain_penalty_torch, rigid_initialization, rotation_exp)
 
 
 def camera(model='KB', offset=0.):
@@ -35,6 +35,50 @@ def test_differentiable_projection_matches_calibration(model):
     np.testing.assert_array_equal(valid, good)
     actual.sum().backward()
     assert torch.isfinite(points.grad).all()
+
+
+def test_kb_differentiable_projection_and_fit_domain_allow_wide_rays():
+    cal = camera()
+    angles = torch.tensor(np.radians([0., 89., 90., 92., 99., 120.]), dtype=torch.float64)
+    xyz = torch.stack((angles.sin(), torch.zeros_like(angles), angles.cos()), -1).requires_grad_()
+    expected, good, _ = project_base(cal, xyz.detach().numpy())
+    actual, valid, local = project_base_torch(cal, xyz)
+    np.testing.assert_allclose(actual.detach(), expected, atol=1e-6)
+    np.testing.assert_array_equal(valid, good)
+    assert valid.all()
+    penalty = camera_domain_penalty_torch(cal, local)
+    assert not penalty.any()
+    (actual.sum() + penalty.sum()).backward()
+    assert torch.isfinite(xyz.grad).all()
+    pinhole = camera('PINHOLE')
+    assert camera_domain_penalty_torch(pinhole, xyz.detach())[3:].min() > 0
+    invalid = torch.tensor([[0., 0, -1], [0, 0, 0], [float('nan'), 0, 1]], dtype=torch.float64)
+    assert not project_base_torch(cal, invalid)[1].any()
+
+
+def test_kb_torch_projection_respects_monotonic_domain():
+    cal = replace(camera(), distortion=np.array([-1 / 3, 0., 0., 0.]))
+    angles = torch.tensor([.8, 1.1], dtype=torch.float64)
+    xyz = torch.stack((angles.sin(), torch.zeros_like(angles), angles.cos()), -1).requires_grad_()
+    _, good, _ = project_base(cal, xyz.detach().numpy())
+    _, valid, local = project_base_torch(cal, xyz)
+    np.testing.assert_array_equal(valid, good)
+    penalty = camera_domain_penalty_torch(cal, local)
+    assert penalty[0] == 0 and penalty[1] > 0
+    penalty.sum().backward()
+    assert torch.isfinite(xyz.grad).all()
+
+
+def test_kb_association_keeps_camera_seeing_hand_beyond_90_degrees():
+    cals = {'a': camera(offset=-.06), 'b': camera(offset=.06), 'c': camera(offset=.12)}
+    transform = cals['c'].T_base_camera.copy()
+    transform[:3, :3] = rotation_exp(torch.tensor([0., np.radians(105.), 0.], dtype=torch.float64)).numpy()
+    cals['c'] = replace(cals['c'], T_base_camera=transform)
+    expected = hand_points()
+    assert (project_base(cals['c'], expected)[2][:, 2] < 0).all()
+    hands = associate_hands(records_for_hand(expected, cals), cals)
+    assert len(hands) == 1 and len(hands[0]['selected']) == 3
+    np.testing.assert_allclose(hands[0]['points'], expected, atol=1e-6)
 
 
 def test_rotation_zero_has_finite_nonzero_derivatives_and_proper_rotations():

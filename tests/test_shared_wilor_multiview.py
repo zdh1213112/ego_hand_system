@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 import json
 import sys
 from types import SimpleNamespace
@@ -102,6 +103,22 @@ def test_multiview_fitting_reduces_residual_and_saved_parameters_reproduce_both(
     assert valid and len(support) == 3
     only_one = dict(item, selected={'a': item['selected']['a']})
     assert not fit_quality(model, only_one, cals, 30.)[0]
+
+
+def test_fitting_retains_kb_view_with_negative_camera_z(mano):
+    item, cals = synthetic_candidate(mano, 1)
+    transform = cals['c'].T_base_camera.copy()
+    transform[:3, :3] = rotation_exp(torch.tensor([0., np.radians(105.), 0.], dtype=torch.float64)).numpy()
+    cals['c'] = replace(cals['c'], T_base_camera=transform)
+    pixels, valid, xyz = project_base(cals['c'], item['points'])
+    assert valid.all() and (xyz[:, 2] < 0).all()
+    item['selected']['c']['pixels'] = pixels
+    fitted, _ = fit_batch([item], item['seed']['mano']['betas'], mano, cals, device='cpu', steps=100)
+    model = fitted[0]
+    valid, views, support = fit_quality(model, item, cals, 30.)
+    assert valid and 'c' in support
+    assert views['c']['median_px'] < 1.
+    assert (project_base(cals['c'], model['joints_base_m'])[2][:, 2] < 0).all()
 
 
 def test_amp_seed_projection_is_a_proper_rotation():

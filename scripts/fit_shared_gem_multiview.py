@@ -14,8 +14,10 @@ import numpy as np
 import torch
 
 from ego_data.calibration import CameraCalibration
+from camera_models.kb import KB_PROJECTION_VERSION
 from gem_multiview_inference import SOMA_TO_21
-from gem_shared_geometry import associate_hands, project_base, project_base_torch, rigid_initialization, rotation_exp
+from gem_shared_geometry import (associate_hands, camera_domain_penalty_torch, project_base,
+                                 project_base_torch, rigid_initialization, rotation_exp)
 
 
 def signature(path):
@@ -86,17 +88,17 @@ def fit_batch(items, shape, geometry, calibrations, *, device, steps):
         optimizer.zero_grad(set_to_none=True)
         joints, _, _, _, _ = decode()
         points = joints[:, list(SOMA_TO_21)]
-        projections, depths = [], []
+        projections, domain_penalties = [], []
         for camera in cameras:
             xy, _, xyz = project_base_torch(calibrations[camera], points)
             projections.append(xy)
-            depths.append(xyz[..., 2])
+            domain_penalties.append(camera_domain_penalty_torch(calibrations[camera], xyz))
         residual = (torch.stack(projections, dim=1) - observed) / 10.0
         robust = (torch.sqrt(1 + residual.square()) - 1).sum(dim=-1)
         image_loss = (robust * weights).sum() / weights.sum().clamp_min(1)
         delta3d = (points - targets) / 0.04
         geometry_loss = ((torch.sqrt(1 + delta3d.square()) - 1).sum(-1) * target_mask).sum() / target_mask.sum().clamp_min(1)
-        depth_loss = (torch.relu(0.02 - torch.stack(depths, dim=1)).square() * weights).sum() / weights.sum().clamp_min(1)
+        depth_loss = (torch.stack(domain_penalties, dim=1) * weights).sum() / weights.sum().clamp_min(1)
         loss = (image_loss + 0.15 * geometry_loss + 0.12 * finger_delta.square().mean()
                 + 0.10 * log_scale.square().mean() + 100 * depth_loss)
         if not torch.isfinite(loss):
@@ -189,13 +191,14 @@ def main():
               'max_detections': args.max_detections, 'threshold_px': args.reprojection_threshold_px,
               'device': args.device, 'gem_root': str(args.gem_root.resolve()),
               'soma_assets': str(args.soma_assets.resolve()), 'min_supporting_views': 2,
-              'no_independent_view_fallback': True}
+              'no_independent_view_fallback': True, 'camera_projection_style': KB_PROJECTION_VERSION}
     if output.exists():
         summary_path = output / 'summary.json'
         if not summary_path.is_file() or not (output / 'shared_pose.pt').is_file():
             raise RuntimeError(f'incomplete shared output exists: {output}; use a new output directory')
         if json.loads((output / 'run_config.json').read_text()) != config:
-            raise RuntimeError(f'shared configuration changed: use a new output directory instead of {output}')
+            raise RuntimeError(f'shared configuration changed: use a new output directory instead of {output} '
+                               'for refitting; to reproject saved geometry only, run render_shared_gem_multiview.py')
         print(f'[shared] reuse completed fit: {output}', flush=True)
         return
     output.mkdir(parents=True)

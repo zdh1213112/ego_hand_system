@@ -10,6 +10,11 @@
 | `shared`（默认） | 为每帧每只手拟合一份 MANO 参数，骨架和网格共同投影到各路，没有独立视角回退 |
 | `both` | 复用同一次检测与 WiLoR 推理；`final_only_Nview.mp4` 为原流程骨架＋各路原始网格，`final_shared_Nview.mp4` 为共享三维骨架＋网格 |
 
+纯 `shared` 直接从同步数据、相机标定和各路 WiLoR 预测执行共享关联与 MANO 拟合，
+不执行原流程融合、时序处理、诊断视频或原流程回投影视频，也不检查或读取原流程融合
+缓存。共享视频按 `--final-video` 生成，`--no-video` 只保留所需三维处理。
+`both` 保留两个分支；切换模式复用已有预测，共享缓存不会替代原流程结果。
+
 共享模式直接处理原始图像，原图入口不做去畸变。三维拟合与显示使用标定中的相机外参和原始 KB、GEN-DS 或针孔模型。检测框直接读取各相机原始检测结果，与共享拟合是否采用该路观测无关；未参与融合的检测和没有有效共享三维模型时的检测也会显示。
 
 框的坐标、左右手类别及置信度保持检测器输出；画面文字恢复为之前的 `FINAL L / FINAL R`，不显示置信度，以统一对比视频的标注风格。这里的 `FINAL` 仅沿用共享结果的显示标签，不表示该检测参与了融合；框始终来自检测器。原始置信度仍完整保存在投影审计文件中。同一检测框的 WiLoR 左右手两种姿态假设只画一次；不按共享手的数量筛框，不平滑或扩展框，也不从三维骨架重新生成框。共享渲染器使用 `--detector-predictions RAW_WILOR_PREDICTIONS`，主脚本自动传入原始预测目录，原始检测来源文件的 SHA256 写入渲染元数据。
@@ -108,6 +113,21 @@ OUTPUT/
 
 视频叠加检测框、21 点骨架与半透明网格，左蓝 `#1964ff`、右橙 `#ff7b24`，透明度 55%（不透明度 0.45）。
 
-共享视频的骨架连接线会裁切到图像边界：投影有效但位于画面外的关节点仍用于连线，仅隐藏其关节点圆点；不会因为一个端点越界就丢掉整条线。相机后方或非有限的无效投影仍不参与绘制。此修正只影响边缘显示，不改变三维关节、网格、相机投影或拟合结果。渲染元数据中的 `skeleton_render_style=valid_projection_segment_clipping_v2` 会使旧版渲染缓存自动更新；投影日志记录 `drawn_bone_count` 和 `clipped_bone_count`。
+共享视频的骨架连接线会裁切到图像边界：投影有效但位于画面外的关节点仍用于连线，仅隐藏其关节点圆点；不会因为一个端点越界就丢掉整条线。超出相机模型有效域或非有限的无效投影仍不参与绘制。此裁切只影响边缘显示，不改变三维关节、网格、相机投影或拟合结果。渲染元数据中的 `skeleton_render_style=valid_projection_segment_clipping_v2` 会使旧版渲染缓存自动更新；投影日志记录 `drawn_bone_count` 和 `clipped_bone_count`。
+
+KB 原始鱼眼的投影、反投影使用球面角 `theta=atan2(sqrt(x*x+y*y), z)`，支持标定模型单调分支内超过 90° 的射线。`z<=0` 不再单独导致 KB 关节、网格面或关联观测失效；针孔相机仍要求正深度。KB 有效域止于径向多项式的第一个驻点或 `theta=pi`，拒绝零向量、反向光轴和不可逆分支，图像边界另由渲染器裁切。共享拟合也按这个角域和到相机的距离约束 KB 几何，不再把合法负 z 点推回前半球。
+
+元数据中的 `camera_projection_style=kb_spherical_monotonic_v2` 参与共享视频缓存判断。已有三维结果可以直接重新投影，无需重新检测或拟合：
+
+```bash
+conda run -n ego-hand python scripts/render_shared_wilor_multiview.py \
+  --dataset OUTPUT/normalized_multiview \
+  --shared OUTPUT/fusion_multiview_shared_wilor \
+  --detector-predictions OUTPUT/wilor_multiview \
+  --output OUTPUT/fusion_multiview_shared_wilor/final_shared_4view.mp4 \
+  --cameras camera0 camera1 camera2 camera3 --max-frames 0 --video-codec auto
+```
+
+这里将 `OUTPUT` 替换为已有实验目录。仅重渲染保留原先的三维拟合、关联选择和质量记录；若要使用新的反投影及拟合约束重新求解三维，请为拟合指定新输出目录。原拟合缓存的配置检查会阻止把旧解当作新算法结果复用。
 
 三维一致性指显示内容来自同一模型，不等于真实三维精度。检测或二维姿态错误、原图畸变下的网络误差、遮挡、窄基线和错误关联仍可能影响拟合。当前最多关联一只左手和一只右手，不进行多人的身份跟踪；共享参数按帧拟合，不套用原有骨架独立平滑，以免骨架与网格脱离。对比时应同时看有效帧覆盖率、回退数量和重投影误差；原流程的二维回退与共享三维模型不是相同的误差统计对象。

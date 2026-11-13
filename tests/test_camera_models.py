@@ -13,11 +13,78 @@ sys.path.insert(0, str(SCRIPTS))
 
 from camera_models import RectificationOptions, create_stereo_rectification, project_points, unproject_points
 from camera_models.double_sphere import unproject as unproject_double_sphere
+from camera_models.kb import theta_limit
 from ego_data.calibration import CameraCalibration, StereoCalibration
 from ego_data.calibration import stereo_from_ego_yaml
 
 
 class CameraModelTests(unittest.TestCase):
+    def test_kb_spherical_projection_crosses_90_degrees_without_folding(self):
+        K = np.array([[200., 0, 500.], [0, 210., 400.], [0, 0, 1.]])
+        camera = CameraCalibration('wide', 'optical', 'KB', (1000, 800), K, np.zeros(4), np.eye(4))
+        angles = np.radians([0., 85., 90., 92., 99., 120.])
+        points = np.column_stack((np.sin(angles), np.zeros(len(angles)), np.cos(angles)))
+        pixels, valid = project_points(camera, points)
+        self.assertTrue(valid.all())
+        np.testing.assert_allclose(pixels[:, 0], 500. + 200. * angles, atol=1e-10)
+        np.testing.assert_allclose(pixels[:, 1], 400., atol=1e-10)
+        rays, valid = unproject_points(camera, pixels)
+        self.assertTrue(valid.all())
+        np.testing.assert_allclose(rays, points, atol=1e-10)
+        self.assertTrue((rays[3:, 2] < 0).all())
+
+    def test_kb_front_hemisphere_matches_opencv(self):
+        K = np.array([[505., 0, 944.], [0, 504., 590.], [0, 0, 1.]])
+        D = np.array([.081, -.023, .0069, -.00083])
+        camera = CameraCalibration('wide', 'optical', 'KB', (1920, 1200), K, D, np.eye(4))
+        points = np.array([[0, 0, 1], [.2, -.3, .8], [1., .8, .001]])
+        expected, _ = cv2.fisheye.projectPoints(points[:, None], np.zeros(3), np.zeros(3), K, D)
+        actual, valid = project_points(camera, points)
+        self.assertTrue(valid.all())
+        np.testing.assert_allclose(actual, expected[:, 0], atol=1e-9)
+
+    def test_kb_distorted_spherical_roundtrip_for_mixed_angles(self):
+        camera = CameraCalibration('wide', 'optical', 'KB', (1920, 1200),
+            [[505., 0, 944.], [0, 504., 590.], [0, 0, 1.]],
+            [.081, -.023, .0069, -.00083], np.eye(4))
+        rng = np.random.default_rng(42)
+        angles = np.concatenate(([0., 1e-9], rng.uniform(0., min(theta_limit(camera) - .01, 2.), 1000)))
+        azimuth = rng.uniform(-np.pi, np.pi, len(angles))
+        points = np.column_stack((np.sin(angles) * np.cos(azimuth),
+                                  np.sin(angles) * np.sin(azimuth), np.cos(angles)))
+        pixels, valid = project_points(camera, points)
+        self.assertTrue(valid.all())
+        rays, valid = unproject_points(camera, pixels)
+        self.assertTrue(valid.all())
+        np.testing.assert_allclose(rays, points, atol=1e-10)
+
+    def test_kb_rejects_ambiguous_domain_and_invalid_points(self):
+        K = np.array([[100., 0, 200.], [0, 100., 200.], [0, 0, 1.]])
+        # rho(theta) = theta - theta^3/3 folds beyond theta = 1 rad.
+        camera = CameraCalibration('fold', 'optical', 'KB', (400, 400), K,
+                                   [-1 / 3, 0, 0, 0], np.eye(4))
+        self.assertAlmostEqual(theta_limit(camera), 1.)
+        angles = np.array([.8, 1.1])
+        points = np.column_stack((np.sin(angles), np.zeros(2), np.cos(angles)))
+        pixels, valid = project_points(camera, points)
+        np.testing.assert_array_equal(valid, [True, False])
+        self.assertTrue(np.isnan(pixels[1]).all())
+        rays, valid = unproject_points(camera, [pixels[0], [300., 200.], [np.nan, 0]])
+        np.testing.assert_array_equal(valid, [True, False, False])
+        np.testing.assert_allclose(rays[0], points[0], atol=1e-9)
+        self.assertTrue(np.isnan(rays[1:]).all())
+        for distortion in (np.zeros(4), [-1 / 3, 0, 0, 0]):
+            camera = CameraCalibration('invalid', 'optical', 'KB', (400, 400), K, distortion, np.eye(4))
+            pixels, valid = project_points(camera, [[0, 0, 0], [0, 0, -1], [np.nan, 0, 1]])
+            self.assertFalse(valid.any())
+            self.assertTrue(np.isnan(pixels).all())
+
+    def test_pinhole_still_rejects_nonpositive_depth(self):
+        camera = CameraCalibration('pinhole', 'optical', 'PINHOLE', (100, 100),
+                                   [[50, 0, 50], [0, 50, 50], [0, 0, 1]], [], np.eye(4))
+        _, valid = project_points(camera, [[1., 0, -.1], [1., 0, 0], [1., 0, .1]])
+        np.testing.assert_array_equal(valid, [False, False, True])
+
     def test_kb_unprojection_roundtrip_and_invalid_pixels(self):
         K = np.asarray([[505.0, 0.0, 800.0], [0.0, 505.0, 600.0], [0.0, 0.0, 1.0]])
         D = np.asarray([0.076, -0.015, 0.0027, -0.00009])

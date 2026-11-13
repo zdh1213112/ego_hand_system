@@ -1,5 +1,10 @@
 # EGO Hand System
 
+USB **RealSense D415** 手部表面扫描现已提供独立入口：
+`./scripts/run_realsense_hand_scan.sh scan`。支持 RGB-D 预览、手部选框、
+多视角点云配准、TSDF 融合及彩色 PLY / OBJ 网格导出；详见
+[D415 手部扫描操作说明](docs/REALSENSE_HAND_SCAN_ZH.md)。扫描时保持手部姿态固定，缓慢移动相机。
+
 面向头戴式双目及多视角相机的离线手部重建系统，支持 WiLoR/MANO 和 GEM-X/SOMA
 骨架与网格重建。当前主要支持两种输入：
 
@@ -183,6 +188,11 @@ WiLoR 用 MANO 手模型，GEM-X 用 SOMA 手模型。共享模式的做法相�
 - **`both`：**在一次运行中复用同一份检测和网络推理结果，再额外做共享拟合，方便比较。
   WiLoR 与 GEM 是两种不同网络，运行两个入口时仍需分别推理，并使用不同输出目录。
 
+纯 `shared` 只执行输入归一化与同步、检测与姿态推理、可选观测辅助、共享关联与模型
+拟合，以及请求的共享视频渲染。它跳过原流程融合、时序处理及原流程诊断视频，也不检查
+或读取原流程融合目录；已有不完整的原流程融合缓存不会阻塞共享分支。`both` 保留两个
+分支；从 `shared` 切换到 `both` 时复用已有预测，再补齐原流程结果。
+
 未指定模式时，两个入口都选择 `shared`。环境变量 `EGO_WILOR_MODE`、`EGO_GEM_MODE`
 可改变对应入口的默认值；命令行显式传入模式的优先级最高。
 
@@ -274,7 +284,8 @@ GEM 输出目录/
 检测框来自图像检测，不代表该路一定参与了共享拟合；WiLoR 共享视频会显示各路原始
 检测框，即使该帧没有有效共享手模型。网格配色为左手蓝、右手橙，透明度为 55%。
 
-未跳过诊断视频时，`fusion_multiview/diagnostic_Nview.mp4` 用于查看原流程的融合
+`legacy` / `independent` 或 `both` 模式未跳过诊断视频时，
+`fusion_multiview/diagnostic_Nview.mp4` 用于查看原流程的融合
 状态，不应当作共享网格最终视频。手套标记、SAM3 或几何身份选择等分支会改变融合
 目录名，共享目录在实际融合目录名后添加 `_shared_wilor` 或 `_shared_gem`。
 
@@ -309,7 +320,7 @@ conda run --no-capture-output -n ego-hand \
 | --- | --- |
 | `--final-video` | 生成所选模式的最终视频；默认不生成最终视频 |
 | `--no-diagnostic-video` | 只跳过诊断视频，保留请求的最终视频 |
-| `--no-video` | 跳过诊断和最终视频，保留推理、融合和所选模式的共享拟合数据 |
+| `--no-video` | 跳过诊断和最终视频，保留推理及所选模式必要的三维处理数据 |
 | `--final-renderer hybrid` | 默认值；`final_only` 显示原流程骨架和各路独立网格 |
 | `--final-renderer fused` | `final_only` 使用骨架渲染入口，不画网格；不影响 `final_shared` |
 | `--max-frames 60` / `0` | 先测试 60 个同步帧 / 处理全部同步帧 |
@@ -469,6 +480,12 @@ SAM3、三角化、3D 融合或时序修正。这个 MCAP 没有 `camera_info`�
 [Orbbec 多目手部与 OmniEgoCap 输入适配](docs/ORBBEC_MULTIVIEW_OMNIEGOCAP.md)。
 最终人体头部轨迹需安装外参与地面高度；该指南也记录本次已确认的 IMU 位置、首帧中立姿态、
 约 1.70 m 高度近似方案。
+
+需要逐环节查看“原始鱼眼图、二维候选、同手关联、三维射线、RANSAC 内点、
+时序处理和最终视频回退”时，可使用独立调试工具
+[`scripts/debug_multiview_pipeline.py`](scripts/debug_multiview_pipeline.py)。
+运行方式和真实数据／教学实验的区别见
+[`docs/MULTIVIEW_PIPELINE_DEBUG_ZH.md`](docs/MULTIVIEW_PIPELINE_DEBUG_ZH.md)。
 
 `recordings/20260928` 这类录制目录包含四路 MP4、各路 `*_pts.csv` 和
 `*_calibration_camera.yaml`。规范化器使用 YAML 中的相机 ID 建立映射：
