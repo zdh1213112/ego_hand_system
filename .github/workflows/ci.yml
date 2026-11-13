@@ -42,4 +42,5 @@ jobs:
             tests/test_run_basalt_offline.py \
             tests/test_run_offline_script.py \
             tests/test_python_environment_setup.py \
-            tests/test_wilor_inference_io.py
+            tests/test_wilor_inference_io.py \
+            tests/test_shared_inference_entry.py

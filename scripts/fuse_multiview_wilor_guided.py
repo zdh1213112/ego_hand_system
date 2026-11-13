@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 
 # Fusion launches several processes and all of its linear algebra matrices are
 # tiny.  A BLAS thread pool inside every worker only oversubscribes the CPU.
