@@ -12,10 +12,10 @@ sys.path.insert(0, str(SCRIPTS))
 
 from ego_data.calibration import CameraCalibration, StereoCalibration, quaternion_transform
 from ego_data.pairing import pair_timestamps_ns, pairing_statistics
-from ego_data.genrobot_mcap import h264_nal_types
+from ego_data.h264 import h264_nal_types
 
 
-class GenrobotDataTests(unittest.TestCase):
+class SensorDataTests(unittest.TestCase):
     def test_quaternion_transform_and_relative_extrinsics(self):
         left_transform = quaternion_transform([0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
         right_transform = quaternion_transform([-0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])

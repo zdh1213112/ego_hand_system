@@ -30,7 +30,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/run_multiview_wilor_label_export.sh \
-    --experiment /path/to/six_view_experiment \
+    --experiment /path/to/orbbec_four_view_experiment \
     [--fusion /path/to/strict_fusion] [--output /path/to/label_output]
 
 Options:
@@ -267,7 +267,7 @@ if [[ ! -f "$MANO_INPUT" || ! -f "${MANO_INPUT%.npz}.json" || ! -f "$RECTIFICATI
     echo "Incomplete MANO preparation exists in $OUTPUT; preserve it and use a new output directory." >&2
     exit 2
   fi
-  echo "[labels] convert strict six-view fusion to shared MANO observations"
+  echo "[labels] convert calibrated multiview fusion to shared MANO observations"
   run_python "$ROOT/scripts/prepare_multiview_mano_input.py" \
     --fusion "$FUSION" --dataset "$NORMALIZED" \
     --output "$MANO_INPUT" --rectification-output "$RECTIFICATION" \

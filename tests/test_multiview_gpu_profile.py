@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
 import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -11,6 +15,45 @@ INFERENCE = ROOT / "scripts" / "wilor_multiview_inference.py"
 
 
 class MultiviewGpuProfileTests(unittest.TestCase):
+    def test_orbbec_defaults_and_resume_with_legacy_unused_camera_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            detector = root / "detector.pt"
+            detector.touch()
+            session = root / "session"
+            session.mkdir()
+            mcap = root / "recording.mcap"
+            mcap.touch()
+            # Run the real configuration/resume logic in the current test
+            # interpreter, without requiring a locally named Conda environment.
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            conda = bin_dir / "conda"
+            conda.write_text('#!/bin/sh\nshift 4\nexec "$@"\n')
+            conda.chmod(0o755)
+            env = dict(os.environ, PATH=f"{bin_dir}:{Path(sys.executable).parent}:{os.environ['PATH']}")
+            for option, source in (("--session", session), ("--mcap", mcap)):
+                with self.subTest(input=option):
+                    output = root / (option.removeprefix("--") + "-output")
+                    for folder, marker in (("normalized_multiview", "manifest.json"), ("wilor_multiview", "summary.json")):
+                        stage = output / folder
+                        stage.mkdir(parents=True)
+                        (stage / marker).write_text("{}\n")
+                    command = [str(RUNNER), option, str(source), "--output", str(output),
+                               "--detector", str(detector), "--stop-after-inference"]
+                    result = subprocess.run(command, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    path = output / "run_config.json"
+                    config = json.loads(path.read_text())
+                    self.assertEqual(config["cameras"], [f"camera{i}" for i in range(4)])
+                    self.assertEqual(config["reference_camera"], "camera0")
+                    self.assertEqual(config["anchor_cameras"], ["camera0", "camera1"])
+                    config["camera_confidences"].update(camera4=0.1, camera5=0.1)
+                    path.write_text(json.dumps(config))
+                    resumed = subprocess.run(command, env=env, capture_output=True, text=True)
+                    self.assertEqual(resumed.returncode, 0, resumed.stderr)
+                    self.assertIn("reuse WiLoR predictions", resumed.stdout)
+
     def test_runner_exposes_both_gpu_profiles(self):
         result = subprocess.run(
             [str(RUNNER), "--help"], check=True, text=True,

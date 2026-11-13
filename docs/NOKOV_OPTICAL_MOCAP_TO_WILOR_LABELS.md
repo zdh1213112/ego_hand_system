@@ -86,9 +86,8 @@ ego_frame_index,ego_timestamp_ns,mocap_timestamp_ns,
 mocap_frame_index,time_error_us,interpolation_alpha
 ```
 
-本项目已经按硬件时间戳处理 EGO 双目：GEN 数据在标准化后的
-`cameras/*/timestamps.csv` 和 `stereo_pairs.csv` 中保存纳秒时间戳，Orbbec 会从
-PTS 文件生成同样的时间戳表。因此标签转换应读取这些时间戳，不要使用视频解码后的
+本项目按硬件时间戳处理 Orbbec EGO 双目，从 PTS 文件生成标准化后的
+`cameras/*/timestamps.csv` 和 `stereo_pairs.csv`，保存纳秒时间戳。因此标签转换应读取这些时间戳，不要使用视频解码后的
 顺序帧号。
 
 初始验收可要求时间残差小于约 2--5 ms；最终阈值应以手部运动速度和 RGB 帧率为准，
@@ -337,7 +336,7 @@ MANO 模型生成 778 个顶点，并用 MANO 参数重放校验。
 
 ## 推荐的代码落地方式
 
-当前项目的 `export_multiview_wilor_training_dataset.py` 绑定了 GEN 多视角
+当前项目的 `export_multiview_wilor_training_dataset.py` 读取标准化的 Orbbec 多视角
 `fusion/normalized_multiview` 输入，不能直接读取 XINGYING 文件。建议新增一条独立
 适配链路，同时复用已有 MANO 和校验逻辑：
 

@@ -1,749 +1,232 @@
-# 双目、六目与进阶工作流
+# Orbbec 双目、四目与进阶工作流
 
-本页集中保留双目、GEN 多目、标签导出、断点恢复与构建的完整操作。命令均在仓库根目录执行，示例中的本机路径应替换为自己的路径。
+本页保留 Orbbec EGO4 / EGO-4B 的双目重建、四目融合、原始 WiLoR、标签导出、实时和 VIO 入口。所有命令在仓库根目录执行。
 
-Orbbec EGO4 共享 MANO 主入口见 [项目首页](../README.md) 和 [四目共享推理说明](SHARED_HAND_INFERENCE_zh.md)。
-
-面向头戴式双目相机的离线手部重建与 MANO 拟合系统。当前主要支持两种输入：
-
-- `orbbec`：Orbbec EGO 左右视频、硬件时间戳、KB 鱼眼标定和可选 IMU；
-- `gen`：GEN DAS EGO MCAP/H264、KB 或 Double Sphere 双目标定。
-
-当前系统包含统一的双目主流程，以及 GEN 六目 WiLoR 扩展流程：
-
-```text
-Orbbec EGO session ─────┐
-                         ├─> 双目数据标准化 ─> 双目校正(KB/DS) ─┬─> MediaPipe 双路检测
-GEN 双目 MCAP ──────────┘                                      │   └─> 左右手关联
-                                                               │       └─> 三角化得到 3D 关节
-                                                               │           └─> 3D 稳定化
-                                                               │               └─> MANO 时序拟合
-                                                               │                   └─> MANO 网格
-                                                               │                       + 21-DOF
-                                                               │                       + 6D 位姿
-                                                               │
-                                                               └─> WiLoR 双路推理
-                                                                   └─> 21 个关键点
-                                                                       + MANO 参数/网格
-
-GEN 六目 MCAP(camera0~camera5)
-          └─> 六路标准化 + 微秒级同步 + DS 标定
-              └─> 六路 detector + WiLoR 双姿态推理
-                  └─> detector 左右手身份锁定
-                      └─> 动态锚点 + DS 射线三角化 + 逐关节 RANSAC
-                          └─> 六目融合 21 个 3D 关键点
-                              ├─> MANO 时序拟合
-                              │   └─> MANO 网格和姿态参数
-                              └─> WiLoR 自动标签导出
-                                  └─> images/*.jpg + labels/*.npy
-```
-
-Orbbec 和 GEN 双目数据经过标准化、校正后，可通过 `EGO_HAND_ROUTE` 选择
-MediaPipe、WiLoR 或并行运行。GEN 六目流程使用独立的多视角 Double-Sphere
-几何融合；camera2/3 校正视图主要用于 MANO 约束和 WiLoR 训练标签导出。
+四目共享 MANO 主入口、模型获取和真实结果见[项目首页](../README.md)；共享推理产物见[输出说明](outputs.md)。
 
 ## 效果展示
 
-![Orbbec EGO 双手 MANO 网格、21-DOF 面板与 3D 预览](images/offline_dual_hand_mano_21dof_overlay.png)
-
-Orbbec EGO 离线处理结果：左侧在原始鱼眼画面上叠加双手 MANO 网格、骨架和
-末端 6D 坐标轴；右侧同步显示左右手 21-DOF 数值及独立 MANO 3D 预览。
-
-![WiLoR 左右目检测与 21 点投影结果](images/wilor_stereo_dual_view.png)
-
-同一组校正双目数据的 WiLoR 左右目独立结果：每路显示手框、左右手分类、置信度和
-21 点投影骨架；逐帧数值结果同时保存为 JSONL 和 NPZ。
+项目首页展示双手网格与关键点、导出的共享三维模型。已有双目重建仍可输出骨架、MANO 网格、21-DOF 面板和末端 6D 位姿，使用下述对应入口。
 
 ## 离线启动
-
-下面的命令覆盖环境、源码、模型资产和完整运行。只需要把尖括号中的占位符替换成
-你自己的路径；没有 WiLoR 模型时，把 `EGO_HAND_ROUTE` 改为 `mediapipe`。
 
 ### 一次性安装环境和公共依赖
 
 ```bash
-cd <ego_hand_system目录>
-./scripts/setup_python_environment.sh
+git submodule update --init third_party/MANO third_party/basalt third_party/WiLoR
+bash scripts/setup_python_environment.sh
 conda activate ego-hand
 unset PYTHONPATH
-git submodule sync --recursive
-git submodule update --init third_party/MANO third_party/basalt third_party/WiLoR
-./scripts/install_mediapipe_model.sh
+bash scripts/install_mediapipe_model.sh
 ```
 
-`environment.yml` 只负责创建稳定的 Python/Conda 基础环境；安装脚本会继续完成完整、
-固定版本的运行时安装。它把 CUDA PyTorch、普通 PyPI 包和 chumpy 分开处理，避免普通
-包误访问 PyTorch CUDA 下载源，也避免一次下载中断导致整个 Conda 环境创建失败。
+安装脚本固定 Python 3.10 和运行时版本，分别安装 CUDA PyTorch、PyPI 依赖与旧版 chumpy，并检查 OpenCV、WiLoR、MediaPipe、MCAP 和 PyTorch。网络中断后可重新运行，下载缓存默认在 `/tmp/ego-hand-pip-cache`。
 
-MANO v1.2 模型需要旧版 chumpy 来反序列化。chumpy 的 GitHub 源码构建脚本与现代 pip
-的隔离构建不兼容，因此安装脚本会明确执行固定提交的非隔离构建：
+MANO v1.2 的反序列化依赖 chumpy；脚本按固定提交执行非隔离构建，并在加载时应用 NumPy 兼容辅助。不要混装多个提供同名 `cv2` 的 OpenCV 发行包；环境脚本会检查并修复这一情况。
 
-```bash
-python -m pip install --no-build-isolation \
-  git+https://github.com/mattloper/chumpy.git@580566eafc9ac68b2614b64d6f7aaa84eebb70da
-```
-
-项目在加载 MANO 时还会补上 chumpy 所需的 NumPy 2 兼容别名。安装完成后，脚本会
-自动检查 WiLoR、MediaPipe、GEN、PyTorch/CUDA 和 OpenCV 包是否可用。如果网络中断，
-重新执行 `./scripts/setup_python_environment.sh` 即可；已下载内容保存在 `/tmp/ego-hand-pip-cache`。
-脚本也会清理 `ultralytics` 可能引入的 `opencv-python`，然后修复安装项目统一使用的
-`opencv-contrib-python`，避免两个提供同名 `cv2` 模块的发行包互相覆盖。
-当前官方 `detector.pt` 含有 `C3k2` 层，因此安装脚本固定使用与该权重一致的
-Ultralytics 8.4.56；环境检查也会在版本或模型层不兼容时提前报出明确错误。
-
-准备授权资产。MANO 的两个 pkl 从官方页面下载后安装，放到 `models/mano/`。WiLoR checkpoint 和 detector
-从官方 Hugging Face Space 下载：
+WiLoR、检测器与 MANO 的来源和路径见[模型说明](../models/README.md)。准备后检查：
 
 ```bash
-cd <ego_hand_system目录>
-mkdir -p models/wilor
-wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/detector.pt \
-  -P models/wilor/
-wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/wilor_final.ckpt \
-  -P models/wilor/
-wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/model_config.yaml \
-  -P models/wilor/
 python scripts/check_third_party.py --require-mano --require-wilor
-```
-
-### GEN DAS EGO：完整运行
-
-```bash
-cd <ego_hand_system目录>
-conda activate ego-hand
-
-# 必须填写
-export EGO_SOURCE=gen
-export EGO_MCAP=<MCAP文件绝对路径>
-export EGO_OUTPUT=<新输出目录绝对路径>
-
-# 可选；以下均可不填写，右侧是默认值或示例值
-export EGO_LEFT_CAMERA=camera2       # 默认 camera2
-export EGO_RIGHT_CAMERA=camera3      # 默认 camera3
-export EGO_HAND_ROUTE=parallel       # mediapipe | wilor | parallel
-export EGO_DEVICE=auto               # auto | cuda | cpu
-export EGO_MAX_PAIRS=0               # 冒烟测试可改为 60
-export EGO_MAX_FRAMES=0              # GEN 解码帧数；0 表示全部
-export EGO_NO_VIDEO=0                # 1 表示跳过诊断视频
-export EGO_WILOR_CAMERAS=both        # left | right | both
-export EGO_WILOR_BATCH_SIZE=4
-export EGO_WILOR_FRAME_STRIDE=1
-./scripts/run_offline.sh check
-./scripts/run_offline.sh all
 ```
 
 ### Orbbec EGO：完整运行
 
+双目入口读取平铺的 Orbbec 导出目录，包含左右 MP4、PTS 和相机标定。四路 `part0001` 录制使用[首页的共享推理入口](../README.md#快速开始)或下述四目入口。
+
 ```bash
-cd <ego_hand_system目录>
-conda activate ego-hand
-
-# 必须填写
 export EGO_SOURCE=orbbec
-export EGO_SESSION=<Orbbec会话目录绝对路径>
-export EGO_OUTPUT=<新输出目录绝对路径>
-
-# 可选；以下均可不填写，右侧是默认值或示例值
+export EGO_SESSION=/path/to/orbbec_stereo_session
+export EGO_OUTPUT=/path/to/new_output
 export EGO_HAND_ROUTE=parallel       # mediapipe | wilor | parallel
 export EGO_DEVICE=auto               # auto | cuda | cpu
-export EGO_MAX_PAIRS=0
+export EGO_MAX_PAIRS=0               # 0 表示全部
 export EGO_NO_VIDEO=0
 export EGO_WILOR_CAMERAS=both
 export EGO_WILOR_BATCH_SIZE=4
-./scripts/run_offline.sh check
-./scripts/run_offline.sh all
+bash scripts/run_offline.sh check
+bash scripts/run_offline.sh all
 ```
+
+`EGO_SOURCE` 默认是 `orbbec`。也可复制 [configs/offline_orbbec.env.example](../configs/offline_orbbec.env.example) 后填写路径。双目校正、MediaPipe/WiLoR 路由、稳定化、MANO 拟合和渲染保持各自的阶段输出。
 
 ### EGO + NOKOV 原图标签流程
 
-原始数据准备、双手同步与标定要求、MANO 拟合、原图标签导出、检查及预览的具体操作，见
-[《EGO + NOKOV 双手原图标签流程》](EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)。
-直接执行见 [精简命令清单](EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。
-
-### GEN 六目 WiLoR 实验
-
-完整设计、算法改进、指标、左右手身份修复和排错记录见
-[`docs/GEN_SIX_CAMERA_WILOR_FUSION.md`](GEN_SIX_CAMERA_WILOR_FUSION.md)。
-camera2/3 锚点选择、DS 射线、外围相机关联和逐关节 RANSAC 的详细过程见
-[`docs/GEN_MULTIVIEW_RANSAC_ANCHOR_FUSION.md`](GEN_MULTIVIEW_RANSAC_ANCHOR_FUSION.md)。
-从原始 MCAP 到 `images/*.jpg + labels/*.npy` 的完整操作步骤见
-[`docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md`](GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md)。
-如果使用 NOKOV/XINGYING 光学动捕的 24 点手部模型生成 WiLoR 标签，见
-[`docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md`](NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md)。
-戴有反光 marker 球的黑色手套可以直接用原始 RGB 图像辅助 WiLoR，见
-[`docs/GEN6_GLOVE_MARKER_WILOR_ASSIST.md`](GEN6_GLOVE_MARKER_WILOR_ASSIST.md)。该功能默认
-关闭；启用后逐帧检测亮点并修正 WiLoR 的二维投影，不读取 NOKOV CSV，也不修改相机标定。
-如果要用 SAM3 对防护手套做掩膜验证、保守修正 2D 骨架并参与六目 3D 融合，见
-[`docs/GEN6_SAM3_GLOVE_WILOR_ASSIST.md`](GEN6_SAM3_GLOVE_WILOR_ASSIST.md)。该功能同样默认
-关闭，原始 WiLoR 预测会保留用于 A/B 对比和安全回退。
-
-主流程仍是 `camera2+camera3` 双目。以下独立实验链路会一次读取
-`camera0..camera5`，以 `camera2` 时间戳同步六路原始 DS 鱼眼视频，对每路运行左右手
-双假设 WiLoR，以 `camera2/3` 为首选锚点并在缺失时动态选择其他相机对，再让外围
-相机逐只手按重投影匹配，最后用原生 Double-Sphere 射线和 RANSAC 融合 3D 关节：
-
-最终 Left/Right 身份由 `detector.pt` 的 `left/right` 类别严格锁定；双假设只用于估计
-对应身份的姿态，几何误差和手掌翻转不能再交换两只手。汇总中的
-`detector_handedness_mismatch_observation_count` 应为 `0`。
+原始数据、双手同步、原图 KB 投影、MANO 拟合、标签导出和验收见[完整流程](EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)，实际命令见[命令清单](EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。
 
 ```bash
-cd <ego_hand_system目录>
-conda activate ego-hand
-./scripts/run_multiview_wilor_experiment.sh \
-  --mcap <MCAP文件绝对路径> \
-  --output <新的六目实验输出目录> \
-  --device cuda \
-  --max-frames 60 \
-  --batch-size 4 \
-  --glove-marker-assist 1
-```
-```bash
-./scripts/run_multiview_wilor_experiment.sh \
-    --mcap       /home/p3/data_sda1/ego_hand_system/recordings/20260818/DAS-Ego_20260818164752_none_none_689985_b5adb46c.mcap \
-    --output     /home/p3/data_sda1/ego_hand_system/output/gen6_pose_full_v5_5090d \
-    --conda-env  ego-hand \
-    --device     cuda \
-    --gpu-profile rtx5090d \
-    --max-frames 0 \
-    --glove-marker-assist 1
+bash scripts/export_ego_nokov_labels.sh \
+  --recording /path/to/paired_recording \
+  --optimization-config configs/native_joint_refit.json
 ```
 
-`--gpu-profile rtx5090d` 会使用 16 帧检测批次、64 个 WiLoR 假设批次、16 个并行
-OpenCV 抗锯齿裁剪线程、锁页内存异步传输和 H.264 解码预取、FP16 autocast/TF32，
-并仅在每路相机结束后清理 CUDA 缓存。若 24 GB 显存仍不足，推理会自动将 WiLoR
-假设批次减半并重试。
-WiLoR backbone 默认通过 `torch.compile` 合并 CUDA kernel；首次运行会有一次编译等待，
-之后的完整序列会摊薄该开销。
-由于严格 handedness 模式下每帧物理上最多只有一只左手和一只右手，该配置还会为
-每个 detector 类别只保留最高置信度框，避免低阈值侧相机的重复假框成倍运行 WiLoR。
-RTX 5060 保持默认的
-`--gpu-profile compatible --batch-size 4`，继续使用原有逐帧 FP32 路径。可用
-`--frame-batch-size` 和 `--preprocess-workers` 单独覆盖批次与裁剪线程数；显存不足
-时先把 `--batch-size` 从 `64` 降为 `32`，再把帧批次从 `16` 降为 `8`。
-如需保留所有候选框，可显式传入 `--max-detections-per-class 0`。
-如当前 PyTorch/驱动组合无法编译，可用 `--compile-backbone 0` 关闭编译，其余 5090D
-优化仍然保留。
-5090D profile 还会使用 8 个 CPU 进程并行处理相互独立的逐帧多视角 RANSAC；候选
-重投影按相机批量计算，并限制每个 worker 内部的 BLAS 线程数。可用
-`--fusion-workers N` 单独调整。融合阶段每 25 帧输出一次当前吞吐率。
+图像对齐和标定轮廓使用 CPU 并行处理，后续联合重拟合保留原有配置和输出。该流程按文档准备同级 `wilor_training` 工具、NOKOV 数据和授权模型；本次相机入口清理没有迁移这些工具。
 
-如需从新的 GEN MCAP 只运行四目，例如 `camera1~camera4`，可直接指定相机子集：
+## 四目共享 MANO
 
 ```bash
-./scripts/run_multiview_wilor_experiment.sh \
-  --mcap /path/to/new_recording.mcap \
-  --output /path/to/gen4_new_run \
-  --cameras camera1 camera2 camera3 camera4 \
-  --reference-camera camera2 \
-  --device cuda \
+bash scripts/run_hand_inference.sh \
+  --input /path/to/recording/part0001 \
+  --detector /path/to/hand_detector.pt \
+  --output output/shared_hand
+```
+
+支持 MP4+PTS 或四路 H264 MCAP，自动查找配套标定，每时刻每只手拟合一个共享模型。FP32/FP16、批大小、同步和恢复规则见[共享推理说明](SHARED_HAND_INFERENCE_zh.md)。
+
+## 原始四目 WiLoR
+
+以下入口用于检查每路网络自己的二维框和骨架：
+
+```bash
+bash scripts/run_orbbec_multiview_wilor.sh \
+  --input /path/to/orbbec_recording_part_or_mcap \
+  --output output/orbbec_raw \
+  --detector /path/to/hand_detector.pt \
+  --device cuda --gpu-profile compatible
+```
+
+输出 `fusion_multiview/raw_wilor_2d_4view.mp4`；`--optimized-video` 可生成已有的二维去重/质量筛选对照。此入口保留各相机独立预测，三维共享模型使用上一节入口。参数见 `--help`。
+
+## 四目多视角融合
+
+此入口保留 Orbbec 四目的候选关联、KB 射线三角化、RANSAC、时序处理和诊断渲染。默认四路为 `camera0..camera3`，参考相机为 camera0，首选锚点为 camera0/camera1。
+
+MP4 录制：
+
+```bash
+bash scripts/run_multiview_wilor_experiment.sh \
+  --session /path/to/ego4_recording \
+  --output output/orbbec_fusion \
+  --detector /path/to/hand_detector.pt \
   --max-frames 60
 ```
 
-脚本会自动使用 `camera2/3` 作为锚点，并生成 `diagnostic_4view.mp4`；确认冒烟测试后将
-`--max-frames` 改为 `0` 运行完整数据。
-
-### 新 Orbbec EGO Pro 四目 MCAP：原始 WiLoR 基线
-
-新款 EGO Pro 录制目录（包含一个 `.mcap` 和对应 `meta_*.json`）使用以下适配脚本：
+MCAP 录制使用 `--mcap /path/to/recording.mcap`，程序查找配套 Orbbec YAML；也可直接运行标准化入口指定标定：
 
 ```bash
-./scripts/run_orbbec_multiview_wilor.sh \
-  --input /home/p3/data_sda1/ego_hand_system/recordings/new/EGO_Pro_AZLR86000F7_20260917_170004 \
-  --output /home/p3/data_sda1/ego_hand_system/output/orbbec_20260917_170004_raw_wilor \
-  --conda-env ego-hand --device cuda --gpu-profile rtx5090d --max-frames 0 \
-  --optimized-video
+python scripts/normalize_multiview_recording.py \
+  --input /path/to/recording.mcap \
+  --calibration /path/to/recording_calibration_camera.yaml \
+  --output output/orbbec_normalized \
+  --max-frames 60
 ```
 
-它把 `/camera/left`、`right`、`right_side`、`left_side` 无损 remux 为
-`camera0..camera3`，与四路 MP4 导出的 `cam_0..cam_3` 顺序一致；按设备时间戳同步，
-然后逐路运行双假设 WiLoR。输出的
-`fusion_multiview/raw_wilor_2d_4view.mp4` 只画原始相机内 2D 框和 21 点骨架，不启用
-SAM3、三角化、3D 融合或时序修正。这个 MCAP 没有 `camera_info`，因此适配器不会伪造
-标定；要做 3D 融合，需另行提供每路内参/畸变和统一坐标系外参，可通过
-`--calibration-dir` 传入 `camera0.json` ... `camera3.json`，并核对相同设备序列号和安装状态。增加 `--optimized-video` 后还会
-生成 `fusion_multiview/optimized_wilor_2d_dedup_quality15_4view.mp4`：它只应用之前验证过的
-二维身份锁定、重复框合并、短时序保持和可见关节质量门控，不改变原始预测文件。
+主要运行选项：
 
-### Orbbec EGO Pro 四路 MP4 导出：复用 GEN 多视角链路
+| 参数 | 用途 |
+| --- | --- |
+| `--gpu-profile compatible` | 保留逐帧 FP32 推理 |
+| `--gpu-profile rtx5090d` | 既有 FP16/批处理路径，可覆盖批大小和工作线程 |
+| `--compile-backbone 0` | 使用未编译的同一网络前向 |
+| `--glove-marker-assist 1` | 用图像亮点辅助二维候选，需适合该特征的录制 |
+| `--sam3-glove-assist 1` | 使用另行准备的 SAM3 分割运行时 |
+| `--allow-single-hand-anchors 1` | 保留满足几何条件的单手锚点 |
+| `--stop-after-inference` | 完成原始 WiLoR 后停止，便于检查输入 |
+| `--final-video` | 输出已有的最终结果视频；渲染器可选择 hybrid/fused |
 
-`recordings/20260928` 这类录制目录包含四路 MP4、各路 `*_pts.csv` 和
-`*_calibration_camera.yaml`。规范化器使用 YAML 中的相机 ID 建立映射：
-`camera0=left/cam_0`、`camera1=right/cam_1`、`camera2=right_side/cam_2`、
-`camera3=left_side/cam_3`。输入适配器输出与 GEN 相同的 `normalized_multiview`
-数据格式，并保留 KB 鱼眼标定。后续复用 GEN 的逐路双假设 WiLoR、跨视角匹配、
-3D 融合、关节时序与质量后处理、诊断渲染链路；融合及后处理判据与 GEN 保持一致。
+不同流程的质量门限和产物独立定义。使用真实 KB 标定和对应的原图像素，不把针孔投影参数混入鱼眼原图。所有参数以脚本 `--help` 为准。
 
-先运行 60 帧检查数据适配和融合结果：
+### 多录制批量处理
 
 ```bash
-./scripts/run_multiview_wilor_experiment.sh \
-  --session recordings/20260928/EGO_Pro_AZLR86000F7_20260928_135841 \
-  --output output/0928/ego4_135841_anchor01 --max-frames 60 --device cuda
+bash scripts/run_multiview_wilor_batch.sh \
+  --input-dir /path/to/orbbec_mcaps \
+  --output-root output/orbbec_batch
 ```
 
-输出 `fusion_multiview/diagnostic_4view.mp4` 和相应的融合结果。EGO4 四目恢复
-`camera0, camera1` 的首选锚点顺序；这对相机在当前帧不可用或未通过质量检查时，
-再尝试其他相机对。
-输入适配还设置相机选择、主视角、
-标定模型及其射线反投影，不启用额外的单手双目放宽判据。
-如需最终交付视频，添加 `--final-video`。对这段录制前 60 帧的实测中，WiLoR
-四路分别只在 17、2、5、10 帧检出手；GEN 严格融合判据接受 0 帧，原因是没有形成
-“两路相机同时观测到双手”的有效锚点。原始四目 MCAP 的 2D 基线仍可通过
-`run_orbbec_multiview_wilor.sh` 单独运行，适合定位检测问题。确认 60 帧后，
-使用新目录和 `--max-frames 0` 跑完整录制。
-旧目录 `output/0928/ego4_135841` 使用了不同的左右手处理和单手双目判据，
-不能用于当前 GEN 严格链路的断点续跑。
+每个 Orbbec MCAP 需要其配套标定，分别写入独立输出。该批处理入口继续转发 GPU、检测、融合和辅助参数。
 
-需要把融合结果送入 MANO 序列拟合时，选择主视角双目导出：
+## 训练标签导出
+
+原图 NOKOV 标签优先使用[命令清单](EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)和[原图导出说明](EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)。
+
+已有 Orbbec 多视角融合结果可继续使用原有 MANO/矫正标签导出入口：
 
 ```bash
-conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
-  python scripts/prepare_multiview_mano_input.py \
-  --dataset output/0928/ego4_135841_anchor01/normalized_multiview \
-  --fusion output/0928/ego4_135841_anchor01/fusion_multiview \
-  --left-camera camera0 --right-camera camera1 \
-  --output output/0928/ego4_135841_anchor01/mano_input.npz \
-  --rectification-output output/0928/ego4_135841_anchor01/mano_rectification.npz
+bash scripts/run_multiview_wilor_label_export.sh \
+  --experiment /path/to/orbbec_four_view_experiment \
+  --output output/orbbec_training_labels \
+  --left-camera camera0 --right-camera camera1
 ```
 
-`recordings/20260928` 下的每个录制子目录单独指定给 `--session`，并使用各自的输出目录。
+需要自有 schema 参考样本时，通过 `--reference-npy /path/to/reference.npy` 指定。导出后保留 MANO 参数重放、图像空间、左右手、投影和数量检查。
 
-如果只需要接近第一人称演示的连续骨架画面，可从已完成的逐相机预测生成单主视角视频：
+多个已有实验的标签可分别保存或合并：
 
 ```bash
-conda run --no-capture-output -n ego-hand env PYTHONPATH=scripts \
-  python scripts/render_native_2d_multiview.py \
-  --dataset output/0928/ego4_135841_test/normalized_multiview \
-  --predictions output/0928/ego4_135841_test/wilor_multiview \
-  --output output/0928/ego4_135841_test/hand_pose_single_view_final.mp4 \
-  --cameras camera0 --columns 1 --tile-width 1200 --crop-top-px 300 \
-  --min-visible-joints 15 --max-hold-frames 2 --overlay-style clean
+bash scripts/run_multiview_wilor_label_batch.sh \
+  --experiment-root /path/to/orbbec_experiments \
+  --output-root output/orbbec_labels \
+  --layout merged
 ```
 
-`--crop-top-px 300` 只针对 `135841` 中双手始终位于画面下方的录制验证过；其它录制应先检查手是否会进入裁掉的区域。`clean` 仅隐藏诊断框和文字，不改变关节数据。`native_2d` 视频展示的是 2D 跟踪，不能作为 3D 精度证明。
-
-需要保留只有一只手通过多视角质量门限的帧时，在新输出目录运行 EGO4 流程并加 `--allow-single-hand-anchors 1`。这个选项仍要求至少两路真实观测通过几何检查；默认值保持为 `0`。在 `135841` 前 60 帧，开启后保留了原有 39 帧双手结果，并增加 20 帧单手结果。
-
-确认 60 帧冒烟测试后，把 `--max-frames` 改成 `0`，同时使用新的输出目录运行完整
-序列。脚本会生成 `fusion_multiview/diagnostic_6view.mp4`，其中六个画面按 3x2 排列；
-绿色 `USED` 显示该相机实际贡献的内点关节，灰色 `INACTIVE` 表示未参与，红色
-`OUTLIER/REJECTED` 显示离群候选或整帧拒绝原因。
-短缺口会由邻近已确认姿态引导六路当前帧重新关联；恢复帧仍须至少两个相机的真实
-观测通过 RANSAC，不直接使用关节插值代替识别。
-`fusion_multiview/summary.json` 还会把六目结果和 `camera2+camera3` 双目结果投影到所有
-可用视角，给出跨视角一致性对比。
-
-`--glove-marker-assist 1`（兼容旧别名 `--nokov-wilor-assist 1`）执行真正的逐帧视觉辅助：
-
-1. 原图转 HSV，保留低饱和度且亮度大于 `160` 的像素；
-2. 连通域筛选小而近似圆形的亮斑；
-3. 先按 detector 框把亮斑分配给具体的手，再在当前 WiLoR 投影附近保留候选；
-4. 从最近邻估计粗略二维偏移，用带手指归属和同指顺序检查的匈牙利算法一对一匹配；
-5. 3 点/2 指以上只作为弱假设选择证据；至少 8 点/4 指且残差达标时才修正关节；
-6. 整手实际移动最多 `10 px`，单个关节局部拉动最多 `3 px`，骨长变化超限时取消局部拉动。
-
-默认参数可用 `--marker-value-min`、`--marker-saturation-max`、
-`--marker-min-matches`、`--marker-global-min-matches`、
-`--marker-global-min-finger-groups` 和 `--marker-blend` 调整。启用后原始
-`wilor_multiview/` 保持不变，新增 `wilor_multiview_glove_marker_assisted/` 和
-`fusion_multiview_glove_marker_assisted/`。每个相机目录中的
-`marker_assist_preview.jpg` 保存位移/残差最大的已修正案例，
-`marker_evidence_preview.jpg` 保存接近修正门限但仅作为证据的案例。融合诊断视频也会显示
-`MARKER N`。找不到强支持的手不会被强行修正，而是保留原始 WiLoR 关节。
-
-戴手套时 detector 的左右类别可能同时判成同一侧，因此该开关默认采用逐帧
-`--detector-handedness adaptive`：先执行严格身份融合，只有严格结果拒绝该帧时，才用
-多视角几何与 marker 证据重试。可显式传入 `strict` 强制旧规则，或传入 `ignore` 始终由
-几何选择身份；后两种模式都应单独检查左右手稳定性。
-
-如果一个目录中有多个 MCAP，可使用批处理入口运行。`rtx5090d` 默认启用两级流水线：
-下一条记录执行 GPU inference 时，上一条记录同时执行 CPU fusion 和 NVENC render；
-可用 `--pipeline 0` 恢复严格串行。每个 MCAP 使用文件名创建独立输出目录，某个文件
-失败后默认继续下一个：
-
-```bash
-./scripts/run_multiview_wilor_batch.sh \
-  --input-dir /home/p3/data_sda1/ego_hand_system/recordings/20260818 \
-  --output-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
-  --conda-env ego-hand \
-  --device cuda \
-  --gpu-profile rtx5090d \
-  --max-frames 0 \
-  --preprocess-workers 16 \
-  --fusion-workers 16
-```
-
-视频编码会优先使用 PyAV 的 `h264_nvenc`，不可用时自动回退到 OpenCV `mp4v`。
-渲染会并行读取六路视频并预取下一帧；添加 `--final-video` 时，先生成诊断版，再生成
-保守的 trusted-3D/native-2D 混合交付版（可用 `EGO_FINAL_RENDERER=fused` 显式恢复纯
-融合 3D）。混合版只在深度几何可靠时显示 3D，否则显示该相机的原生 2D，避免扭曲手指。
-normalization 的 remux 完整性校验也会优先使用六路并行 `h264_cuvid`/NVDEC，不支持
-NVDEC 的机器自动回退到软件 H.264 解码。
-
-批量输出示例：
-
-```text
-gen6_batch_5090d/
-├── batch_summary.json
-├── batch_status.jsonl
-├── DAS-Ego_20260818164752_.../
-│   ├── run_config.json
-│   ├── normalized_multiview/
-│   ├── wilor_multiview/
-│   └── fusion_multiview/
-├── DAS-Ego_20260818164752_....log
-└── ...
-```
-
-`batch_summary.json` 汇总每个文件的成功/失败、耗时、输出目录和日志路径；单个目录内的
-`run_config.json` 仍负责断点复用和参数一致性检查。可先加 `--dry-run` 只检查将要执行的
-文件和命令；需要递归搜索子目录时加 `--recursive`。
-
-### 多个实验批量生成训练标签
-
-上一步批量生成多个实验后，标签也可以批量导出。各实验分别保存：
-
-```bash
-./scripts/run_multiview_wilor_label_batch.sh \
-  --experiment-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
-  --layout separate \
-  --conda-env ego-hand --device cuda --gpu-profile rtx5090d \
-  --export-camera camera2 --view-filter complete21 \
-  --max-samples 0
-```
-
-默认写入每个实验自己的 `wilor_labels_camera2_complete21/`。如果希望分别保存，但集中放到
-另一个根目录，再增加 `--output-root /path/to/separate_labels`。
-
-如果希望所有录制最终合并成同一个训练数据集：
-
-```bash
-./scripts/run_multiview_wilor_label_batch.sh \
-  --experiment-root /home/p3/data_sda1/ego_hand_system/output/gen6_batch_5090d \
-  --output-root /home/p3/data_sda1/ego_hand_system/output/wilor_labels_merged \
-  --layout merged \
-  --visualization-samples 20 \
-  --view-filter complete21 \
-  --sample-stride 10 \
-  --conda-env ego-hand --device cuda --gpu-profile rtx5090d \
-  --export-camera camera2 --view-filter complete21 \
-  --max-samples 0
-```
-
-合并模式在 `runs/<实验名>/` 保留每段录制的 MANO 拟合和断点缓存，最终训练集位于
-`dataset/`。图片和标签统一重新编号，`.npy` 内容不修改，`index.jsonl` 额外记录来源实验。
-`rtx5090d` 标签配置使用 CUDA 拟合和大批次 GPU 校验。实测并发拟合会产生 GPU 争用，
-因此默认 `--workers 1`；`--workers 2|3` 仅建议在独占 GPU 时试验。
-
-### GEN 四目子集测试
-
-已有六路标准化数据和 WiLoR 预测时，可以只选择部分相机重新融合，不需要重复运行模型。
-例如使用 `camera1~camera4`，并继续以 `camera2/3` 为首选锚点：
-
-```bash
-PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
-  python scripts/fuse_multiview_wilor_guided.py \
-  --dataset output/gen6_pose_full_v3/normalized_multiview \
-  --predictions output/gen6_pose_full_v3/wilor_multiview \
-  --output output/gen6_pose_full_v3/fusion_cam1_to_cam4_strict_full \
-  --cameras camera1 camera2 camera3 camera4 \
-  --anchor-cameras camera2 camera3 \
-  --detector-handedness strict \
-  --max-frames 0
-
-PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
-  python scripts/render_multiview_wilor.py \
-  --dataset output/gen6_pose_full_v3/normalized_multiview \
-  --fusion output/gen6_pose_full_v3/fusion_cam1_to_cam4_strict_full \
-  --output output/gen6_pose_full_v3/fusion_cam1_to_cam4_strict_full/diagnostic_4view.mp4 \
-  --cameras camera1 camera2 camera3 camera4 \
-  --columns 2
-```
-
-四目视频按 `camera1 | camera2 / camera3 | camera4` 的 2×2 布局生成。冒烟测试可先将两个
-命令都加上 `--max-frames 60`，正式运行时使用 `0` 或省略限制。
-
-六目结果确认无误后，可以直接导出与 WiLoR 训练数据一致的成对图片和 `.npy` 标签：
-
-```bash
-./scripts/run_multiview_wilor_label_export.sh \
-  --experiment /home/zdh/ego_hand_system/output/gen6_pose_full_v3 \
-  --fusion /home/zdh/ego_hand_system/output/gen6_pose_full_v3/fusion_handedness_strict_full \
-  --output /home/zdh/ego_hand_system/output/gen6_pose_full_v3/wilor_training_labels_physical_v1 \
-  --conda-env ego-hand \
-  --device cuda \
-  --max-samples 0
-```
-
-标签导出默认使用运动自适应抽帧：静止阶段降低采样率，手部明显移动或手身份出现变化时保留关键帧。
-如需固定抽帧，例如每 3 个同步帧保留 1 帧，增加：
-
-```bash
-  --sample-stride 3
-```
-
-`--sample-stride 0`（默认）表示运动自适应；`--max-samples` 仍然只是最终数量上限。
-
-如果训练集只需要 `camera2`，并且要求该相机自身完整观测到 21 个关节，可使用：
-
-```bash
-  --export-camera camera2 \
-  --view-filter complete21
-```
-
-```bash
-./scripts/run_multiview_wilor_label_export.sh \
-  --experiment /home/zdh/ego_hand_system/output/gen4_new_run \
-  --fusion /home/zdh/ego_hand_system/output/gen4_new_run/fusion_multiview \
-  --output /home/zdh/ego_hand_system/output/gen4_new_run/wilor_labels_camera2_complete21 \
-  --conda-env ego-hand \
-  --device cuda \
-  --export-camera camera2 \
-  --view-filter complete21 \
-  --max-samples 0
-```
-
-`--view-filter legacy`（默认）保持原有规则，允许其他相机参与融合补全；`complete21` 则要求
-目标相机自身的 21 个关节全部为 RANSAC 内点，并且原始图和最终校正图中的 21 个关节都在
-画面范围内。该开关只筛选样本，不改变 `.npy` 标签字段或格式。
-
-导出完成后默认还会在 `dataset/visualization/` 随机抽取 12 个同步帧，生成带 21 关节骨架
-和手框的 JPG。每张图会将同一个 `sync_index` 的左右手画在一起；可用
-`--visualization-samples 20` 调整数量，或用 `--render-visualization 0` 关闭。
-
-按来源录制生成完整标签可视化视频：
-
-```bash
-PYTHONPATH=scripts conda run --no-capture-output -n ego-hand \
-  python scripts/render_wilor_training_videos.py \
-  --dataset /path/to/merged/dataset \
-  --output /path/to/merged/dataset/visualization_videos \
-  --cameras camera2 --fps 10 --workers 2 --video-codec auto
-```
-
-`auto` 优先使用 NVIDIA NVENC；合并训练集会为每个 `source_experiment` 单独生成 MP4。
-
-```bash
-./scripts/run_multiview_wilor_label_export.sh \
-  --experiment /home/zdh/ego_hand_system/output/gen4_new_run \
-  --fusion /home/zdh/ego_hand_system/output/gen4_new_run/fusion_multiview \
-  --output /home/zdh/ego_hand_system/output/gen4_new_run/wilor_labels_camera2_complete21 \
-  --conda-env ego-hand \
-  --device cuda \
-  --layout merged \
-  --export-camera camera2 \
-  --view-filter complete21 \
-  --sample-stride 5 \
-  --visualization-samples 20 \
-  --max-samples 0
-```
-
-
-导出结构：
-
-```text
-wilor_training_labels_physical_v1/dataset/
-├── images/000000.jpg
-├── labels/000000.npy
-├── index.jsonl
-├── rejected.jsonl
-└── summary.json
-```
-
-`images` 和 `labels` 文件名严格一一对应。此处描述默认 `physical_rectified` 模式：
-图片是所选双目相机的共同针孔校正图像，保存时保持物理左右手，不做水平翻转；标签的
-`vertices`、`joints_3d` 和 `trans` 同样处于物理侧坐标，MANO 参数使用右手规范空间。
-训练读取器可依据 `side=0` 将左手裁剪规范化，不能在已规范化的数据上重复镜像。
-原图 KB 标签使用上面的 `native_raw` 入口；不能把原始鱼眼图片和单纯的针孔投影混用。
-默认矫正标签会严格对照
-`/home/zdh/tool/npy_decoder/000865.npy` 校验字段顺序、类型、dtype 和 shape，并验证
-`vertices + trans` 经 `K` 投影后与 `joints_2d[778,2]` 一致，并用导出时相同的
-`MANO_RIGHT.pkl` 重放左右手全部参数，严格比对 778 顶点和 21 关节。六目融合
-提供可靠 3D 和身份，随后共享 MANO 时序拟合生成顶点、关节、旋转矩阵、shape 和
-translation。物理可视化时，左手再从右手规范空间镜像回相机空间并反转三角面绕序。
-
-路线含义：`mediapipe` 运行现有 MediaPipe→双目三角化→稳定化→MANO→渲染；`wilor`
-只运行 WiLoR 左右目推理；`parallel` 顺序运行并保留两套结果。默认路线是
-`mediapipe`，不设置 `EGO_HAND_ROUTE` 即保持旧行为。
+标签的字段、坐标、单位、双手共享图像与标定来源约定见[交接说明](MANO_GLOVE_LABEL_HANDOFF_zh.md)，查看结果见[标签查看器](WILOR_LABEL_VIEWER_zh.md)。
 
 ## 分阶段运行与断点恢复
 
-完整流程耗时较长，可以逐段执行：
-
-| 阶段 | 命令 | 作用 |
-|---|---|---|
-| 配置检查 | `./scripts/run_offline.sh check` | 检查数据源、模型和 MANO 资产 |
-| 输入准备 | `./scripts/run_offline.sh prepare` | Orbbec/GEN 标准化与双目校正；Orbbec 另含可选会话预览 |
-| 双目重建 | `./scripts/run_offline.sh stereo` | MediaPipe、跨相机关联和 21 点三角化 |
-| 3D 稳定 | `./scripts/run_offline.sh stabilize` | 离群管理、短缺口补全和骨长约束 |
-| MANO 拟合 | `./scripts/run_offline.sh fit` | 稳定初值和低学习率精修两阶段拟合 |
-| 最终导出 | `./scripts/run_offline.sh render` | 网格叠加、21-DOF 和手末端 6D CSV |
-| 全部阶段 | `./scripts/run_offline.sh all` | 按顺序运行以上所有阶段 |
-
-也可以通过环境变量选择阶段：
+双目流程支持：
 
 ```bash
-export EGO_STAGE=stereo
-./scripts/run_offline.sh
+bash scripts/run_offline.sh prepare
+bash scripts/run_offline.sh stereo
+bash scripts/run_offline.sh stabilize
+bash scripts/run_offline.sh fit
+bash scripts/run_offline.sh render
+bash scripts/run_offline.sh wilor
 ```
 
-每个阶段以 `summary.json` 或对应数据清单作为完成标志。再次运行时，已完成的阶段
-会自动跳过；如果发现只有目录、没有完成标志，脚本会停止并提示使用新输出目录，
-不会自动覆盖或删除可能有用的中间结果。
-
-修改数据源、相机、`EGO_MAX_PAIRS` 或重要参数后，应使用新的 `EGO_OUTPUT`。
+已有完整阶段按标记文件复用；中断留下的半成品应按对应脚本提示处理。共享推理、四目融合、标签流程分别维护自己的配置和恢复状态，参数变化时使用新输出目录。
 
 ## 常用运行变量
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `EGO_SOURCE` | 必填 | `orbbec` 或 `gen` |
-| `EGO_SESSION` | Orbbec 必填 | Orbbec session 目录 |
-| `EGO_MCAP` | GEN 必填 | GEN `.mcap` 文件 |
-| `EGO_OUTPUT` | 必填 | 本次实验的统一输出根目录 |
-| `EGO_LEFT_CAMERA` | `camera2` | GEN 左相机 ID |
-| `EGO_RIGHT_CAMERA` | `camera3` | GEN 右相机 ID |
-| `EGO_HAND_ROUTE` | `mediapipe` | `mediapipe`、`wilor` 或 `parallel` |
-| `EGO_DEVICE` | `auto` | `auto`、`cuda` 或 `cpu` |
-| `EGO_MAX_PAIRS` | `0` | 下游最大双目帧对数，`0` 表示全部 |
-| `EGO_MAX_FRAMES` | `0` | GEN 每路最大解码帧数，`0` 表示全部 |
-| `EGO_NO_VIDEO` | `0` | 设为 `1` 时跳过诊断视频，保留 CSV/JSON/NPZ |
-| `EGO_WILOR_CAMERAS` | `both` | WiLoR 运行 `left`、`right` 或 `both` |
-| `EGO_WILOR_BATCH_SIZE` | `16` | WiLoR 单个 worker 的手部 crop batch 大小 |
-| `EGO_WILOR_FRAME_STRIDE` | `1` | WiLoR 每隔多少对帧处理一次 |
-| `EGO_WILOR_FAST` | `0` | 设为 `1` 启用 FP16/编译加速，要求 CUDA |
-| `EGO_CONDA_ENV` | `ego-hand` | 自动使用的 Conda 环境名 |
-| `EGO_PYTHON` | 未设置 | 指定 Python 路径并绕过 Conda 自动选择 |
+| 变量 | 用途 |
+| --- | --- |
+| `EGO_SESSION` / `EGO_OUTPUT` | 双目输入与独立输出 |
+| `EGO_HAND_ROUTE` | mediapipe、wilor 或 parallel |
+| `EGO_MAX_PAIRS` | 后续处理上限，0 表示全部 |
+| `EGO_NORMALIZED_DATASET` / `EGO_RECTIFIED_DATASET` | 复用或指定标准化/校正目录 |
+| `EGO_DEVICE` / `EGO_PYTHON` / `EGO_CONDA_ENV` | 设备及解释器选择 |
+| `EGO_WILOR_CHECKPOINT` / `EGO_WILOR_DETECTOR` / `EGO_WILOR_CONFIG` | 原双目 WiLoR 资产 |
+| `EGO_WILOR_CAMERAS` / `EGO_WILOR_FRAME_STRIDE` / `EGO_WILOR_BATCH_SIZE` | 推理视图与批处理 |
+| `EGO_WILOR_FAST` / `EGO_WILOR_SAVE_VERTICES` | 原有快速模式与网格保存 |
 
-第一次验证新数据时建议使用独立的冒烟测试输出目录：
-
-```bash
-export EGO_OUTPUT=output/my_recording_smoke
-export EGO_MAX_PAIRS=60
-
-# GEN 还可以限制 MCAP 解码量
-export EGO_MAX_FRAMES=80
-
-./scripts/run_offline.sh all
-```
-
-冒烟测试通过后，将限制恢复为 `0`，并换一个新的正式输出目录。
+完整默认值见 `bash scripts/run_offline.sh --help`；新共享推理的配置由自己的命令行参数控制。
 
 ## 输出目录
 
-Orbbec 和 GEN 现在都先生成统一的标准化、校正数据集，再进入同一套后处理：
+双目流程保留 `normalized/`、`rectified/`、`mediapipe_stereo/`、`wilor_stereo/`、MANO 拟合/渲染、CSV 和 JSONL 等阶段产物。四目独立预测和融合保留 `normalized_multiview/`、`wilor_multiview/`、`fusion_multiview/` 及各阶段汇总。
 
-```text
-$EGO_OUTPUT/
-  session_check/                         # 仅 Orbbec，可选会话预览
-  normalized/                            # 统一原始双目数据集（Orbbec/GEN）
-  rectified/                             # 统一校正后的针孔双目数据集
-  mediapipe_stereo/
-    stereo_annotated.mp4
-    stereo_frames.csv
-    stereo_landmarks_3d.csv
-    summary.json
-  wilor_stereo/
-    left/predictions.jsonl
-    left/predictions.npz
-    left/wilor_annotated.mp4
-    right/predictions.jsonl
-    right/predictions.npz
-    right/wilor_annotated.mp4
-    summary.json
-  mano_preparation/
-    mano_input.npz
-    stabilized_landmarks_3d.csv
-    summary.json
-  mano_fit_right_canonical_initial_rigid/
-    summary.json
-    track_*.npz
-  mano_fit_right_canonical_final/
-    summary.json
-    track_*.npz
-  mano_overlay_optimized/
-    mano_overlay_21dof.mp4
-    mano_joint_angles_21dof.csv
-    hand_end_effector_6d.csv
-    summary.json
-```
-
-最先建议检查：
-
-```bash
-xdg-open "$EGO_OUTPUT/mediapipe_stereo/stereo_annotated.mp4"
-xdg-open "$EGO_OUTPUT/mano_overlay_optimized/mano_overlay_21dof.mp4"
-xdg-open "$EGO_OUTPUT/wilor_stereo/left/wilor_annotated.mp4"
-xdg-open "$EGO_OUTPUT/wilor_stereo/right/wilor_annotated.mp4"
-```
-
-如果设置了 `EGO_NO_VIDEO=1`，请改看各阶段的 `summary.json` 和 CSV。
+共享 MANO 输出采用[独立输出约定](outputs.md)，包含 `hand_model.pt`、`joints3d.jsonl`、四目视频、标定、时间戳和来源信息。
 
 ## 排错顺序
 
-1. `check` 失败：先修正输入路径、Conda 环境或模型资产；
-2. 双目视频中手身份跳变：检查 `mediapipe_stereo/stereo_annotated.mp4`，问题位于检测、左右关联或三角化；
-3. 双目点稳定但网格不贴手：检查 `mano_fit_right_canonical_final/summary.json`；
-4. GEN 无法解码：单独运行 `python scripts/check_gen_environment.py --mcap "$EGO_MCAP"`；
-5. 某阶段留下不完整目录：保留它用于排错，并换一个新的 `EGO_OUTPUT` 重跑。
+1. 先检查环境、模型、原始四路视频/PTS 和配套标定。
+2. 检查原始 WiLoR 框和骨架，确认检测器适用于当前手套和视角。
+3. 检查时间同步及内外参、单位、相机 ID，再检查三维与重投影。
+4. 对标签检查图像空间、左右手镜像和 MANO 重建，避免把不同来源标定混为同一相机。
+5. 实时和 VIO 问题按对应文档检查硬件运行时与时间/坐标接口。
 
 ## 坐标与数据约定
 
-- 三维坐标单位统一为米；
-- `cam_0` 或所选左相机是参考相机，右相机是 `cam_1`；
-- 双目 3D 和 MANO 初始输出位于原始左相机 OpenCV 光学坐标系；
-- Orbbec KB 畸变使用 OpenCV `cv::fisheye`；
-- GEN 支持 KB/Kannala–Brandt 和 Double Sphere；
-- MediaPipe world landmarks 是手部模型相对坐标，不能代替双目相机坐标；
-- 世界坐标仅由可选的 Basalt 阶段产生。
+图像、关键点和相机模型必须处于相同像素空间；相机外参的方向和米/毫米转换必须明确。原图 KB 投影保留畸变，双目矫正流程使用其配套针孔参数。不同推理或标签流程的时间戳单位按各自 schema 读取。
 
 ## 可选功能
 
 ### Orbbec 实时跟踪
 
-实时模式不是当前离线主入口。需要 Orbbec SDK 本地运行时：
-
-```bash
-scripts/run_ego_live.sh
-scripts/run_ego_live.sh --record
-```
-
-详见 [docs/EGO_REALTIME.md](EGO_REALTIME.md)。
+实时手部、多模态联动和 Orbbec SDK 运行时准备见[实时说明](EGO_REALTIME.md)。相机相关 C++ 工具与 Python 发布/预览入口继续保留。
 
 ### Basalt 世界坐标轨迹
 
-当前 Basalt 离线入口面向带 IMU 的 Orbbec session。完成离线渲染后运行：
-
-```bash
-python scripts/run_basalt_offline.py \
-  --session "$EGO_SESSION" \
-  --hand-pose-csv "$EGO_OUTPUT/mano_overlay_optimized/hand_end_effector_6d.csv" \
-  --output-root "$EGO_OUTPUT/basalt_world"
-```
-
-详见 [docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md](BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md)。
+Basalt 标定、IMU、轨迹和世界坐标合成见[VIO 说明](BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md)。
 
 ## 构建与测试
 
-C++ 会话检查和标定验证工具：
-
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
+cmake -S . -B build
+cmake --build build -j
 ctest --test-dir build --output-on-failure
+PYTHONPATH=scripts conda run -n ego-hand python -m pytest -q tests
 ```
 
-Python 回归测试：
-
-```bash
-conda run --no-capture-output -n ego-hand \
-  python -m unittest discover -s tests -p 'test_*.py' -v
-```
-
-更多说明：
-
-- [双目深度、畸变和坐标流程](STEREO_DEPTH_AND_DISTORTION_PIPELINE.md)
-- [MANO 运动稳定策略](MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md)
-- [21-DOF 仪表板与角度定义](mano_21dof_dashboard_20260804.md)
-- [参考结果](RESULTS.md)
-- [仓库内容与本地资产边界](REPOSITORY_CONTENTS.md)
+相机采集与 VIO 的构建需按文档准备相应 SDK/运行时；纯离线共享推理使用项目的 Python 环境和授权模型。

@@ -3,7 +3,7 @@
 
 This is an offline A/B tool.  It keeps every source prediction untouched,
 uses a fusion made without ``--target-camera`` as the reference, projects the
-five-view 3-D hand back into the target camera, and changes only target-camera
+remaining views' 3-D hand back into the target camera, and changes only target-camera
 joints whose residual is large enough and whose leave-out result has support
 from several other views.
 """
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-camera", default="camera3")
     parser.add_argument(
         "--source-cameras", nargs="+",
-        default=["camera0", "camera1", "camera2", "camera4", "camera5"],
+        default=["camera0", "camera1", "camera2"],
     )
     parser.add_argument("--min-source-views", type=int, default=3)
     parser.add_argument("--min-valid-joints", type=int, default=12)

@@ -47,12 +47,13 @@ class RunOfflineScriptTest(unittest.TestCase):
         env["EGO_PYTHON"] = sys.executable
         return env
 
-    def test_help_lists_both_sources(self):
+    def test_help_lists_orbbec_input(self):
         result = self.run_script("--help", env=os.environ.copy())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("EGO_SOURCE=orbbec|gen", result.stdout)
+        self.assertIn("EGO_SOURCE=orbbec", result.stdout)
         self.assertIn("EGO_SESSION", result.stdout)
-        self.assertIn("EGO_MCAP", result.stdout)
+        self.assertNotIn("EGO_MCAP", result.stdout)
+        self.assertNotIn("GEN", result.stdout)
         self.assertIn("EGO_HAND_ROUTE=mediapipe|wilor|parallel", result.stdout)
 
     def test_orbbec_check_accepts_complete_session_layout(self):
@@ -74,25 +75,28 @@ class RunOfflineScriptTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("configuration and required inputs are ready", result.stdout)
 
-    def test_gen_check_accepts_mcap_and_camera_selection(self):
+    def test_orbbec_is_the_default_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            mcap = root / "recording.mcap"
-            mcap.touch()
-            fake_python = root / "fake-python"
-            fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            fake_python.chmod(0o755)
+            session = root / "recording"
+            session.mkdir()
+            for suffix in ("camera_left.mp4", "camera_right.mp4", "camera_left_pts.csv",
+                           "camera_right_pts.csv", "calibration_camera.yaml"):
+                (session / f"take_{suffix}").touch()
             env = self.base_env(root)
-            env.update({
-                "EGO_SOURCE": "gen",
-                "EGO_MCAP": str(mcap),
-                "EGO_LEFT_CAMERA": "camera2",
-                "EGO_RIGHT_CAMERA": "camera3",
-                "EGO_PYTHON": str(fake_python),
-            })
+            env.pop("EGO_SOURCE", None)
+            env["EGO_SESSION"] = str(session)
             result = self.run_script("check", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("GEN cameras: camera2/camera3", result.stdout)
+            self.assertIn("source: orbbec", result.stdout)
+
+    def test_rejects_removed_device_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = os.environ.copy()
+            env.update({"EGO_SOURCE": "gen", "EGO_OUTPUT": str(Path(temporary) / "output")})
+            result = self.run_script("check", env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("only supported source", result.stderr)
 
     def test_rejects_unknown_source(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -108,12 +112,9 @@ class RunOfflineScriptTest(unittest.TestCase):
     def test_rejects_unknown_route(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            mcap = root / "recording.mcap"
-            mcap.touch()
             env = os.environ.copy()
             env.update({
-                "EGO_SOURCE": "gen",
-                "EGO_MCAP": str(mcap),
+                "EGO_SOURCE": "orbbec",
                 "EGO_OUTPUT": str(root / "output"),
                 "EGO_HAND_ROUTE": "bad",
             })

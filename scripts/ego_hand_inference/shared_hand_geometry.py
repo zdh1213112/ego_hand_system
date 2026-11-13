@@ -148,7 +148,7 @@ def rotation_exp(vectors):
 
 
 def project_base_torch(camera, points):
-    """Differentiable counterpart of the repository's KB / GEN-DS / pinhole models."""
+    """Differentiable counterpart of the repository's KB / DS / pinhole models."""
     import torch
     rotation = torch.as_tensor(camera.T_base_camera[:3, :3], device=points.device, dtype=points.dtype)
     center = torch.as_tensor(camera.T_base_camera[:3, 3], device=points.device, dtype=points.dtype)

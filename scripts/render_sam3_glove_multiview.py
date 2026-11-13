@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a six-view video with the SAM3 glove masks over the camera images.
+"""Render a calibrated multiview video with the SAM3 glove masks over the camera images.
 
 The regular SAM3 assist stage intentionally stores compact mask diagnostics,
 not full-resolution masks.  This renderer therefore re-runs the same
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument(
         "--cameras", nargs="+",
-        default=["camera0", "camera1", "camera2", "camera3", "camera4", "camera5"],
+        default=["camera0", "camera1", "camera2", "camera3"],
     )
     parser.add_argument("--columns", type=int, default=3)
     parser.add_argument("--tile-width", type=int, default=480)

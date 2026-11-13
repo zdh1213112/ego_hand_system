@@ -35,7 +35,7 @@ from mcap_protobuf.decoder import DecoderFactory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-from ego_data.genrobot_mcap import H264MatroskaWriter  # noqa: E402
+from ego_data.h264 import H264MatroskaWriter  # noqa: E402
 
 
 DEFAULT_TOPICS = {

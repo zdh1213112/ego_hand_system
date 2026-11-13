@@ -28,7 +28,7 @@ def ds_camera(camera_id: str, tx: float) -> CameraCalibration:
 
 
 class DoubleSphereTests(unittest.TestCase):
-    def test_projection_matches_gen_reference_formula(self):
+    def test_projection_matches_reference_formula(self):
         camera = ds_camera("camera2", 0.0)
         points = np.asarray([[0.2, -0.1, 1.2], [-0.1, 0.3, 0.8]])
         pixels, valid = project_points(camera, points)

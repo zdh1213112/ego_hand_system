@@ -3,7 +3,7 @@
 [![CI](https://github.com/zdh1213112/ego_hand_system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zdh1213112/ego_hand_system/actions/workflows/ci.yml)
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-3776AB)
 
-面向 **Orbbec EGO4 / EGO-4B 与 GEN 头戴相机**的手部三维重建系统，提供离线推理、实时跟踪、MANO 拟合、VIO 联动及训练标签生成。
+面向 **Orbbec EGO4 / EGO-4B 头戴相机**的手部三维重建系统，提供离线推理、实时跟踪、MANO 拟合、VIO 联动及训练标签生成。
 
 四目共享推理支持 **MP4 + PTS 和 H264 MCAP**：每个同步时刻、每只手拟合一份 MANO 模型，并用原始标定回投到四路鱼眼画面。
 
@@ -26,8 +26,8 @@
 | 工作流 | 输入与能力 | 入口 / 文档 |
 | --- | --- | --- |
 | 四目共享 MANO 推理 | Orbbec 四路原图，跨视角关联、共享三维模型、四目视频与结果导出 | `scripts/run_hand_inference.sh` · [说明](docs/SHARED_HAND_INFERENCE_zh.md) |
-| 双目离线重建 | Orbbec / GEN，MediaPipe、WiLoR、三角化、稳定化及 MANO 拟合 | `scripts/run_offline.sh` · [完整操作](docs/ADVANCED_WORKFLOWS_zh.md#离线启动) |
-| GEN 六目融合 | 原始 KB / Double Sphere 几何、多视角 WiLoR 与 RANSAC | `scripts/run_multiview_wilor_experiment.sh` · [说明](docs/GEN_SIX_CAMERA_WILOR_FUSION.md) |
+| 双目离线重建 | Orbbec，MediaPipe、WiLoR、三角化、稳定化及 MANO 拟合 | `scripts/run_offline.sh` · [完整操作](docs/ADVANCED_WORKFLOWS_zh.md#离线启动) |
+| Orbbec 四目融合 | KB 射线、多视角 WiLoR、RANSAC 与时序处理 | `scripts/run_multiview_wilor_experiment.sh` · [说明](docs/ADVANCED_WORKFLOWS_zh.md#四目多视角融合) |
 | EGO + NOKOV 标签 | 原图对齐、双手 MANO 拟合、标签导出与验收 | `scripts/export_ego_nokov_labels.sh` · [命令清单](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) |
 | 实时跟踪与 VIO | Orbbec 实时手部、Basalt 轨迹及多模态联动 | [实时使用](docs/EGO_REALTIME.md) · [世界轨迹](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md) |
 | 标签检查与查看 | 数据集检查、投影验证与可视化 | [标签查看器](docs/WILOR_LABEL_VIEWER_zh.md) · [数据交接约定](docs/MANO_GLOVE_LABEL_HANDOFF_zh.md) |
@@ -45,7 +45,7 @@ flowchart LR
 
 ## 快速开始
 
-以下步骤运行四目共享推理。双目、六目、实时与标签生成见[其他工作流](#其他工作流)。
+以下步骤运行四目共享推理。双目、四目、实时与标签生成见[其他工作流](#其他工作流)。
 
 ### 1. 获取代码和环境
 
@@ -154,10 +154,9 @@ OUTPUT/
 
 | 需求 | 使用文档 |
 | --- | --- |
-| 双目完整运行、分阶段执行、断点恢复、环境变量、C++ 构建 | [双目、六目与进阶工作流](docs/ADVANCED_WORKFLOWS_zh.md) |
-| GEN 六目设计与运行 | [六目 WiLoR](docs/GEN_SIX_CAMERA_WILOR_FUSION.md) · [射线与 RANSAC](docs/GEN_MULTIVIEW_RANSAC_ANCHOR_FUSION.md) |
+| 双目完整运行、分阶段执行、断点恢复、环境变量、C++ 构建 | [Orbbec 双目、四目与进阶工作流](docs/ADVANCED_WORKFLOWS_zh.md) |
 | 原始数据生成 NOKOV/MANO 标签 | [流程说明](docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md) · [命令清单](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) |
-| 多目训练标签导出 | [GEN 六目标签](docs/GEN_SIX_CAMERA_WILOR_LABEL_EXPORT_GUIDE.md) · [NOKOV 标签](docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md) |
+| 多目训练标签导出 | [Orbbec 多目操作](docs/ADVANCED_WORKFLOWS_zh.md#训练标签导出) · [NOKOV 标签](docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md) |
 | Orbbec 实时与多模态联动 | [实时使用](docs/EGO_REALTIME.md) |
 | Basalt 世界坐标轨迹 | [VIO 使用](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md) |
 | 原有 MANO 稳定化与 21-DOF 展示 | [稳定化](docs/MANO_MOTION_STABILITY_OPTIMIZATION_20260804.md) · [交互面板](docs/mano_21dof_dashboard_20260804.md) |
@@ -169,6 +168,6 @@ OUTPUT/
 PYTHONPATH=scripts conda run -n ego-hand python -m pytest -q tests
 ```
 
-融合与清理后的完整环境及干净克隆均为 **302 passed, 1 skipped**；轻量 CI、MP4/MCAP 短片及固定输入数值对比见[验收记录](docs/INTEGRATION_VALIDATION_20261113.md)。不同工作流需要相应的模型、数据或硬件依赖。
+移除 GEN 相机专用入口后，完整回归为 **305 passed, 1 skipped**，轻量 CI 为 **25 passed**；变更范围及真实 Orbbec 数据检查见[本次验证记录](docs/ORBBEC_ONLY_VALIDATION_20261113.md)。此前的干净克隆、MP4/MCAP 短片及固定输入数值对比见[融合验收记录](docs/INTEGRATION_VALIDATION_20261113.md)。不同工作流需要相应的模型、数据或硬件依赖。
 
 基于 [WiLoR](https://github.com/Jzboom/WiLoR)、[MANO](https://mano.is.tue.mpg.de/) 和 [Basalt](https://github.com/VladyslavUsenko/basalt)。上游版本与资产信息见 [third_party/manifest.json](third_party/manifest.json)，使用时遵循各项目和模型的许可。

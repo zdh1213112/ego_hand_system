@@ -14,7 +14,7 @@
 原目录融合期间出现的未提交并行优化按用户要求留在原处，另行合入。
 
 新入口为 `scripts/run_hand_inference.sh`，新增实现放在 `scripts/ego_hand_inference/`。
-原有运行入口、C++ 工具、标定、双目/六目推理、实时、VIO、NOKOV 和标签代码保留。
+原有运行入口、C++ 工具、标定、Orbbec 双目/多目推理、实时、VIO、NOKOV 和标签代码保留。
 既有运行代码仅补充 `fuse_multiview_wilor_guided.py` 遗漏的 `Mapping` 类型导入，修复静态检查失败。
 
 ## 清理

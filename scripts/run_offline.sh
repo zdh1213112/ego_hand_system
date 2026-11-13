@@ -7,19 +7,14 @@ cd "${PROJECT_DIR}"
 
 usage() {
     cat <<'EOF'
-Run the offline stereo hand pipeline for Orbbec EGO sessions or GEN DAS EGO MCAPs.
+Run the offline stereo hand pipeline for Orbbec EGO sessions.
 
 Required environment variables:
-  EGO_SOURCE=orbbec|gen
+  EGO_SOURCE=orbbec             optional; default: orbbec
   EGO_OUTPUT=output/<experiment-name>
 
 Orbbec input:
   EGO_SESSION=recordings/Orbbec_Ego_<serial>_<time>
-
-GEN input:
-  EGO_MCAP=/path/to/recording.mcap
-  EGO_LEFT_CAMERA=camera2       # optional
-  EGO_RIGHT_CAMERA=camera3      # optional
 
 Usage:
   ./scripts/run_offline.sh [check|prepare|stereo|stabilize|fit|render|wilor|all]
@@ -29,7 +24,6 @@ The positional stage overrides EGO_STAGE. The default stage is "all".
 Useful optional variables:
   EGO_DEVICE=auto|cuda|cpu      MANO device; default: auto
   EGO_MAX_PAIRS=0               limit downstream pairs; 0 means all
-  EGO_MAX_FRAMES=0              normalization frame limit; 0 means all (GEN only)
   EGO_NO_VIDEO=0|1              skip diagnostic videos; final CSVs remain
   EGO_CONDA_ENV=ego-hand        Conda environment used when not already active
   EGO_PYTHON=/path/to/python    override Python/Conda selection
@@ -51,10 +45,6 @@ Examples:
   ./scripts/run_offline.sh check
   ./scripts/run_offline.sh all
 
-  export EGO_SOURCE=gen
-  export EGO_MCAP=/data/DAS-Ego_example.mcap
-  export EGO_OUTPUT=output/gen_das_example
-  ./scripts/run_offline.sh all
 EOF
 }
 
@@ -128,14 +118,7 @@ run_python() {
 
 print_config() {
     log "source: ${EGO_SOURCE}"
-    if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
-        log "session: ${EGO_SESSION}"
-    else
-        log "mcap: ${EGO_MCAP}"
-        log "GEN cameras: ${EGO_LEFT_CAMERA}/${EGO_RIGHT_CAMERA}"
-        log "normalized dataset: ${NORMALIZED_DATASET}"
-        log "rectified dataset: ${RECTIFIED_DATASET}"
-    fi
+    log "session: ${EGO_SESSION}"
     log "output root: ${EGO_OUTPUT}"
     log "stage: ${EGO_STAGE}"
     log "python: ${PYTHON_DESCRIPTION}"
@@ -221,38 +204,10 @@ rectify_dataset() {
         "${rectify_limit[@]}"
 }
 
-prepare_gen() {
-    if ! stage_output_ready "GEN normalization" "${NORMALIZED_DATASET}" "${NORMALIZED_DATASET}/manifest.json"; then
-        log "checking GEN Python dependencies and MCAP decoding"
-        run_python "${PROJECT_DIR}/scripts/check_gen_environment.py" \
-            --mcap "${EGO_MCAP}" \
-            --camera "${EGO_LEFT_CAMERA}" \
-            --other-camera "${EGO_RIGHT_CAMERA}" \
-            --device "${EGO_DEVICE}"
-        local normalize_limit=()
-        if ((EGO_MAX_FRAMES > 0)); then
-            normalize_limit=(--max-frames "${EGO_MAX_FRAMES}")
-        fi
-        log "normalizing GEN MCAP"
-        run_python "${PROJECT_DIR}/scripts/normalize_recording.py" \
-            --input "${EGO_MCAP}" \
-            --output "${NORMALIZED_DATASET}" \
-            --left-camera "${EGO_LEFT_CAMERA}" \
-            --right-camera "${EGO_RIGHT_CAMERA}" \
-            "${normalize_limit[@]}"
-    fi
-
-    rectify_dataset
-}
-
 run_prepare() {
-    if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
-        prepare_orbbec
-        normalize_orbbec
-        rectify_dataset
-    else
-        prepare_gen
-    fi
+    prepare_orbbec
+    normalize_orbbec
+    rectify_dataset
 }
 
 run_stereo() {
@@ -514,19 +469,15 @@ if (($# > 1)); then
     exit 2
 fi
 
-EGO_SOURCE="${EGO_SOURCE:-}"
+EGO_SOURCE="${EGO_SOURCE:-orbbec}"
 EGO_OUTPUT="${EGO_OUTPUT:-}"
 EGO_STAGE="${1:-${EGO_STAGE:-all}}"
 EGO_SESSION="${EGO_SESSION:-}"
-EGO_MCAP="${EGO_MCAP:-}"
-EGO_LEFT_CAMERA="${EGO_LEFT_CAMERA:-camera2}"
-EGO_RIGHT_CAMERA="${EGO_RIGHT_CAMERA:-camera3}"
 EGO_MODEL="${EGO_MODEL:-${PROJECT_DIR}/models/hand_landmarker.task}"
 EGO_MANO_SOURCE="${EGO_MANO_SOURCE:-${PROJECT_DIR}/third_party/MANO}"
 EGO_MANO_MODELS="${EGO_MANO_MODELS:-${PROJECT_DIR}/models/mano}"
 EGO_DEVICE="${EGO_DEVICE:-auto}"
 EGO_MAX_PAIRS="${EGO_MAX_PAIRS:-0}"
-EGO_MAX_FRAMES="${EGO_MAX_FRAMES:-0}"
 EGO_NO_VIDEO="${EGO_NO_VIDEO:-0}"
 EGO_CONDA_ENV="${EGO_CONDA_ENV:-ego-hand}"
 EGO_HAND_ROUTE="${EGO_HAND_ROUTE:-mediapipe}"
@@ -542,8 +493,8 @@ EGO_WILOR_DETECTOR="${EGO_WILOR_DETECTOR:-${PROJECT_DIR}/models/wilor/detector.p
 EGO_WILOR_CONFIG="${EGO_WILOR_CONFIG:-${PROJECT_DIR}/models/wilor/model_config.yaml}"
 EGO_WILOR_MANO_DIR="${EGO_WILOR_MANO_DIR:-${EGO_MANO_MODELS}}"
 
-[[ "${EGO_SOURCE}" == "orbbec" || "${EGO_SOURCE}" == "gen" ]] || \
-    die "set EGO_SOURCE to 'orbbec' or 'gen'"
+[[ "${EGO_SOURCE}" == "orbbec" ]] || \
+    die "set EGO_SOURCE to 'orbbec' (only supported source)"
 [[ -n "${EGO_OUTPUT}" ]] || die "set EGO_OUTPUT to a new experiment directory"
 [[ "${EGO_OUTPUT}" != "/" && "${EGO_OUTPUT}" != "." && "${EGO_OUTPUT}" != "${PROJECT_DIR}" ]] || \
     die "unsafe EGO_OUTPUT: ${EGO_OUTPUT}"
@@ -556,7 +507,6 @@ EGO_WILOR_MANO_DIR="${EGO_WILOR_MANO_DIR:-${EGO_MANO_MODELS}}"
 [[ "${EGO_WILOR_FAST}" == "0" || "${EGO_WILOR_FAST}" == "1" ]] || die "EGO_WILOR_FAST must be 0 or 1"
 [[ "${EGO_WILOR_SAVE_VERTICES}" == "0" || "${EGO_WILOR_SAVE_VERTICES}" == "1" ]] || die "EGO_WILOR_SAVE_VERTICES must be 0 or 1"
 validate_non_negative_integer EGO_MAX_PAIRS "${EGO_MAX_PAIRS}"
-validate_non_negative_integer EGO_MAX_FRAMES "${EGO_MAX_FRAMES}"
 validate_non_negative_integer EGO_WILOR_FRAME_STRIDE "${EGO_WILOR_FRAME_STRIDE}"
 [[ "${EGO_WILOR_FRAME_STRIDE}" != "0" ]] || die "EGO_WILOR_FRAME_STRIDE must be at least 1"
 validate_non_negative_integer EGO_WILOR_BATCH_SIZE "${EGO_WILOR_BATCH_SIZE}"
@@ -567,16 +517,9 @@ case "${EGO_STAGE}" in
     *) die "unknown stage '${EGO_STAGE}'; use check, prepare, stereo, stabilize, fit, render, wilor, or all" ;;
 esac
 
-if [[ "${EGO_SOURCE}" == "orbbec" ]]; then
-    [[ -n "${EGO_SESSION}" ]] || die "set EGO_SESSION for EGO_SOURCE=orbbec"
-    EGO_SESSION="$(realpath -m "${EGO_SESSION}")"
-    validate_orbbec_session
-else
-    [[ -n "${EGO_MCAP}" ]] || die "set EGO_MCAP for EGO_SOURCE=gen"
-    [[ "${EGO_LEFT_CAMERA}" != "${EGO_RIGHT_CAMERA}" ]] || die "GEN left/right cameras must differ"
-    EGO_MCAP="$(realpath -m "${EGO_MCAP}")"
-    require_file "${EGO_MCAP}"
-fi
+[[ -n "${EGO_SESSION}" ]] || die "set EGO_SESSION for EGO_SOURCE=orbbec"
+EGO_SESSION="$(realpath -m "${EGO_SESSION}")"
+validate_orbbec_session
 
 EGO_OUTPUT="$(realpath -m "${EGO_OUTPUT}")"
 [[ "${EGO_OUTPUT}" != "/" && "${EGO_OUTPUT}" != "${PROJECT_DIR}" ]] || \
@@ -611,14 +554,6 @@ case "${EGO_STAGE}" in
     check)
         if [[ "${EGO_HAND_ROUTE}" == "wilor" || "${EGO_HAND_ROUTE}" == "parallel" ]]; then
             validate_wilor_assets
-        fi
-        if [[ "${EGO_SOURCE}" == "gen" ]]; then
-            log "checking GEN runtime dependencies and one decoded stereo frame"
-            run_python "${PROJECT_DIR}/scripts/check_gen_environment.py" \
-                --mcap "${EGO_MCAP}" \
-                --camera "${EGO_LEFT_CAMERA}" \
-                --other-camera "${EGO_RIGHT_CAMERA}" \
-                --device "${EGO_DEVICE}"
         fi
         log "configuration and required inputs are ready"
         ;;

@@ -13,6 +13,7 @@ from mcap_protobuf.writer import Writer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from ego_hand_inference.normalize_orbbec_multiview_mcap import DEFAULT_TOPICS, normalize, synchronize_rows
 from ego_hand_inference.ego_data.calibration import CameraCalibration
+from normalize_multiview_recording import normalize as normalize_public
 
 
 def make_mcap(path, missing_camera=None):
@@ -64,8 +65,9 @@ def make_mcap(path, missing_camera=None):
                 )
 
 
+@pytest.mark.parametrize("normalizer", [normalize, normalize_public])
 def test_real_h264_mcap_remux_synchronizes_four_cameras_and_preserves_calibration(
-    tmp_path,
+    tmp_path, normalizer,
 ):
     source = tmp_path / "recording.mcap"
     make_mcap(source)
@@ -94,9 +96,10 @@ def test_real_h264_mcap_remux_synchronizes_four_cameras_and_preserves_calibratio
         width=64,
         height=48,
         calibration_dir=cal,
+        calibration=cal,
         allow_truncated=False,
     )
-    out = normalize(args)
+    out = normalizer(args)
     manifest = json.loads((out / "manifest.json").read_text())
     assert (
         manifest["synchronization"]["frame_count"] == 3
@@ -117,7 +120,7 @@ def test_real_h264_mcap_remux_synchronizes_four_cameras_and_preserves_calibratio
     args.input = broken
     args.output = tmp_path / "missing-output"
     with pytest.raises(RuntimeError, match="camera3"):
-        normalize(args)
+        normalizer(args)
     assert not args.output.exists()
 
 

@@ -10,8 +10,8 @@ OUTPUT=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
 DETECTOR="${EGO_WILOR_DETECTOR:-$ROOT/models/wilor/detector.pt}"
-CAMERAS=(camera0 camera1 camera2 camera3 camera4 camera5)
-REFERENCE_CAMERA="camera2"
+CAMERAS=(camera0 camera1 camera2 camera3)
+REFERENCE_CAMERA="camera0"
 MAX_FRAMES=60
 BATCH_SIZE=""
 FRAME_BATCH_SIZE=""
@@ -83,8 +83,7 @@ usage() {
   echo "Optional: --final-video also generates a final delivery video (hybrid trusted-3D/native-2D by default; disabled by default)."
   echo "Usage: $0 (--mcap FILE | --session EGO4_DIR) --output DIR [--detector FILE] [--cameras camera0 camera1 ...] [--reference-camera CAMERA] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--sam3-glove-assist 0|1] [--sam3-conda-env NAME] [--sam3-model FILE] [--sam3-prompt TEXT] [--sam3-text-only 0|1] [--sam3-refine-2d 0|1] [--sam3-max-2d-correction-px N] [--sam3-2d-correction-blend N] [--sam3-max-2d-bone-change-ratio N] [--condition-hard-threshold N] [--anatomy-refinement 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--final-renderer hybrid|fused] [--no-video] [--stop-after-inference]"
   echo "Defaults for glove stability: --sam3-refine-2d=0, --condition-hard-threshold=150, --anatomy-refinement=0. Override with EGO_* or the explicit flags."
-  echo "Six-camera default anchors: camera0+camera5 (widest baseline); camera2+camera3 is used only when the wide pair is unavailable."
-  echo "EGO4 --session uses the GEN WiLoR/fusion/temporal pipeline with four calibrated cameras; preferred anchor pair is camera0+camera1."
+  echo "Orbbec EGO4 MP4/MCAP inputs use four calibrated cameras; preferred anchor pair is camera0+camera1."
   echo "Optional --allow-single-hand-anchors 1 retains geometrically valid single-hand frames."
   echo "Final renderer: EGO_FINAL_RENDERER=hybrid (default) or fused; hybrid falls back to native 2D when depth is not trustworthy."
   echo "Final video env: EGO_FINAL_RENDERER (default hybrid), EGO_FINAL_HYBRID_RESIDUAL_THRESHOLD_PX (12), EGO_FINAL_HYBRID_WRIST_THRESHOLD_PX (15), EGO_FINAL_HYBRID_MAX_CONDITION (100), EGO_FINAL_HYBRID_MAX_STEREO_DIFFERENCE_MM (20), EGO_FINAL_PREDICTED_2D_FALLBACK (default 0), EGO_FINAL_REQUIRE_LOCAL_VIEW (default 1)."
@@ -211,7 +210,7 @@ if ((${#CAMERAS[@]} < 2)); then
 fi
 declare -A CAMERA_SEEN=()
 for CAMERA in "${CAMERAS[@]}"; do
-  [[ "$CAMERA" =~ ^camera[0-9]+$ ]] || {
+  [[ "$CAMERA" =~ ^camera[0-3]$ ]] || {
     echo "invalid camera id: $CAMERA" >&2
     exit 2
   }
@@ -225,17 +224,9 @@ done
   echo "reference camera is not in the selected camera set: $REFERENCE_CAMERA" >&2
   exit 2
 }
-if [[ "$INPUT_KIND" == "session" && "${CAMERA_SEEN[camera1]:-}" == 1 && "${CAMERA_SEEN[camera0]:-}" == 1 ]]; then
+if [[ "${CAMERA_SEEN[camera1]:-}" == 1 && "${CAMERA_SEEN[camera0]:-}" == 1 ]]; then
   ANCHOR_CAMERAS=(camera0 camera1)
   ANATOMY_PROTECTED_CAMERAS=(camera0 camera1)
-elif [[ "${CAMERA_SEEN[camera0]:-}" == 1 && "${CAMERA_SEEN[camera5]:-}" == 1 ]]; then
-  # The six cameras are nearly collinear.  camera0/camera5 provide the
-  # widest baseline (~20 cm), whereas camera2/camera3 are adjacent
-  # (~5.9 cm) and make depth extremely ill-conditioned.  Prefer the wide
-  # pair whenever both cameras are available; fall back to the old middle
-  # pair only for reduced camera selections.
-  ANCHOR_CAMERAS=(camera0 camera5)
-  ANATOMY_PROTECTED_CAMERAS=(camera0 camera5)
 elif [[ "${CAMERA_SEEN[camera2]:-}" == 1 && "${CAMERA_SEEN[camera3]:-}" == 1 ]]; then
   ANCHOR_CAMERAS=(camera2 camera3)
   ANATOMY_PROTECTED_CAMERAS=(camera2 camera3)
@@ -362,7 +353,6 @@ CAMERA_CONFIDENCE_ARGS=()
 for CAMERA in "${CAMERAS[@]}"; do
   case "$CAMERA" in
     camera0) CONFIDENCE="0.2" ;;
-    camera4|camera5) CONFIDENCE="0.1" ;;
     *) CONFIDENCE="0.3" ;;
   esac
   CAMERA_CONFIDENCE_ARGS+=(--camera-confidence "${CAMERA}=${CONFIDENCE}")
@@ -447,7 +437,7 @@ config = {
         "max_2d_bone_change_ratio": float(sam3_max_2d_bone_change_ratio),
     },
     "camera_confidences": {"camera0": 0.2, "camera1": 0.3, "camera2": 0.3,
-                           "camera3": 0.3, "camera4": 0.1, "camera5": 0.1},
+                           "camera3": 0.3},
     "fusion_algorithm": "anchor_guided_condition_rejected_joint_temporal_v28_branch_guard_cam2_sam3_angle_weighted",
     "fusion_stability": {
         "suppress_duplicate_detector_boxes": True,
@@ -532,6 +522,12 @@ if path.exists():
         if {"camera2", "camera3"}.issubset(previous["cameras"])
         else previous["cameras"][:2],
     )
+    # Older four-camera results stored confidence entries for unused cameras.
+    if "camera_confidences" in previous:
+        previous["camera_confidences"] = {
+            camera: score for camera, score in previous["camera_confidences"].items()
+            if camera in config["camera_confidences"]
+        }
     previous.setdefault("detector_handedness", "strict")
     previous.setdefault("allow_single_hand_anchors", False)
     previous.setdefault("detector", str(detector))
@@ -696,7 +692,7 @@ if [[ ! -f "$FUSION/summary.json" ]]; then
   if [[ "$INPUT_KIND" == "session" ]]; then
     echo "[multiview] fuse calibrated KB rays with RANSAC"
   else
-    echo "[multiview] fuse native Double-Sphere rays with RANSAC"
+    echo "[multiview] fuse calibrated KB rays with RANSAC"
   fi
   FUSION_ARGS=(
     --dataset "$NORMALIZED"

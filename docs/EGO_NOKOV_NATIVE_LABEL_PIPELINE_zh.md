@@ -240,13 +240,13 @@ TASK_ZERO="$TASK_RUN/joint_mano_192916_zero_offset"
 
 ## 借鉴旧多目链路的代码审查（20261112）
 
-本次检查了同项目 GEN 六目链路 `run_multiview_wilor_experiment.sh`、`fuse_multiview_wilor_guided.py`、`fuse_multiview_wilor.py`、`glove_marker_assist.py`、`fusion_anatomy_refinement.py`，以及 `omniegocap_orbbec/ego_hand_system` 中的旧实现副本。旧链路主要是各视角二维候选的关联、鲁棒三维融合和时序修复，不等同于直接用四路图像优化 MANO 参数。
+本次检查了项目中保留的多视角几何与时序链路 `run_multiview_wilor_experiment.sh`、`fuse_multiview_wilor_guided.py`、`fuse_multiview_wilor.py`、`glove_marker_assist.py`、`fusion_anatomy_refinement.py`。旧链路主要是各视角二维候选的关联、鲁棒三维融合和时序修复，不等同于直接用四路图像优化 MANO 参数。
 
 | 可借鉴部分 | 现有实现 | 如何用于当前设备 |
 | --- | --- | --- |
 | 原像素反投影射线 | `fuse_multiview_wilor.py:_ray_in_base`、`camera_models/kb.py:unproject` | 已支持真实 KB 标定；只把坐标反投影为射线，不生成去畸变图像 |
 | 逐点 RANSAC | `fuse_multiview_wilor.py:triangulate_ransac` | 对同一物理 marker 的多目观测找几何一致内点，拒绝错误视角，而非平均拉动所有相机 |
-| 深度可靠性 | `_ray_geometry_weights`、`_ray_condition_number` | 近乎平行射线即使像素残差小也需降权/拒绝；四目不能照搬六目的视角数量门槛 |
+| 深度可靠性 | `_ray_geometry_weights`、`_ray_condition_number` | 近乎平行射线即使像素残差小也需降权/拒绝；视角数量门槛应与四目配置一致 |
 | 视角共识 | `fuse_multiview_wilor_guided.py:_robust_view_consensus` | 按手、按帧动态去除异常视角，不固定认为某台相机永远可靠 |
 | 同手/同指对应 | `glove_marker_assist.py:associate_marker_blobs`、`_remove_same_finger_reversals` | 借用一对一、手指归属和顺序约束，利用 NOKOV 物理身份引导；不得直接将球心视为解剖关节 |
 | 时序修复与复投影保护 | `fusion_anatomy_refinement.py` | 借鉴可靠邻帧支持、骨长/掌部约束与修改后逐视角复投影检查，显式区分观测和插值 |
@@ -255,7 +255,7 @@ TASK_ZERO="$TASK_RUN/joint_mano_192916_zero_offset"
 
 - 旧亮斑检测器针对低饱和高亮反光球；当前白手套上的球常呈暗斑，需沿用/改造当前暗斑检测，不能直接复制 HSV 亮斑阈值。
 - 旧 WiLoR 单目二维输出使用虚拟裁剪相机投影，不是独立人工真值，且可能带镜头/模型偏差；可作关联初值或弱先验，不能作为 NOKOV 标签的唯一真值。
-- 旧六目 DS 镜头参数及固定 camera2/3 锚点不能复制到 EGO 四目。复用的是统一的射线算法，传入本设备真实 KB 模型。
+- 其他标定模型的镜头参数及固定锚点不能复制到 EGO 四目。复用的是统一的射线算法，传入本设备真实 KB 模型。
 - `prepare_multiview_mano_input.py` 仍包含历史矫正坐标准备；当前保持 `prepare_native_nokov_mano_input.py`，不恢复图片矫正流程。
 - 旧 marker 辅助默认只关联手指 1..20，将手腕视为没有直接 marker；本次 NOKOV 映射中索引 0 是实际 `WristM`。手腕需单独处理，不能直接套旧索引语义。
 - 旧入口 `FINAL_RENDERER` 默认 `hybrid`，三维不可靠时可显示单目二维回退。旧视频的二维贴合好，不直接证明底层共享三维标签更准确；应核对具体视频的回退记录。
@@ -281,7 +281,7 @@ TASK_ZERO="$TASK_RUN/joint_mano_192916_zero_offset"
 
 可靠观测验收通过后，再将其作为附加约束用于共享 MANO 的逐级细化。保留 NOKOV 原始三维观测，分别处理物理 marker 与解剖关节的语义；表面附着点应按手指/骨段限制并单独验证，不能重新整体替换三维主监督。可以先验证刚体修正，再开放局部手指姿态，均保留基线与逐阶段验收。
 
-本次已完成旧代码审查及几何模块复用验证，尚未将逐帧观测与新鲁棒融合接入生产导出；当前 `--joint` 仍是前述受限修正 v2，不能宣称已采用旧六目融合链路。
+本次已完成旧代码审查及几何模块复用验证，尚未将逐帧观测与新鲁棒融合接入生产导出；当前 `--joint` 仍是前述受限修正 v2，不能宣称已接入其他融合链路。
 
 ## 逐帧观测层已接入：20261112 第一阶段
 
@@ -774,8 +774,6 @@ bash /home/p3/data_sda1/EGO_glove/ego_hand_system/scripts/run_native_wilor_expor
 视频标题为 GenRobot.AI DEX 2.0 Test Cases。24～80 秒附近的抽样帧展示 Ground Truth 与 Dex Tracking 的关键点／骨架对照，画面写有 `<2 mm`。另有手部模型渲染、腕部相机和触觉展示。视频没有给出足够信息把该数值解释为所有 mesh 顶点到实际手套表面的距离，也未说明统计口径、被测点定义、对齐方式和测试分布。
 
 [Dex 2.0 官方产品页](https://www.genrobot.ai/products/dex2)明确介绍侧置外骨骼与 21 个关节编码器，直接记录关节运动。具体角度标定、骨架映射、手型适配及根部定位算法并未在已查资料中完整公开。因此可以确认硬件输入与我们不同，不能声称知道其完整私有求解器。
-
-官方另有 [Gen-HumanEgo / HandTrack 说明](https://www.genrobot.com/blog/gen-human-ego)，明确介绍多视角视觉特征预测 MANO 和 21 个关键点。这是另一条公开的视觉路线，不能据此断言本段 Dex 手套视频的模型也是 MANO。
 
 ### 对当前项目的意义
 

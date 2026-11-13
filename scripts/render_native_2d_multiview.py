@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a conservative, native WiLoR 2-D six-view review video.
+"""Render a conservative, native WiLoR 2-D multiview review video.
 
 This renderer intentionally does not consume fused 3-D points.  It reads the
 saved per-camera WiLoR hypotheses, keeps the detector-side identity, rejects

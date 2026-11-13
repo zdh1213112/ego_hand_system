@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fuse six-camera dual-hypothesis WiLoR observations with native-DS RANSAC."""
+"""Fuse calibrated multiview dual-hypothesis WiLoR observations with native-DS RANSAC."""
 
 from __future__ import annotations
 

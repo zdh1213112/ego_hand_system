@@ -173,24 +173,6 @@ def quaternion_transform(values) -> np.ndarray:
     return result
 
 
-def camera_from_genrobot_message(camera_id: str, message) -> CameraCalibration:
-    model_name = str(message.distortion_model).strip().lower()
-    if model_name not in ("ds", "double_sphere", "double sphere"):
-        raise ValueError(f"GEN camera {camera_id} has unsupported distortion model {model_name!r}")
-    D = np.asarray(message.D, dtype=np.float64)
-    K = np.asarray(message.K, dtype=np.float64)
-    if D.size < 6 or K.size != 9:
-        raise ValueError(f"GEN camera {camera_id} has incomplete K/D calibration")
-    # GEN publishes [fx, fy, cx, cy, xi, alpha] in D.  Preserve it verbatim.
-    return CameraCalibration(
-        camera_id=camera_id,
-        frame_id=str(message.frame_id),
-        model="DS",
-        image_size=(int(message.width), int(message.height)),
-        K=K.reshape(3, 3),
-        distortion=D[:6],
-        T_base_camera=quaternion_transform(message.T_b_c),
-    )
 
 
 def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
@@ -212,7 +194,7 @@ def cameras_from_ego_yaml(path: Path) -> dict[str, CameraCalibration]:
         ], dtype=np.float64)
         D = np.asarray([dist["k1"], dist["k2"], dist["k3"], dist["k4"]])
         # EGO YAML stores reference -> camera, while the common contract stores
-        # camera -> base/reference (the same convention as GEN T_b_c).
+        # camera -> base/reference.
         rotation_reference_camera = np.asarray(
             camera["extrinsics"]["rotation"], dtype=np.float64
         )

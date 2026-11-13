@@ -1,58 +1,27 @@
 #!/usr/bin/env python3
-"""Remux and synchronize an arbitrary set of GEN cameras in one MCAP pass."""
-
+"""Normalize a calibrated Orbbec EGO four-camera MCAP recording."""
 from __future__ import annotations
 
 import argparse
 from bisect import bisect_left
-import csv
-import hashlib
 import json
 from pathlib import Path
-import shutil
-import sys
 import tempfile
-
-import numpy as np
-
-from ego_data.genrobot_mcap import remux_stereo_mcap
+from types import SimpleNamespace
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument(
-        "--cameras", nargs="+", default=[f"camera{i}" for i in range(6)],
-        help="GEN camera IDs to synchronize",
-    )
-    parser.add_argument("--reference-camera", default="camera2")
-    parser.add_argument("--max-delta-us", type=int, default=1500)
-    parser.add_argument("--max-frames", type=int, default=0)
-    parser.add_argument(
-        "--allow-truncated",
-        action="store_true",
-        help=(
-            "keep complete MCAP messages when the file ends mid-record; "
-            "the incomplete tail is discarded"
-        ),
-    )
+    parser.add_argument('--input', required=True, type=Path)
+    parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--cameras', nargs='+', default=[f'camera{i}' for i in range(4)])
+    parser.add_argument('--reference-camera', default='camera0')
+    parser.add_argument('--max-delta-us', type=int, default=1500)
+    parser.add_argument('--max-frames', type=int, default=0)
+    parser.add_argument('--allow-truncated', action='store_true')
+    parser.add_argument('--calibration', '--calibration-dir', type=Path,
+                        help='Orbbec YAML or directory with camera0..3.json; discovered from the recording by default')
     return parser.parse_args()
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def synchronize_rows(
@@ -101,107 +70,46 @@ def synchronize_rows(
     return synchronized
 
 
-def normalize(args: argparse.Namespace) -> Path:
-    source = args.input.resolve()
-    output = args.output.resolve()
-    camera_ids = tuple(dict.fromkeys(args.cameras))
-    if not source.is_file():
-        raise FileNotFoundError(source)
-    if output.exists():
-        raise FileExistsError(f"output already exists: {output}")
-    if len(camera_ids) < 2 or args.reference_camera not in camera_ids:
-        raise ValueError("at least two unique cameras and a listed reference camera are required")
-    if args.max_delta_us < 0 or args.max_frames < 0:
-        raise ValueError("max-delta-us/max-frames must be non-negative")
+
+def normalize(args):
+    from normalize_orbbec_multiview_mcap import normalize as normalize_orbbec
+    from ego_hand_inference.ego_data.calibration import load_orbbec_four_calibrations
+    from ego_hand_inference.orbbec_io import discover_calibration, resolve_recording_input
+
+    cameras = list(args.cameras)
+    if len(cameras) < 2 or len(set(cameras)) != len(cameras) or not set(cameras) <= {f'camera{i}' for i in range(4)}:
+        raise ValueError('Orbbec EGO4 requires two to four distinct camera0..camera3 IDs')
+    if args.reference_camera not in cameras:
+        raise ValueError('reference camera must be selected')
+    source, _ = resolve_recording_input(args.input, 'mcap')
+    calibration_source = getattr(args, 'calibration', None) or discover_calibration(source)
+    calibration_source = Path(calibration_source).expanduser().resolve()
+    calibration = load_orbbec_four_calibrations(calibration_source)
+    output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
-    try:
-        video_paths = {}
-        for camera in camera_ids:
-            camera_root = temporary / "cameras" / camera
-            camera_root.mkdir(parents=True)
-            video_paths[camera] = camera_root / "video.mkv"
-        calibrations, frame_rows, decode_stats, topics = remux_stereo_mcap(
-            source,
-            camera_ids,
-            video_paths,
-            args.max_frames,
-            allow_truncated=args.allow_truncated,
-        )
-        for camera in camera_ids:
-            _write_csv(
-                temporary / "cameras" / camera / "timestamps.csv",
-                ["frame_index", "timestamp_ns", "timestamp_us", "source_message_index", "keyframe"],
-                frame_rows[camera],
-            )
-        synchronized = synchronize_rows(
-            frame_rows, camera_ids, args.reference_camera, args.max_delta_us * 1000
-        )
-        if not synchronized:
-            raise RuntimeError("no synchronized multiview frames were found")
-        fields = ["sync_index", "reference_timestamp_ns"]
-        for camera in camera_ids:
-            fields.extend([
-                f"{camera}_frame_index", f"{camera}_timestamp_ns", f"{camera}_delta_us",
-            ])
-        _write_csv(temporary / "multiview_frames.csv", fields, synchronized)
-        calibration_root = temporary / "calibration"
-        calibration_root.mkdir()
-        for camera in camera_ids:
-            calibrations[camera].save(calibration_root / f"{camera}.json")
-        absolute_deltas = [
-            abs(float(row[f"{camera}_delta_us"]))
-            for row in synchronized for camera in camera_ids
-            if camera != args.reference_camera
-        ]
-        manifest = {
-            "schema_version": 1,
-            "dataset_type": "normalized_multiview",
-            "source": {
-                "path": str(source), "size_bytes": source.stat().st_size,
-                "sha256": _sha256(source),
-                "allow_truncated": bool(args.allow_truncated),
-            },
-            "camera_ids": list(camera_ids),
-            "reference_camera": args.reference_camera,
-            "image_size": list(calibrations[args.reference_camera].image_size),
-            "storage": {"kind": "h264_matroska", "video_filename": "video.mkv"},
-            "topics": topics,
-            "decode": decode_stats,
-            "synchronization": {
-                "frame_count": len(synchronized),
-                "max_delta_us": args.max_delta_us,
-                "abs_delta_us_median": float(np.median(absolute_deltas)),
-                "abs_delta_us_p95": float(np.percentile(absolute_deltas, 95)),
-                "abs_delta_us_max": float(max(absolute_deltas)),
-            },
-            "coordinate_system": "GEN base/rig frame from camera_info T_b_c",
-        }
-        (temporary / "manifest.json").write_text(
-            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-        )
-        temporary.rename(output)
-    except Exception:
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
-    return output
+    with tempfile.TemporaryDirectory(prefix='.orbbec_calibration_', dir=output.parent) as directory:
+        directory = Path(directory)
+        for camera, value in calibration.items():
+            value.save(directory / f'{camera}.json')
+        result = normalize_orbbec(SimpleNamespace(
+            input=source, output=output, cameras=cameras, camera_topic=[],
+            reference_camera=args.reference_camera, max_delta_us=args.max_delta_us,
+            max_frames=args.max_frames, width=calibration[cameras[0]].image_size[0],
+            height=calibration[cameras[0]].image_size[1], calibration_dir=directory,
+            allow_truncated=getattr(args, 'allow_truncated', False),
+        ))
+    manifest_path = result / 'manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['calibration']['source'] = str(calibration_source)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+    return result
 
 
-def main() -> int:
-    args = parse_args()
-    output = normalize(args)
-    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-    sync = manifest["synchronization"]
-    print(f"Normalized multiview dataset: {output}")
-    print(f"Cameras: {', '.join(manifest['camera_ids'])}")
-    print(f"Synchronized frames: {sync['frame_count']}")
-    print(f"Synchronization |delta| p95/max: {sync['abs_delta_us_p95']:.1f}/{sync['abs_delta_us_max']:.1f} us")
+def main():
+    output = normalize(parse_args())
+    print(f'Normalized Orbbec multiview dataset: {output}')
     return 0
 
 
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as error:
-        print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+if __name__ == '__main__':
+    raise SystemExit(main())

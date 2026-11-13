@@ -33,46 +33,17 @@ from ego_data.dataset import SequentialVideoReader  # noqa: E402
 from render_wilor_predictions import HAND_CONNECTIONS  # noqa: E402
 
 
-DEFAULT_VIDEO = (
-    PROJECT_ROOT
-    / "output/gen6_batch_0907/"
-    "DAS-Ego_20260907180222_none_none_689985_7e8568fa/"
-    "normalized_multiview/cameras/camera3/video.mkv"
-)
-DEFAULT_PREDICTIONS = (
-    PROJECT_ROOT
-    / "output/gen6_batch_0907/"
-    "DAS-Ego_20260907180222_none_none_689985_7e8568fa/"
-    "wilor_multiview/camera3/predictions.jsonl"
-)
-DEFAULT_FUSION = (
-    PROJECT_ROOT
-    / "output/gen6_batch_0907/"
-    "DAS-Ego_20260907180222_none_none_689985_7e8568fa/"
-    "fusion_multiview_optimized_v6/accepted.jsonl"
-)
-DEFAULT_DATASET = (
-    PROJECT_ROOT
-    / "output/gen6_batch_0907/"
-    "DAS-Ego_20260907180222_none_none_689985_7e8568fa/normalized_multiview"
-)
-DEFAULT_OUTPUT = (
-    PROJECT_ROOT
-    / "output/gen6_batch_0907/"
-    "DAS-Ego_20260907180222_none_none_689985_7e8568fa/"
-    "sam3_pilot_cam3"
-)
 DEFAULT_TOOL_ROOT = Path("/home/p3/data_sda1/tool/auto-obb-annotator")
 DEFAULT_PROMPT = "hand wearing a black protective work glove"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", type=Path, default=DEFAULT_VIDEO)
-    parser.add_argument("--predictions", type=Path, default=DEFAULT_PREDICTIONS)
-    parser.add_argument("--fusion", type=Path, default=DEFAULT_FUSION)
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--video", type=Path, required=True)
+    parser.add_argument("--predictions", type=Path, required=True)
+    parser.add_argument("--fusion", type=Path, required=True)
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--tool-root", type=Path, default=DEFAULT_TOOL_ROOT)
     parser.add_argument(
         "--model", type=Path,

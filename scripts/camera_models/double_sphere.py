@@ -1,4 +1,4 @@
-"""GEN Double Sphere projection and stereo-to-pinhole rectification."""
+"""Double Sphere projection and stereo-to-pinhole rectification."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .base import RectificationOptions, RectificationResult
 
 
 def project(camera: CameraCalibration, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Project 3D camera-frame points with GEN's published DS parameter order."""
+    """Project 3D camera-frame points with the stored DS parameter order."""
     if camera.model != "DS":
         raise ValueError("Double Sphere projection requires a DS camera")
     points = np.asarray(points, dtype=np.float64)
@@ -45,7 +45,7 @@ def unproject(camera: CameraCalibration, pixels: np.ndarray) -> tuple[np.ndarray
     mx = (flat[:, 0] - cx) / fx
     my = (flat[:, 1] - cy) / fy
     radius2 = mx * mx + my * my
-    # GEN stores and projects the two DS coefficients in its own convention:
+    # The calibration stores and projects the two DS coefficients in its own convention:
     #   z1 = alpha * ||p|| + (1-alpha) * z
     #   m  = (x, y) / (xi * sqrt(x*x+y*y+z1*z1) + z1)
     # Invert that exact equation rather than the more common Usenko parameter
