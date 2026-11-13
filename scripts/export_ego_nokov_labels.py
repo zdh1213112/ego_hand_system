@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from personal_marker24_config import load_personal_config, load_joint_refit_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,8 +117,15 @@ def main():
         if a.resume and clean is not None and Path(clean).exists():
             shutil.rmtree(clean)  # partial output of an interrupted stage inside this run
         (out/'commands.json').write_text(json.dumps(commands, indent=2)+'\n')
+        start = time.monotonic()
         with (out/'logs'/f'{stage}.log').open('w') as log:
-            result = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            # Full output goes to the log; nested stage markers ("[name] ...") are also shown here, so long stages show progress.
+            result = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in result.stdout:
+                log.write(line)
+                if line.startswith('['): print('    ' + line.rstrip(), flush=True)
+            result.wait()
+        print(f'[{stage}] done in {time.monotonic() - start:.0f} s', flush=True)
         if result.returncode:
             raise RuntimeError(f'{stage} failed; inspect {out / "logs" / (stage+".log")}; fix and rerun with --resume --output {out}')
         done.add(stage); done_path.write_text(json.dumps(sorted(done), indent=2)+'\n')

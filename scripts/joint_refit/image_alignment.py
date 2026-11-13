@@ -7,7 +7,8 @@ of the hand markers. For every sync, match projected markers of both hands to br
 translation voting), solve one 6-DoF correction in camera0 space, re-match under the correction and re-solve.
 Writes a copy of the source fit with corrected target24 / finger0_target; uncorrected frames are flagged.
 """
-import argparse, csv, json, sys
+import argparse, csv, json, multiprocessing, os, sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import cv2, numpy as np, torch
 from scipy.optimize import least_squares
@@ -46,10 +47,65 @@ def solve(views, c):
     return least_squares(f, np.zeros(6), loss='soft_l1', f_scale=2.).x
 
 
+MAX_FORWARD = 40  # decode forward over gaps up to this many frames instead of seeking (seeking costs ~40 ms per frame)
+
+
+def _worker_init():
+    cv2.setNumThreads(1); torch.set_num_threads(1)
+
+
+def detect(video, items):
+    """Marker blobs for [(sync, frame_index), ...] of one camera, read in frame order."""
+    cap = cv2.VideoCapture(str(video)); pos = -1; out = {}
+    for s, fi in items:
+        if pos < fi <= pos + MAX_FORWARD:
+            for _ in range(fi - pos - 1): cap.grab()
+            ok, im = cap.read()
+        else:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi); ok, im = cap.read()
+        pos = fi; out[s] = blobs(im if ok else None)
+    cap.release(); return out
+
+
+def solve_sync(s, rs, phys, cache, min_points, max_rms_px):
+    """One sync: vote, match and solve the rigid correction. Returns (row, (p, c) or None)."""
+    views = []
+    for r in rs:
+        X = phys[r['side']]; P = proj(X, r); ok = (P[:, 0] > 5) & (P[:, 1] > 5) & (P[:, 0] < 1915) & (P[:, 1] < 1195); B = cache[r['camera']]
+        if ok.sum() < 8 or not len(B): continue
+        B = B[(B[:, 0] > P[ok, 0].min() - 35) & (B[:, 0] < P[ok, 0].max() + 35) & (B[:, 1] > P[ok, 1].min() - 35) & (B[:, 1] < P[ok, 1].max() + 35)]
+        if len(B) < 5: continue
+        views.append(dict(rec=r, Xall=X[ok], B=B, v=vote(P[ok], B)))
+    seed = [v for v in views if v['v'] and v['v'][1] >= 9 and v['v'][1] - v['v'][2] >= 3]
+    row = dict(sync=int(s), views=len(views), seed_views=len(seed), corrected=False); result = None
+    if seed:
+        c = np.concatenate([v['Xall'] for v in views]).mean(0)
+        for v in seed:
+            P = proj(v['Xall'], v['rec']) + v['v'][0]; j, m = match(P, v['B'], 2.5); v['X'], v['uv'] = v['Xall'][m], v['B'][j[m]]
+        p = solve(seed, c)
+        for _ in range(2):  # re-match every view under the current correction
+            use = []
+            for v in views:
+                j, m = match(proj(apply(v['Xall'], p, c), v['rec']), v['B'], 3.)
+                if m.sum() >= 6: v['X'], v['uv'] = v['Xall'][m], v['B'][j[m]]; use.append(v)
+            if not use: break
+            p = solve(use, c)
+        if use:
+            e0 = np.concatenate([np.linalg.norm(proj(v['X'], v['rec']) - v['uv'], axis=1) for v in use]); e1 = np.concatenate([np.linalg.norm(proj(apply(v['X'], p, c), v['rec']) - v['uv'], axis=1) for v in use])
+            row.update(points=len(e1), used_views=len(use), px_before=float(np.sqrt((e0 ** 2).mean())), px_after=float(np.sqrt((e1 ** 2).mean())), rotation_deg=float(np.degrees(np.linalg.norm(p[:3]))), translation_mm=float(np.linalg.norm(p[3:]) * 1000))
+            if len(e1) >= min_points and row['px_after'] <= max_rms_px: row['corrected'] = True; result = (p, c)
+    return row, result
+
+
+def solve_chunk(jobs, min_points, max_rms_px):
+    return [solve_sync(*job, min_points, max_rms_px) for job in jobs]
+
+
 def main():
     ap = argparse.ArgumentParser()
     for n in ['context', 'selection', 'source', 'skeleton', 'output']: ap.add_argument('--' + n, type=Path, required=True)
     ap.add_argument('--min-points', type=int, default=12); ap.add_argument('--max-rms-px', type=float, default=2.5)
+    ap.add_argument('--workers', type=int, default=min(16, os.cpu_count() or 4))
     a = ap.parse_args(); a.output.mkdir(parents=True)
     recs = json.loads(a.selection.read_text())['records']; sk = np.load(a.skeleton); assert str(sk['geometry_space']) == 'physical_camera0'
     present = [h for h in ['left', 'right'] if (a.source / f'{h}_pilot.npz').is_file()]
@@ -62,44 +118,26 @@ def main():
     # Every fitted sync is checked in all four cameras, read from the original videos (camera parameters are constant per camera).
     c0 = load_context(a.context); frames = list(csv.DictReader((c0['dataset'] / 'multiview_frames.csv').open())); cams = {}
     for r in recs: cams.setdefault(r['camera'], r)
-    cache, by = {}, {}; syncs = sorted({s for _, s in phys})
-    for cam in sorted(cams):
-        cap = cv2.VideoCapture(str(c0['dataset'] / 'cameras' / cam / 'video.mp4')); pos = -1
+    syncs = sorted({s for _, s in phys}); workers = max(1, a.workers); per_cam = max(1, workers // max(1, len(cams)))
+    ctx = multiprocessing.get_context('spawn'); cache = {}
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_worker_init) as pool:
+        futures = []
+        for cam in sorted(cams):
+            items = [(s, int(frames[s][f'{cam}_frame_index'])) for s in syncs]; items.sort(key=lambda x: x[1])
+            for part in np.array_split(np.arange(len(items)), per_cam):
+                if len(part): futures.append((cam, pool.submit(detect, c0['dataset'] / 'cameras' / cam / 'video.mp4', [items[k] for k in part])))
+        for cam, f in futures:
+            for s, b in f.result().items(): cache[(cam, s)] = b
+        jobs = []
         for s in syncs:
-            fi = int(frames[s][f'{cam}_frame_index'])
-            if fi != pos + 1: cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-            ok, im = cap.read(); pos = fi; cache[(cam, s)] = blobs(im if ok else None)
-            for side in (0, 1):
-                if (side, s) in phys: by.setdefault(s, []).append(dict(cams[cam], side=side, sync=s))
-        cap.release()
+            rs = [dict(cams[cam], side=side, sync=s) for cam in sorted(cams) for side in (0, 1) if (side, s) in phys]
+            jobs.append((s, rs, {side: phys[(side, s)] for side in (0, 1) if (side, s) in phys}, {cam: cache[(cam, s)] for cam in sorted(cams)}))
+        n = max(1, min(len(jobs), workers * 4)); size = -(-len(jobs) // n); chunks = [jobs[k:k + size] for k in range(0, len(jobs), size)]
+        results = [r for part in pool.map(solve_chunk, chunks, [a.min_points] * len(chunks), [a.max_rms_px] * len(chunks)) for r in part]
     corr, rows = {}, []
-    for s, rs in sorted(by.items()):
-        views = []
-        for r in rs:
-            X = phys[(r['side'], s)]; P = proj(X, r); ok = (P[:, 0] > 5) & (P[:, 1] > 5) & (P[:, 0] < 1915) & (P[:, 1] < 1195); B = cache[(r['camera'], s)]
-            if ok.sum() < 8 or not len(B): continue
-            B = B[(B[:, 0] > P[ok, 0].min() - 35) & (B[:, 0] < P[ok, 0].max() + 35) & (B[:, 1] > P[ok, 1].min() - 35) & (B[:, 1] < P[ok, 1].max() + 35)]
-            if len(B) < 5: continue
-            views.append(dict(rec=r, Xall=X[ok], B=B, v=vote(P[ok], B)))
-        seed = [v for v in views if v['v'] and v['v'][1] >= 9 and v['v'][1] - v['v'][2] >= 3]
-        row = dict(sync=int(s), views=len(views), seed_views=len(seed), corrected=False)
-        if seed:
-            c = np.concatenate([v['Xall'] for v in views]).mean(0)
-            for v in seed:
-                P = proj(v['Xall'], v['rec']) + v['v'][0]; j, m = match(P, v['B'], 2.5); v['X'], v['uv'] = v['Xall'][m], v['B'][j[m]]
-            p = solve(seed, c)
-            for _ in range(2):  # re-match every view under the current correction
-                use = []
-                for v in views:
-                    j, m = match(proj(apply(v['Xall'], p, c), v['rec']), v['B'], 3.)
-                    if m.sum() >= 6: v['X'], v['uv'] = v['Xall'][m], v['B'][j[m]]; use.append(v)
-                if not use: break
-                p = solve(use, c)
-            if use:
-                e0 = np.concatenate([np.linalg.norm(proj(v['X'], v['rec']) - v['uv'], axis=1) for v in use]); e1 = np.concatenate([np.linalg.norm(proj(apply(v['X'], p, c), v['rec']) - v['uv'], axis=1) for v in use])
-                row.update(points=len(e1), used_views=len(use), px_before=float(np.sqrt((e0 ** 2).mean())), px_after=float(np.sqrt((e1 ** 2).mean())), rotation_deg=float(np.degrees(np.linalg.norm(p[:3]))), translation_mm=float(np.linalg.norm(p[3:]) * 1000))
-                if len(e1) >= a.min_points and row['px_after'] <= a.max_rms_px: row['corrected'] = True; corr[int(s)] = (p, c)
+    for row, result in sorted(results, key=lambda x: x[0]['sync']):
         rows.append(row)
+        if result is not None: corr[row['sync']] = result
     for h in z:
         side = ['left', 'right'].index(h)
         pairs = z[h]['pair_indices']; f0 = sk['positions_cam0_m'][side][pairs, 1].copy(); t = z[h]['target24'].copy(); flag = np.zeros(len(pairs), bool)
