@@ -11,15 +11,15 @@
 
 ## 真实结果
 
-![Orbbec EGO4 四目共享 MANO 推理：四路原图上的双手网格与骨架](docs/images/ego4_shared_4view.jpg)
+![双手网格与关键点重建展示](docs/images/ego_hand_mesh_demo.png)
 
-来自真实 EGO-4B 录制的同步画面。青色为左手，黄色为右手；四个视角投影的是同一时刻的共享三维模型。相机顺序为 `camera0=left`、`camera1=right`、`camera2=right_side`、`camera3=left_side`。
+双手网格与关键点叠加展示。
 
 ![从 hand_model.pt 导出的双手共享三维网格与 21 点骨架，坐标单位为米](docs/images/ego4_shared_mano_3d.svg)
 
-同一时刻的双手模型，直接从导出的 `hand_model.pt` 绘制。每只手包含 21 个关节和 778 个网格顶点，使用 camera0 光学参考系，长度单位为米。
+四目共享推理的双手三维模型，直接从导出的 `hand_model.pt` 绘制。每只手包含 21 个关节和 778 个网格顶点，使用 camera0 光学参考系，长度单位为米。
 
-展示片段取自 `pair_20261111_192916` 的前 60 个同步时刻；结果、数值对比及验证范围见[验收记录](docs/INTEGRATION_VALIDATION_20261113.md)。[双目结果和进阶流程](docs/ADVANCED_WORKFLOWS_zh.md#效果展示)另有完整说明。
+上方三维模型图来自 `pair_20261111_192916` 的 60 帧验收片段；结果、数值对比及验证范围见[验收记录](docs/INTEGRATION_VALIDATION_20261113.md)。[双目结果和进阶流程](docs/ADVANCED_WORKFLOWS_zh.md#效果展示)另有完整说明。
 
 ## 功能概览
 
