@@ -33,7 +33,7 @@ bash scripts/export_ego_nokov_labels.sh \
   --optimization-config configs/native_joint_refit.json
 ```
 
-单手、双手录制都可以，程序会自动识别录到了哪只手。配置里的 `placement` 指向 `configs/glove_marker_placement.json`，它只写了每个 marker 贴在哪一节手指、哪一面（手背），不含尺寸。所以同一副手套、同样的贴法，换人不用改；手套或贴法变了，才需要新的贴点文件和配置。手型、marker 贴点和腕根偏移在这段录制自己的数据上标定，不沿用其他录制的结果。基线结果照常生成，优化结果放在 `optimized/` 下。一段约 2000 帧的录制大约要跑一个多小时，其中轮廓提取约 25 分钟。
+单手、双手录制都可以，程序会自动识别录到了哪只手。配置里的 `placement` 指向 `configs/glove_marker_placement.json`，它只写了每个 marker 贴在哪一节手指、哪一面（手背），不含尺寸。所以同一副手套、同样的贴法，换人不用改；手套或贴法变了，才需要新的贴点文件和配置。手型、marker 贴点和腕根偏移在这段录制自己的数据上标定，不沿用其他录制的结果。基线结果照常生成，优化结果放在 `optimized/` 下。轮廓提取和图像对齐用多个 CPU 进程并行，默认最多 16 个，可在 `run_joint_refit_recording.py` 里用 `--workers` 调整。
 
 跑完后终端会打印这些路径：
 

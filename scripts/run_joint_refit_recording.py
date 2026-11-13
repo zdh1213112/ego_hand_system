@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ def main():
     ap.add_argument('--sample-stride', type=int, default=8)
     ap.add_argument('--device', choices=['cpu', 'cuda'], default='cuda')
     ap.add_argument('--resume', action='store_true', help='reuse stages whose output already exists')
+    ap.add_argument('--workers', type=int, default=min(16, os.cpu_count() or 4), help='CPU processes for video stages')
     a = ap.parse_args()
     if a.sample_stride < 1:
         ap.error('sample-stride must be positive')
@@ -51,7 +53,7 @@ def main():
         marker = a.output / 'logs' / f'{name}.done'
         if a.resume and marker.is_file():
             row['returncode'] = 0; row['resumed'] = True; print(f'[{name}] finished earlier, skipped', flush=True); return
-        print(f'[{name}]', flush=True)
+        print(f'[{name}] running, log: {a.output / "logs" / (name + ".log")}', flush=True); start = time.monotonic()
         if clean == 'output':
             clean = Path(command[command.index('--output') + 1]) if '--output' in command else None
         if clean is not None and Path(clean).exists():
@@ -64,7 +66,7 @@ def main():
         (a.output / 'commands.json').write_text(json.dumps(commands, indent=2) + '\n')
         if row['returncode']:
             raise RuntimeError(f'{name} failed; see {a.output / "logs" / (name + ".log")}')
-        marker.write_text('ok\n')
+        marker.write_text('ok\n'); print(f'[{name}] done in {time.monotonic() - start:.0f} s', flush=True)
 
     (a.output / 'logs').mkdir(exist_ok=a.resume)
     bridge = a.output / 'baseline_bridge'; bridge.mkdir(exist_ok=a.resume)
@@ -74,17 +76,20 @@ def main():
         if not src.is_file(): continue
         z = np.load(src)
         np.savez_compressed(bridge / f'{hand}_pilot.npz', **{k: z[k] for k in z.files}, target24=z['observation_points'], marker_names=np.asarray(names), calibration_mask=np.zeros(len(z['pair_indices']), bool))
-    run('contours', TOOLS / 'personal_hand_calibration/image_constraints.py', '--context', a.output / 'context.json', '--source', bridge, '--output', a.output / 'contours')
     run('skeleton', TOOLS / 'nokov_skeleton_audit/analyze.py', '--context', a.output / 'context.json', '--output', a.output / 'skeleton')
     run('prepare', TOOLS / 'keyframe_calibration/prepare_source.py', '--context', a.output / 'context.json', '--output', a.output / 'source', '--sample-stride', a.sample_stride)
+    # Contours only for the calibration sample (the frames keyframe selection can use), in parallel.
+    run('contours', CODE / 'contours_parallel.py', '--context', a.output / 'context.json', '--source', bridge, '--sample', a.output / 'source', '--output', a.output / 'contours', '--workers', a.workers)
     run('select', TOOLS / 'keyframe_calibration/select_keyframes.py', '--context', a.output / 'context.json', '--audit', a.output / 'contours', '--source', a.output / 'source', '--output', a.output / 'selection')
     run('calibrate', TOOLS / 'keyframe_calibration/calibrate.py', '--context', a.output / 'context.json', '--source', a.output / 'source', '--selection', a.output / 'selection/selection.json', '--output', a.output / 'calibration')
     run('shape', TOOLS / 'full_silhouette/fit_shape.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'calibration', '--output', a.output / 'shape')
     run('attachments', CODE / 'symmetrize_attachments.py', '--source', a.output / 'shape', '--output', a.output / 'attachments')
-    run('align', CODE / 'image_alignment.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'attachments', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--output', a.output / 'aligned')
-    run('fit', CODE / 'fit.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'aligned', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--hands', *present, '--output', a.output / 'fit')
-    run('dense_source', CODE / 'build_dense_source.py', '--context', a.output / 'context.json', '--calibrated', a.output / 'fit/drive', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--output', a.output / 'dense/source')
-    run('dense_align', CODE / 'image_alignment.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'dense/source', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--output', a.output / 'dense/aligned')
+    run('align', CODE / 'image_alignment.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'attachments', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--output', a.output / 'aligned', '--workers', a.workers)
+    run('fit', CODE / 'fit.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'aligned', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--hands', *present, '--output', a.output / 'fit',
+        # same settings as the validated joint_refit_v4/v5 run (scripts/run_joint_refit_labels.sh)
+        '--anat-weight', .01, '--normal-min', -.002, '--final-silhouette', '--root-offset', 'free', '--wrist-marker-weight', 0)
+    run('dense_source', CODE / 'build_dense_source.py', '--context', a.output / 'context.json', '--calibrated', a.output / 'fit/final', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--output', a.output / 'dense/source')
+    run('dense_align', CODE / 'image_alignment.py', '--context', a.output / 'context.json', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'dense/source', '--skeleton', a.output / 'skeleton/aligned_skeleton.npz', '--output', a.output / 'dense/aligned', '--workers', a.workers)
     run('dense_fit', CODE / 'dense_drive.py', '--selection', a.output / 'selection/selection.json', '--source', a.output / 'dense/aligned', '--output', a.output / 'dense/fit')
     run('export', CODE / 'export.py', '--context', a.output / 'context.json', '--source', a.output / 'dense/fit/final', clean=a.output / 'dense/fit/final/export')
     run('verify', CODE / 'verify_export.py', '--result', a.output / 'dense/fit/final', clean=None)

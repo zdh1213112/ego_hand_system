@@ -89,7 +89,7 @@ def main():
         (a.output / f'{hand}_rejected.json').write_text(json.dumps([dict(sync=int(pairs[i]), reasons=reasons[i]) for i in range(n) if reasons[i]]))
         rk = np.array([keep[lookup[r['sync']]] for r in records])
         report['hands'][hand] = dict(frames=n, kept=int(keep.sum()), rejected=counts, marker_mm_kept=stats(e[keep][valid[keep]]), root_anchor_mm_kept=stats(cpu(root * 1000)[keep]),
-                                     silhouette_views=len(records), iou_baseline=float(iou0.mean()), iou_marker_only=float(iou1.mean()), iou_final=float(iou2.mean()), iou_final_kept_views=float(iou2[rk].mean()), iou_final_p10_kept=float(np.percentile(iou2[rk], 10)))
+                                     silhouette_views=len(records), iou_baseline=float(iou0.mean()), iou_marker_only=float(iou1.mean()), iou_final=float(iou2.mean()), iou_final_kept_views=float(iou2[rk].mean()) if rk.any() else None, iou_final_p10_kept=float(np.percentile(iou2[rk], 10)) if rk.any() else None, silhouette_views_kept=int(rk.sum()))
         print(hand, json.dumps(report['hands'][hand]), flush=True); (a.output / 'summary.json').write_text(json.dumps(report, indent=1))
 
 
