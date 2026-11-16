@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--native-mano-model-dir', type=Path, default=Path(__file__).resolve().parents[1] / 'models/mano')
     parser.add_argument('--native-model-config', type=Path, default=Path(__file__).resolve().parents[1] / 'models/wilor/model_config.yaml')
     parser.add_argument('--native-mesh-device', default='cuda')
+    parser.add_argument('--fah-mesh-predictions', type=Path, help='overlay original per-camera FAH MANO meshes')
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cameras", nargs="+", default=None)
     parser.add_argument("--columns", type=int, default=0)
@@ -189,6 +190,9 @@ def main() -> int:
         raise ValueError("shared MANO mesh requires its fitting dataset and cannot be combined with another mesh overlay")
     if args.wilor_native_mesh and any(value is not None for value in (args.shared_mano_mesh, args.gem_mesh_predictions, args.original_dataset)):
         raise ValueError('native WiLoR mesh cannot be combined with another mesh or another image coordinate system')
+    if args.fah_mesh_predictions is not None and (args.wilor_native_mesh or any(value is not None for value in
+            (args.shared_mano_mesh, args.gem_mesh_predictions, args.original_dataset))):
+        raise ValueError('FAH meshes require the original inference images and cannot be combined with another mesh')
     dataset = args.dataset.resolve()
     fusion = args.fusion.resolve()
     predictions = args.predictions.resolve()
@@ -220,9 +224,8 @@ def main() -> int:
     if args.gem_mesh_predictions is not None:
         from render_gem_multiview import GemMeshOverlay, MESH_STYLE
         mesh_overlay = GemMeshOverlay(args.gem_mesh_predictions, cameras)
-    elif args.wilor_native_mesh:
-        from wilor_native_mesh_overlay import WilorNativeMeshOverlay
-        native_root = (args.wilor_native_predictions or predictions).resolve()
+    elif args.wilor_native_mesh or args.fah_mesh_predictions is not None:
+        native_root = (args.fah_mesh_predictions or args.wilor_native_predictions or predictions).resolve()
         native_rows = prediction_rows if native_root == predictions else {
             camera: _load_jsonl(native_root / camera / 'predictions.jsonl') for camera in cameras}
         for row in frame_rows:
@@ -231,8 +234,13 @@ def main() -> int:
                 if (int(native['source_frame_index']) != int(row[f'{camera}_frame_index'])
                         or int(native['timestamp_ns']) != int(row[f'{camera}_timestamp_ns'])):
                     raise ValueError('native mesh frame/timestamp differs from displayed video')
-        mesh_overlay = WilorNativeMeshOverlay(native_root, native_rows, manifest['image_size'],
-            args.native_mano_model_dir, args.native_model_config, args.native_mesh_device)
+        if args.fah_mesh_predictions is not None:
+            from fah_native_mesh_overlay import FahNativeMeshOverlay
+            mesh_overlay = FahNativeMeshOverlay(native_root, native_rows)
+        else:
+            from wilor_native_mesh_overlay import WilorNativeMeshOverlay
+            mesh_overlay = WilorNativeMeshOverlay(native_root, native_rows, manifest['image_size'],
+                args.native_mano_model_dir, args.native_model_config, args.native_mesh_device)
     if mesh_overlay:
         for records in prediction_rows.values():
             for record in records.values():
@@ -407,6 +415,8 @@ def main() -> int:
                     state = "RAW<-UNDISTORTED " + (state if used_fused or used_native else "NO_POSE")
                 elif args.wilor_native_mesh:
                     state = 'WILOR LEGACY ' + state + ' | NATIVE MESH'
+                elif args.fah_mesh_predictions is not None:
+                    state = 'FAH ' + state + ' | NATIVE MESH'
                 elif mesh_overlay:
                     state = "GEM-X | " + (state if used_fused or used_native else "NO_POSE") + " | MESH"
                 elif shared_mesh:
@@ -477,7 +487,7 @@ def main() -> int:
             "selection": "same detection and hypothesis as the displayed final skeleton",
             **MESH_STYLE, **mesh_overlay.stats,
         }
-    if args.wilor_native_mesh:
+    if args.wilor_native_mesh or args.fah_mesh_predictions is not None:
         summary['mesh'] = mesh_overlay.summary()
         summary['skeleton_and_mesh_share_model'] = False
         summary['shared_multiview_mesh'] = False

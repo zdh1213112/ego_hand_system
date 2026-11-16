@@ -67,7 +67,15 @@ GEM 的 `gem_pose.pt` 顶点和关节已包含相机平移，单位为米，不�
 
 默认要求至少两个支持视角、有效视差，以及各支持视角至少 16 个关节的误差不超过 30 像素、中位误差不超过 21 像素。无法满足条件的帧显示 `NO VALID SHARED 3D`，不插入单视角姿态或无限外推结果。
 
-`render_shared_gem_multiview.py` 对每台相机重复使用同一份 `joints_soma_base_m` 和 `vertices_base_m`，通过其外参与原始镜头模型投影，不使用每视角平移、独立形变或 2D 回退。检测框仍为真实的各视角检测框。投影日志记录共同的 `sync_index:side` 模型 ID，方便逐点审计。
+拟合后不再单独要求腕部误差不超过 30 像素；腕部作为 21 个关节之一参与整体统计，`wrist_px` 保留用于诊断。该规则也用于 WiLoR/FAH 的共享 MANO 拟合。三角化关联阶段的腕部一致性检查仍保留，避免异常观测破坏三维初始化。拟合配置记录 `fit_quality.wrist_hard_gate=false`，旧规则下的拟合结果不能直接作为新规则的缓存复用。
+
+`render_shared_gem_multiview.py` 对每台相机重复使用同一份 `joints_soma_base_m` 和 `vertices_base_m`，通过其外参与原始镜头模型投影，不使用每视角平移、独立形变或 2D 回退。
+
+共享视频的框与 FAH 使用同一套原始检测框绘制逻辑，统一标为 `DETECTED L/R`。
+框的位置、左右手类别和置信度来自原始检测器；双手假设按检测 ID 合并，每个框只画一次。
+即使该手未通过共享关联或拟合，检测框仍然显示；骨架和网格只显示接受的共享三维结果。
+新的 GEM 推理会单独保存每帧 `detections`，避免姿态投影无效时丢失检测框；旧预测文件按双手假设恢复检测框，并核对原始检测总数。
+相机顺序、源帧号和时间戳会同时校验。投影日志分别记录共享模型与原始检测框，方便审计。
 
 GEM 与 WiLoR shared 直接共用此渲染器中的 `draw_shared_skeleton` 和 `clip_projected_bone`，不维护两套骨架绘制代码。有效但越界的投影点保留用于连线，线段裁到画面边界；关键点圆点只画在真实的画内位置，无效投影不参与连线。渲染元数据中的 `skeleton_render_style` 参与缓存判断，旧视频会自动重新生成。已有共享三维结果时，可仅更新视频，无需重新检测、推理或拟合：
 
@@ -75,6 +83,7 @@ GEM 与 WiLoR shared 直接共用此渲染器中的 `draw_shared_skeleton` 和 `
 conda run -n ego-hand python scripts/render_shared_gem_multiview.py \
   --dataset OUTPUT/normalized_multiview \
   --shared OUTPUT/fusion_multiview_shared_gem \
+  --detector-predictions OUTPUT/gem_multiview \
   --output OUTPUT/fusion_multiview_shared_gem/final_shared_4view.mp4 \
   --cameras camera0 camera1 camera2 camera3 --max-frames 0 --video-codec auto
 ```

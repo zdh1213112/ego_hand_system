@@ -22,7 +22,7 @@ import torch
 from ego_data.calibration import CameraCalibration
 from camera_models.kb import KB_PROJECTION_VERSION
 from gem_shared_geometry import (
-    associate_hands, camera_domain_penalty_torch, project_base, project_base_torch, rigid_initialization, rotation_exp,
+    ASSOCIATION_VERSION, associate_hands, camera_domain_penalty_torch, project_base, project_base_torch, rigid_initialization, rotation_exp,
 )
 from mano_conventions import WILOR_RIGHT_CANONICAL
 
@@ -217,7 +217,8 @@ def fit_quality(model, candidate, calibrations, threshold_px):
         median = float(np.median(errors[good])) if good.any() else None
         p95 = float(np.percentile(errors[good], 95)) if good.any() else None
         support = int(np.count_nonzero(good & (errors <= threshold_px)))
-        trusted = support >= 16 and median is not None and median <= threshold_px * .7
+        # Wrist error remains diagnostic; assess support from the whole hand.
+        trusted = bool(support >= 16 and median is not None and median <= threshold_px * .7)
         if trusted:
             supported.append(camera)
         hand = observation['hand']
@@ -226,6 +227,7 @@ def fit_quality(model, candidate, calibrations, threshold_px):
                          'bbox_xyxy': hand['bbox_xyxy'], 'confidence': float(hand['confidence']),
                          'observed_joints_2d': observation['pixels'].tolist(),
                          'median_px': median, 'p95_px': p95,
+                         'wrist_px': float(errors[0]) if good[0] else None,
                          'inlier_joint_count': support, 'supported': trusted}
     good_shape = np.isfinite(points).all() and .04 < np.linalg.norm(points - points[0], axis=1).max() < .40
     sufficient_angle = False
@@ -277,7 +279,8 @@ def main():
               'max_detections': args.max_detections, 'threshold_px': args.reprojection_threshold_px,
               'device': args.device, 'mano_model_dir': str(args.mano_model_dir.resolve()),
               'mano_convention': WILOR_RIGHT_CANONICAL, 'min_supporting_views': 2,
-              'no_independent_view_fallback': True, 'camera_projection_style': KB_PROJECTION_VERSION}
+              'no_independent_view_fallback': True, 'camera_projection_style': KB_PROJECTION_VERSION,
+              'association_version': ASSOCIATION_VERSION, 'fit_quality': {'wrist_hard_gate': False}}
     if output.exists():
         if not (output / 'summary.json').is_file() or not (output / 'shared_pose.pt').is_file():
             raise RuntimeError(f'incomplete shared output exists: {output}; use a new output directory')
@@ -341,10 +344,11 @@ def main():
                                      'reason': 'shared_model_reprojection_or_geometry_failed', 'views': views})
                     continue
                 model['views'], model['supporting_cameras'] = views, support
+                model['association'] = candidate['association']
                 model_frames[model['sync_index']]['hands'].append(model)
                 accepted[model['sync_index']]['hands'].append({
                     'side': side, 'joints_base_m': model['joints_base_m'].tolist(),
-                    'supporting_cameras': support, 'views': views,
+                    'supporting_cameras': support, 'views': views, 'association': candidate['association'],
                     'geometry_source': 'shared_mano_model', 'model_scale': model['model_scale'],
                 })
             fitted += len(batch)
@@ -368,6 +372,8 @@ def main():
                'supporting_view_median_error_px': float(np.median(errors)) if errors else None,
                'fit_seconds': time.perf_counter() - started,
                'skeleton_and_mesh_share_model': True, 'independent_view_fallback': False,
+               'association_version': ASSOCIATION_VERSION,
+               'fit_quality': config['fit_quality'],
                'mano_convention': WILOR_RIGHT_CANONICAL,
                'identity_shape_per_side': {str(k): v.tolist() for k, v in shapes.items()},
                'rejected_hand_or_frame_reasons': dict(Counter(row['reason'] for row in rejected))}

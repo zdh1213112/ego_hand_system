@@ -19,7 +19,7 @@ from gem_shared_geometry import project_base
 from gem_multiview_inference import SOMA_TO_21
 from render_gem_multiview import MESH_STYLE
 from shared_mesh_overlay import draw_shared_mesh
-from render_multiview_wilor import _create_video_writer, _draw_final_detection, HAND_CONNECTIONS
+from render_multiview_wilor import _create_video_writer, HAND_CONNECTIONS
 
 
 SKELETON_RENDER_STYLE = 'valid_projection_segment_clipping_v2'
@@ -90,8 +90,8 @@ def main(*, expected_format=None):
     for name in ('dataset', 'shared', 'output'):
         p.add_argument('--' + name, type=Path, required=True)
     p.add_argument('--cameras', nargs='+')
-    p.add_argument('--detector-predictions', type=Path,
-                   help='original per-camera detector outputs in the native WiLoR predictions (required for shared MANO)')
+    p.add_argument('--detector-predictions', type=Path, required=True,
+                   help='original per-camera detector predictions, drawn independently of shared SOMA/MANO fitting')
     p.add_argument('--max-frames', type=int, default=0)
     p.add_argument('--tile-width', type=int, default=960)
     p.add_argument('--video-codec', choices=('auto', 'h264_nvenc', 'mp4v'), default='auto')
@@ -117,12 +117,8 @@ def main(*, expected_format=None):
         rows = list(csv.DictReader(stream))[:args.max_frames or None]
     if not rows or any(int(row['sync_index']) not in frames for row in rows):
         raise ValueError('shared results do not cover the requested synchronized frames')
-    detector_overlay = None
-    if model_format == 'shared_wilor_mano_v1':
-        if args.detector_predictions is None:
-            p.error('shared WiLoR visualization requires --detector-predictions from original WiLoR inference')
-        from raw_detector_overlay import RawDetectorOverlay
-        detector_overlay = RawDetectorOverlay(args.detector_predictions, dataset, cameras, rows, manifest['image_size'])
+    from raw_detector_overlay import RawDetectorOverlay
+    detector_overlay = RawDetectorOverlay(args.detector_predictions, dataset, cameras, rows, manifest['image_size'])
     output = args.output.resolve()
     config = {'stage': f'shared_{model_name.lower()}_reprojection', 'shared': str(args.shared.resolve()),
               'shared_mtime_ns': (args.shared / 'shared_pose.pt').stat().st_mtime_ns,
@@ -130,8 +126,7 @@ def main(*, expected_format=None):
               'tile_width': args.tile_width, 'mesh_style': MESH_STYLE, 'video_codec': args.video_codec,
               'skeleton_render_style': SKELETON_RENDER_STYLE,
               'camera_projection_style': KB_PROJECTION_VERSION}
-    if detector_overlay is not None:
-        config['detector_overlay'] = detector_overlay.config
+    config['detector_overlay'] = detector_overlay.config
     meta = output.with_suffix('.json')
     if output.is_file() and meta.is_file() and json.loads(meta.read_text()).get('config') == config:
         print(f'[shared video] reuse {output}', flush=True)
@@ -172,9 +167,6 @@ def main(*, expected_format=None):
                         pixels, valid, _ = project_base(calibrations[camera], points)
                         mesh_drawn, mesh_fingerprint = draw_shared_mesh(image, hand, data['topology'], calibrations[camera])
                         mesh_draws += int(mesh_drawn)
-                        view = hand['views'].get(camera)
-                        if detector_overlay is None and view is not None:
-                            _draw_final_detection(image, view, side, 'refined')
                         skeleton = draw_shared_skeleton(image, pixels, valid, side)
                         projected_hands += int(skeleton['visible_joint_count'] > 0 or skeleton['drawn_bone_count'] > 0)
                         clipped_bones += skeleton['clipped_bone_count']
@@ -184,10 +176,8 @@ def main(*, expected_format=None):
                                        'supporting_cameras': hand['supporting_cameras'],
                                        'mesh_projection_sha256': mesh_fingerprint, 'mesh_drawn': bool(mesh_drawn)})
                     audit['cameras'][camera] = audits
-                    if detector_overlay is not None:
-                        # Detector visualization is independent of pose coverage:
-                        # also draw boxes for views/hands rejected by shared fitting.
-                        audit.setdefault('detector_boxes', {})[camera] = detector_overlay.draw(image, camera, sync)
+                    # Draw every detector box even when there is no accepted 3D hand.
+                    audit.setdefault('detector_boxes', {})[camera] = detector_overlay.draw(image, camera, sync)
                     state = f'SHARED {model_name} 3D | hands {len(hands)}' if hands else 'NO VALID SHARED 3D'
                     cv2.putText(image, f'{camera} | {state} | frame {sync}', (8, 24),
                                 cv2.FONT_HERSHEY_SIMPLEX, .6, (80, 230, 80) if hands else (0, 190, 255), 2, cv2.LINE_AA)
@@ -211,9 +201,8 @@ def main(*, expected_format=None):
                'raw_images_without_undistortion': 'undistortion' not in manifest,
                'projections': str(projections_path),
                'output': str(output), 'render_seconds': time.perf_counter() - started}
-    if detector_overlay is not None:
-        summary['detector_boxes'] = {'source': 'original_hand_detector', 'independent_of_shared_fit': True,
-                                     'drawn': detector_overlay.drawn, 'per_camera': detector_overlay.counts}
+    summary['detector_boxes'] = {'source': 'original_hand_detector', 'independent_of_shared_fit': True,
+                                 'drawn': detector_overlay.drawn, 'per_camera': detector_overlay.counts}
     meta.write_text(json.dumps(summary, indent=2) + '\n')
     print(f'[shared video] saved {output}', flush=True)
 

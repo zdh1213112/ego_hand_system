@@ -3,9 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POSE_BACKEND="${EGO_EXPERIMENT_POSE_BACKEND:-wilor}"
-case "$POSE_BACKEND" in wilor|gem) ;; *) echo "Unknown pose backend: $POSE_BACKEND" >&2; exit 2 ;; esac
+case "$POSE_BACKEND" in wilor|gem|fah) ;; *) echo "Unknown pose backend: $POSE_BACKEND" >&2; exit 2 ;; esac
 POSE_LABEL="WiLoR"
 if [[ "$POSE_BACKEND" == gem ]]; then POSE_LABEL="GEM-X"; fi
+if [[ "$POSE_BACKEND" == fah ]]; then POSE_LABEL="FAH"; fi
 GEM_MODE="${EGO_GEM_MODE:-shared}"
 WILOR_MODE="${EGO_WILOR_MODE:-shared}"
 SHARED_STEPS="${EGO_WILOR_SHARED_STEPS:-100}"
@@ -198,7 +199,7 @@ case "$WILOR_MODE" in legacy|shared|both) ;; *) echo "--wilor-mode must be legac
 # Shared fitting reads calibrated per-camera predictions directly. The
 # independent fusion/temporal branch is needed only for legacy/independent/both.
 RUN_LEGACY_BRANCH=1
-if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" == shared ]] ||
+if [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" == shared ]] ||
    [[ "$POSE_BACKEND" == gem && "$GEM_MODE" == shared ]]; then
   RUN_LEGACY_BRANCH=0
 fi
@@ -292,7 +293,7 @@ else
   [[ -f "$MCAP" ]] || { echo "MCAP does not exist: $MCAP" >&2; exit 2; }
 fi
 if [[ -n "$EXTERNAL_BOXES" ]]; then
-  [[ "$POSE_BACKEND" == wilor ]] || { echo "--external-boxes is currently a WiLoR option" >&2; exit 2; }
+  [[ "$POSE_BACKEND" != gem ]] || { echo "--external-boxes is currently a WiLoR/FAH option" >&2; exit 2; }
   [[ -d "$EXTERNAL_BOXES" ]] || { echo "External detector predictions do not exist: $EXTERNAL_BOXES" >&2; exit 2; }
   EXTERNAL_BOXES="$(cd "$EXTERNAL_BOXES" && pwd)"
 elif [[ ! -f "$DETECTOR" ]]; then
@@ -386,6 +387,7 @@ OUTPUT="$(mkdir -p "$OUTPUT" && cd "$OUTPUT" && pwd)"
 NORMALIZED="$OUTPUT/normalized_multiview"
 PREDICTION_PREFIX="wilor"
 if [[ "$POSE_BACKEND" == gem ]]; then PREDICTION_PREFIX="gem"; fi
+if [[ "$POSE_BACKEND" == fah ]]; then PREDICTION_PREFIX="fah"; fi
 RAW_PREDICTIONS="$OUTPUT/${PREDICTION_PREFIX}_multiview"
 PREDICTIONS="$RAW_PREDICTIONS"
 FUSION="$OUTPUT/fusion_multiview"
@@ -577,6 +579,13 @@ if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "gem":
     }
     if gpu_profile == "rtx5090d":
         config["pose_backend"]["inference_precision"] = "float16_backbone_head_float32_camera_geometry"
+if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND") == "fah":
+    from fah_multiview_inference import backend_config
+    config["pose_backend"] = backend_config(
+        Path(os.environ["EGO_FAH_ROOT"]), os.environ["EGO_FAH_MODEL"],
+        Path(os.environ["EGO_FAH_WEIGHTS"]), Path(os.environ["EGO_FAH_MANO_DIR"]),
+        Path(os.environ["EGO_FAH_SAM3D"]),
+    )
 if os.environ.get("EGO_WILOR_UNDISTORT_FOV_DEG"):
     from undistort_multiview_dataset import options_from_environment
     config["image_preprocessing"] = options_from_environment()
@@ -730,6 +739,18 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
         "$EGO_GEM_PYTHON" "$ROOT/scripts/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     else
       run_python "$ROOT/scripts/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+    fi
+  elif [[ "$POSE_BACKEND" == fah ]]; then
+    INFERENCE_ARGS+=(--fah-root "$EGO_FAH_ROOT" --model "$EGO_FAH_MODEL"
+      --weights "$EGO_FAH_WEIGHTS" --mano-model-dir "$EGO_FAH_MANO_DIR" --sam3d "$EGO_FAH_SAM3D")
+    if [[ -n "$EXTERNAL_BOXES" ]]; then INFERENCE_ARGS+=(--external-boxes "$EXTERNAL_BOXES"); fi
+    if [[ -n "${EGO_FAH_PYTHON:-}" ]]; then
+      env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
+        YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" TORCH_HOME="/tmp/ego-hand-torch" \
+        TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
+        "$EGO_FAH_PYTHON" "$ROOT/scripts/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+    else
+      run_python "$ROOT/scripts/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     fi
   else
     if [[ "$WILOR_MODE" != legacy || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ]]; then
@@ -901,17 +922,20 @@ if [[ "$POSE_BACKEND" == gem && "$GEM_MODE" != independent ]]; then
   if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 ]]; then
     run_python "$ROOT/scripts/render_shared_gem_multiview.py" \
       --dataset "$NORMALIZED" --shared "$SHARED_FUSION" --output "$SHARED_VIDEO" \
+      --detector-predictions "$RAW_PREDICTIONS" \
       --cameras "${CAMERAS[@]}" --max-frames "$MAX_FRAMES" --video-codec auto
   fi
 fi
 
-if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" != legacy ]]; then
-  SHARED_FUSION="${FUSION}_shared_wilor"
+if [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" != legacy ]]; then
+  SHARED_FUSION="${FUSION}_shared_${POSE_BACKEND}"
   SHARED_VIDEO="$SHARED_FUSION/final_shared_${#CAMERAS[@]}view.mp4"
+  SHARED_MANO_DIR="$ROOT/models/mano"
+  if [[ "$POSE_BACKEND" == fah ]]; then SHARED_MANO_DIR="$EGO_FAH_MANO_DIR"; fi
   echo "[multiview] jointly fit shared MANO geometry to calibrated views"
   run_python "$ROOT/scripts/fit_shared_wilor_multiview.py" \
     --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --native-predictions "$RAW_PREDICTIONS" \
-    --output "$SHARED_FUSION" --mano-model-dir "$ROOT/models/mano" \
+    --output "$SHARED_FUSION" --mano-model-dir "$SHARED_MANO_DIR" \
     --cameras "${CAMERAS[@]}" --device "$DEVICE" --max-frames "$MAX_FRAMES" \
     --steps "$SHARED_STEPS" --batch-size "$SHARED_BATCH_SIZE"
   if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 ]]; then
@@ -948,6 +972,8 @@ fi
 WILOR_NATIVE_VIDEO_ARGS=()
 if [[ "$POSE_BACKEND" == wilor ]]; then
   WILOR_NATIVE_VIDEO_ARGS=(--wilor-native-mesh --wilor-native-predictions "$RAW_PREDICTIONS" --tile-width 960 --native-mesh-device "$DEVICE")
+elif [[ "$POSE_BACKEND" == fah ]]; then
+  WILOR_NATIVE_VIDEO_ARGS=(--fah-mesh-predictions "$RAW_PREDICTIONS" --tile-width 960)
 fi
 
 RENDER_FINAL=0
@@ -965,7 +991,7 @@ from render_gem_multiview import MESH_STYLE
 try:
     summary = json.loads(Path(sys.argv[1]).read_text())
     mesh = summary.get("mesh", {})
-    expected = "GEM-X SOMA" if sys.argv[2] == "gem" else "WiLoR native MANO"
+    expected = {"gem": "GEM-X SOMA", "fah": "FAH native MANO", "wilor": "WiLoR native MANO"}[sys.argv[2]]
     complete = (mesh.get("model") == expected
                 and all(mesh.get(key) == value for key, value in MESH_STYLE.items()))
 except (OSError, ValueError):
@@ -1017,7 +1043,7 @@ if [[ "$POSE_BACKEND" == gem && "$GEM_MODE" != independent ]]; then
   echo "[multiview] shared SOMA result: $SHARED_FUSION"
   cat "$SHARED_FUSION/summary.json"
 fi
-if [[ "$POSE_BACKEND" == wilor && "$WILOR_MODE" != legacy ]]; then
+if [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" != legacy ]]; then
   echo "[multiview] shared MANO result: $SHARED_FUSION"
   cat "$SHARED_FUSION/summary.json"
 fi

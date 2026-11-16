@@ -103,7 +103,12 @@ def serialize_hypotheses(frame, sync, camera, boxes, confidences, sides):
                       "joints_2d": selected.tolist()})
     return {"sync_index": int(sync["sync_index"]),
             "source_frame_index": int(sync[f"{camera}_frame_index"]),
-            "timestamp_ns": int(sync[f"{camera}_timestamp_ns"]), "hands": hands}
+            "timestamp_ns": int(sync[f"{camera}_timestamp_ns"]), "hands": hands,
+            # Preserve detection-only results when both pose projections fail.
+            "detections": [dict(detection_index=index, bbox_xyxy=np.asarray(box).tolist(),
+                confidence=float(score), detector_is_right=int(side) if side in (0, 1) else None,
+                proposal_source="detector") for index, (box, score, side) in
+                enumerate(zip(boxes, confidences, sides))]}
 
 
 def predict_in_batches(predictor, image, frame_id, instances, intrinsics, topology, batch_size, *, amp=False):

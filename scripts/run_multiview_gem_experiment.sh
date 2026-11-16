@@ -35,6 +35,7 @@ while (($#)); do
       echo "--gem-mode shared|independent|both (default shared): choose shared SOMA fitting or per-camera geometry."
       echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos; both keeps both branches."
       echo "Shared mode projects one fitted skeleton/mesh into every raw view, without native-2D fallback."
+      echo "Shared video boxes are original detector outputs labelled DETECTED L/R, independent of pose/mesh acceptance."
       echo "--shared-steps N (100), --shared-batch-size N (32) configure shared SOMA fitting."
       echo "--final-renderer controls only independent-mode video; --final-video enables the chosen final video(s)."
       echo "GEM uses pinhole intrinsics as an approximation on raw fisheye images; fusion uses the original camera model."

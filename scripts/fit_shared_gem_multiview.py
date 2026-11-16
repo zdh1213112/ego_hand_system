@@ -16,7 +16,7 @@ import torch
 from ego_data.calibration import CameraCalibration
 from camera_models.kb import KB_PROJECTION_VERSION
 from gem_multiview_inference import SOMA_TO_21
-from gem_shared_geometry import (associate_hands, camera_domain_penalty_torch, project_base,
+from gem_shared_geometry import (ASSOCIATION_VERSION, associate_hands, camera_domain_penalty_torch, project_base,
                                  project_base_torch, rigid_initialization, rotation_exp)
 
 
@@ -134,7 +134,8 @@ def fit_quality(model, candidate, calibrations, threshold_px):
         median = float(np.median(errors[good])) if good.any() else None
         p95 = float(np.percentile(errors[good], 95)) if good.any() else None
         support = int(np.count_nonzero(good & (errors <= threshold_px)))
-        trusted = support >= 16 and median is not None and median <= threshold_px * 0.7
+        # Wrist error remains diagnostic; assess support from the whole hand.
+        trusted = bool(support >= 16 and median is not None and median <= threshold_px * 0.7)
         if trusted:
             supported.append(camera)
         hand = observation['hand']
@@ -143,6 +144,7 @@ def fit_quality(model, candidate, calibrations, threshold_px):
                          'bbox_xyxy': hand['bbox_xyxy'], 'confidence': float(hand['confidence']),
                          'observed_joints_2d': observation['pixels'].tolist(),
                          'median_px': median, 'p95_px': p95,
+                         'wrist_px': float(errors[0]) if good[0] else None,
                          'inlier_joint_count': support, 'supported': trusted}
     good_shape = np.isfinite(points).all() and 0.04 < np.linalg.norm(points - points[0], axis=1).max() < 0.40
     # Verify geometry using only the views that support the fitted model.
@@ -187,6 +189,8 @@ def main():
         inputs.extend([dataset / 'calibration' / f'{camera}.json', args.predictions / camera / 'predictions.jsonl',
                        args.native_predictions / camera / 'gem_pose.pt'])
     config = {'algorithm': 'shared_soma_multiview_v2', 'inputs': [signature(path) for path in inputs],
+              'association_version': ASSOCIATION_VERSION,
+              'fit_quality': {'wrist_hard_gate': False},
               'cameras': cameras, 'frame_count': len(rows), 'steps': args.steps, 'batch_size': args.batch_size,
               'max_detections': args.max_detections, 'threshold_px': args.reprojection_threshold_px,
               'device': args.device, 'gem_root': str(args.gem_root.resolve()),
@@ -259,11 +263,12 @@ def main():
                     continue
                 model['views'] = views
                 model['supporting_cameras'] = support
+                model['association'] = candidate['association']
                 model_frames[model['sync_index']]['hands'].append(model)
                 accepted[model['sync_index']]['hands'].append({
                     'side': side, 'joints_base_m': model['joints_soma_base_m'][list(SOMA_TO_21)].tolist(),
                     'joints_soma_base_m': model['joints_soma_base_m'].tolist(),
-                    'supporting_cameras': support, 'views': views,
+                    'supporting_cameras': support, 'views': views, 'association': candidate['association'],
                     'geometry_source': 'shared_soma_model', 'model_scale': model['model_scale'],
                 })
             fitted += len(batch)
@@ -287,6 +292,8 @@ def main():
                'supporting_view_median_error_px': float(np.median(errors)) if errors else None,
                'fit_seconds': time.perf_counter() - started,
                'skeleton_and_mesh_share_model': True, 'independent_view_fallback': False,
+               'association_version': ASSOCIATION_VERSION,
+               'fit_quality': config['fit_quality'],
                'identity_shape_per_side': {str(k): {n: v.tolist() for n, v in s.items()} for k, s in shapes.items()},
                'rejected_hand_or_frame_reasons': dict(Counter(row['reason'] for row in rejected))}
     (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')

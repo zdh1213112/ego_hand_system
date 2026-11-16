@@ -10,14 +10,14 @@ import numpy as np
 from export_cached_multiview_detections import fingerprint
 
 
-DETECTOR_OVERLAY_STYLE = 'raw_detector_boxes_final_labels_v2'
+DETECTOR_OVERLAY_STYLE = 'raw_detector_boxes_detected_labels_v3'
 
 
 def original_detector_boxes(record, image_size):
-    """Collapse pose hypotheses by detector ID, preserving every physical box."""
+    """Use explicit detections, or recover boxes from older pose hypotheses."""
     width, height = image_size
     boxes = {}
-    for hand in record['hands']:
+    for hand in record.get('detections', record.get('hands', [])):
         if hand.get('proposal_source', 'detector') not in ('detector', 'cached_original_detector'):
             raise ValueError('requested detector boxes include a non-detector proposal')
         index = int(hand['detection_index'])
@@ -45,9 +45,8 @@ def draw_detector_boxes(image, boxes):
         cv2.rectangle(image, tuple(corners[:2]), tuple(corners[2:]), (20, 20, 20), 7, cv2.LINE_AA)
         cv2.rectangle(image, tuple(corners[:2]), tuple(corners[2:]), color, 3, cv2.LINE_AA)
         label = 'L' if side == 0 else 'R' if side == 1 else '?'
-        # Keep the original shared-video label style. FINAL is a display
-        # label, not evidence that this detector observation entered the fit.
-        cv2.putText(image, f'FINAL {label}',
+        # These boxes remain visible even when shared reconstruction fails.
+        cv2.putText(image, f'DETECTED {label}',
                     (int(corners[0]), max(28, int(corners[1]) - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, .68, color, 2, cv2.LINE_AA)
 
@@ -90,7 +89,7 @@ class RawDetectorOverlay:
             self.frames[camera] = records
             self.counts[camera] = count
         self.config = {'style': DETECTOR_OVERLAY_STYLE, 'predictions': str(self.root), 'inputs': signatures,
-                       'label': 'FINAL L/R', 'selection': 'all original detector boxes once per detection ID',
+                       'label': 'DETECTED L/R', 'selection': 'all original detector boxes once per detection ID',
                        'independent_of_shared_fit': True}
         self.drawn = 0
 
