@@ -58,21 +58,35 @@ def main():
     p.add_argument('--ego', type=Path, help='EGO directory if stored separately')
     p.add_argument('--nokov', type=Path, help='NOKOV directory if stored separately')
     p.add_argument('--output', type=Path, help='New output directory; defaults to work/<recording>_<timestamp>')
-    p.add_argument('--seed-alignment', type=Path, default=DEFAULT_SEED, help='Initial mount calibration; update after device remount')
+    p.add_argument('--seed-alignment', type=Path, help='Initial mount calibration; update after device remount')
     p.add_argument('--observations-only', action='store_true', help='Run dense RGB/KB consensus audit and videos, then stop before MANO')
-    p.add_argument('--optimization-config',type=Path,help='Opt-in personal shape/24-marker/native-contour JSON; disabled by default')
+    p.add_argument('--optimization-config',type=Path,help='Opt-in JSON for native refit or the signed label pipeline')
+    p.add_argument('--wilor-observations',type=Path,help='Existing same-exposure four-camera NPZ for the signed label pipeline')
+    p.add_argument('--publish',action='store_true',help='Publish a reviewed two-hand v4 candidate in --output')
     p.add_argument('--joint', action='store_true', help='Experimental MANO RGB refinement; default is baseline')
     p.add_argument('--marker-offset-mm', type=float, choices=[0, 2], default=0)
-    p.add_argument('--sample-stride', type=int, default=8)
-    p.add_argument('--source-fps', type=float, default=30)
+    p.add_argument('--sample-stride', type=int)
+    p.add_argument('--source-fps', type=float)
     p.add_argument('--device', choices=['cpu', 'cuda'], default='cuda')
+    p.add_argument('--workers', type=int, help='CPU workers for joint-refit image stages')
     p.add_argument('--dry-run', action='store_true', help='Validate inputs and print steps without writing or training')
     p.add_argument('--resume', action='store_true', help='Continue an interrupted run in --output; finished stages are skipped')
     a = p.parse_args()
     try:
+        if a.optimization_config:
+            config = json.loads(a.optimization_config.expanduser().read_text())
+            if isinstance(config, dict) and 'label_pipeline' in config:
+                from signed_label_export import run
+                return run(a, config, resolve_sources)
+        if a.wilor_observations or a.publish:
+            raise ValueError('--wilor-observations and --publish require the signed label pipeline configuration')
+        if a.workers is None: a.workers=min(16, os.cpu_count() or 4)
+        if a.source_fps is None: a.source_fps=30
+        if a.sample_stride is None:
+            a.sample_stride = 8
         personal = load_personal_config(a.optimization_config)
         refit = load_joint_refit_config(a.optimization_config)
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, FileNotFoundError, FileExistsError) as e:
         p.error(str(e))
     if personal['enabled'] and (a.joint or a.observations_only):
         p.error('Personal marker24 optimization cannot be combined with --joint or --observations-only')
@@ -85,11 +99,13 @@ def main():
     try:
         ego, nokov, name = resolve_sources(a.recording, a.ego, a.nokov)
         links, imu = raw_links(ego)
-        seed = a.seed_alignment.expanduser().resolve()
+        seed = (a.seed_alignment or DEFAULT_SEED).expanduser().resolve()
         if not (nokov/'nokov_rigid_bodies.csv').is_file():
             raise FileNotFoundError(nokov/'nokov_rigid_bodies.csv')
         if not seed.is_file():
             raise FileNotFoundError(seed)
+        if a.workers < 1:
+            raise ValueError('workers must be positive')
         if a.sample_stride < 1 or not 0 < a.source_fps < 1000:
             raise ValueError('sample-stride and source-fps must be positive')
         out = a.output.expanduser().resolve() if a.output else ROOT.parent/'work'/f'{name}_native_{datetime.now():%Y%m%d_%H%M%S}'
@@ -171,7 +187,14 @@ def main():
         videos(joint, 'joint_videos')
     if refit['enabled']:
         optimized = out/'optimized'
-        run('joint_refit', SCRIPTS/'run_joint_refit_recording.py', '--dataset', dataset, '--alignment', alignment/'fourview_alignment.json', '--aligned21', alignment/'aligned_nokov21.npz', '--baseline', base, '--nokov', nokov, '--placement', refit['placement'], '--output', optimized, '--sample-stride', refit['sample_stride'], '--device', a.device, *(['--resume'] if a.resume or optimized.exists() else []))
+        fit_options = []
+        for key in ('joint_limit_weight', 'min_markers_per_finger'):
+            if key in refit:
+                fit_options.extend(['--' + key.replace('_', '-'), refit[key]])
+        for key in ('sdk_marker_gaps', 'dorsal_ring_attachment', 'bounded_articulation', 'preserve_visible_contours', 'temporal_articulation'):
+            if refit.get(key):
+                fit_options.append('--' + key.replace('_', '-'))
+        run('joint_refit', SCRIPTS/'run_joint_refit_recording.py', '--dataset', dataset, '--alignment', alignment/'fourview_alignment.json', '--aligned21', alignment/'aligned_nokov21.npz', '--baseline', base, '--nokov', nokov, '--placement', refit['placement'], '--output', optimized, '--sample-stride', refit['sample_stride'], '--device', a.device, '--workers', a.workers, *fit_options, *(['--resume'] if a.resume or optimized.exists() else []))
         final = optimized/'dense/fit/final'
         print(f'Baseline labels: {base / "export/merged"}\n'
               f'Optimized labels (for training): {final / "export/merged"}\n'
