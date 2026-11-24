@@ -20,6 +20,8 @@ INPUT_KIND="mcap"
 CAMERAS_EXPLICIT=0
 REFERENCE_EXPLICIT=0
 OUTPUT=""
+EVALUATION_DATASET=""
+EVALUATION_OUTPUT=""
 CALIBRATION_JSON=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
@@ -103,6 +105,7 @@ usage() {
   echo "WiLoR weights: --checkpoint FILE selects the base model; --adapter FILE applies trainable/LoRA weights; --wilor-root DIR selects the matching training checkout."
   echo "--mcap FILE_OR_DIR detects GEN and Orbbec camera topics. An EGO4 recording directory must contain one MCAP; select a part for multi-part recordings."
   echo "EGO4 optional: --calibration-json FILE uses an explicit camera_calibrations JSON when the source YAML is unavailable."
+  echo "Optional: --evaluation-dataset LABELED_DIR scores final shared MANO/SOMA results; --evaluation-output DIR overrides OUTPUT/evaluation_shared."
   echo "Optional: --final-video generates the final video(s) selected by --wilor-mode; disabled by default."
   echo "WiLoR: --per-camera-video writes each camera's native skeleton+mesh video and their grid under OUTPUT/per_camera_video/. Works with --stop-after-inference or --final-video; --no-video disables all videos."
   echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
@@ -136,6 +139,8 @@ while (($#)); do
     --mcap) MCAP="$2"; INPUT_KIND="mcap"; shift 2 ;;
     --session|--experimental-session-3d) MCAP="$2"; INPUT_KIND="session"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
+    --evaluation-dataset) EVALUATION_DATASET="$2"; shift 2 ;;
+    --evaluation-output) EVALUATION_OUTPUT="$2"; shift 2 ;;
     --calibration-json) CALIBRATION_JSON="$2"; shift 2 ;;
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
@@ -280,6 +285,15 @@ PYPROBE
 fi
 if [[ -n "$CALIBRATION_JSON" && "$INPUT_KIND" == mcap ]]; then
   echo "--calibration-json requires an Orbbec input" >&2; exit 2
+fi
+if [[ -n "$EVALUATION_OUTPUT" && -z "$EVALUATION_DATASET" ]]; then
+  echo "--evaluation-output requires --evaluation-dataset" >&2; exit 2
+fi
+if [[ -n "$EVALUATION_DATASET" ]]; then
+  if ((STOP_AFTER_INFERENCE)) || [[ "$POSE_BACKEND" == gem && "$GEM_MODE" == independent ]] ||
+     [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" == legacy ]]; then
+    echo "Label evaluation requires shared/both mode and completion of shared fitting" >&2; exit 2
+  fi
 fi
 [[ "$SHARED_STEPS" =~ ^[1-9][0-9]*$ && "$SHARED_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
   echo "Shared steps/batch size must be positive integers" >&2; exit 2;
@@ -1170,4 +1184,11 @@ fi
 if [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" != legacy ]]; then
   echo "[multiview] shared MANO result: $SHARED_FUSION"
   cat "$SHARED_FUSION/summary.json"
+fi
+
+if [[ -n "$EVALUATION_DATASET" ]]; then
+  echo "[multiview] evaluate final shared geometry against labeled data"
+  run_python "$ROOT/scripts/evaluate_shared_hand_models.py" \
+    --dataset "$EVALUATION_DATASET" --run "$SHARED_FUSION" --normalized-dataset "$NORMALIZED" \
+    --backend "$POSE_BACKEND" --output "${EVALUATION_OUTPUT:-$OUTPUT/evaluation_shared}" --resume
 fi

@@ -11,6 +11,8 @@ USB **RealSense D415** 手部表面扫描现已提供独立入口：
 - `orbbec`：Orbbec EGO 双目或 EGO4 四路视频、硬件时间戳、KB 鱼眼标定和可选 IMU；
 - `gen`：GEN DAS EGO MCAP/H264、KB 或 Double Sphere 双目及多目标定。
 
+单视角与多视角评测共用标签读取、相机投影和评分模块。共享评测保留每只手的全局三维位置，并按物理手和时刻统计覆盖率。具体数据约定见[统一标签评估说明](docs/HAND_MODEL_EVALUATION_ZH.md)。
+
 当前系统包含统一的双目主流程，以及支持四路、六路等标定相机组合的多视角流程。
 直接运行多视角实验，请看 [WiLoR 与 GEM 快速使用](#multiview-wilor-gem)：**两个入口现在都默认使用 `shared` 模式**。
 
