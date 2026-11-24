@@ -44,8 +44,10 @@ def parse_args(argv=None):
     p.add_argument("--device", default="cuda")
     p.add_argument("--detector", type=Path, default=ROOT / "models/wilor/detector.pt")
     p.add_argument("--checkpoint", type=Path, help="WiLoR checkpoint")
+    p.add_argument("--adapter", type=Path, help="trained native-KB WiLoR adapter")
+    p.add_argument("--detector-crop-calibration", type=Path, help="recording-trained detector-to-mesh crop calibration")
     p.add_argument(
-        "--model-config", type=Path, default=ROOT / "models/wilor/model_config.yaml"
+        "--model-config", type=Path
     )
     p.add_argument("--mano-model-dir", type=Path, default=ROOT / "models/mano")
     p.add_argument(
@@ -99,7 +101,27 @@ def parse_args(argv=None):
             p.error(
                 "--camera-confidence requires camera0..3=VALUE with VALUE in (0, 1]"
             )
-    for name in ("detector", "model_config", "mano_model_dir", "calibration"):
+    if a.detector_crop_calibration and not a.adapter:
+        p.error("--detector-crop-calibration requires a native --adapter")
+    if a.adapter:
+        a.adapter=a.adapter.expanduser().resolve()
+        import torch
+        from ego_hand_inference.orbbec_io import sha256_file
+        payload=torch.load(a.adapter,map_location='cpu',weights_only=False)
+        modifications=payload.get('model_modifications',{})
+        if payload.get('format')!='wilor_glove_trainable_v2' or modifications.get('physical_camera_model')!='physical_kb':
+            p.error('--adapter requires a native physical-KB glove checkpoint')
+        source=payload['training_metadata']['config']
+        for name,key in (('checkpoint','base_checkpoint'),('model_config','model_config')):
+            saved=source[key]
+            path=(getattr(a,name) or Path(saved['path'])).expanduser().resolve()
+            if not path.is_file():
+                p.error(f'Provide --{name.replace("_","-")} to locate the adapter training file {saved["path"]}')
+            if sha256_file(path)!=saved['sha256']:
+                p.error(f'{path} differs from the {key} recorded in the adapter')
+            setattr(a,name,path)
+    a.model_config=a.model_config or ROOT/'models/wilor/model_config.yaml'
+    for name in ("detector", "model_config", "mano_model_dir", "calibration", "detector_crop_calibration"):
         value = getattr(a, name)
         if value is not None:
             setattr(a, name, value.expanduser().resolve())
@@ -250,10 +272,15 @@ def main(argv=None):
     model_files += [a.model_config, a.mano_model_dir / "MANO_RIGHT.pkl"]
     # Source identities prevent silently reusing a result produced by different code.
     code = sorted((ROOT / "scripts").rglob("*.py"))
+    if a.adapter:
+        model_files.append(a.adapter)
+        code.extend(sorted((ROOT.parent/'wilor_training/wilor').rglob('*.py')))
+    if a.detector_crop_calibration:
+        model_files.append(a.detector_crop_calibration)
     options = {
         k: str(v) if isinstance(v, Path) else v
         for k, v in vars(a).items()
-        if k not in ("session", "mcap", "output")
+        if k not in ("session", "mcap", "output") and (k not in ("adapter", "detector_crop_calibration") or v is not None)
     }
     config = {
         "schema_version": 1,
@@ -344,7 +371,12 @@ def main(argv=None):
             a.mano_model_dir,
             "--save-mano-params",
         ]
-        run_stage("wilor_multiview_inference.py", infer)
+        if a.adapter:
+            if a.detector_crop_calibration:
+                infer += ["--detector-crop-calibration", a.detector_crop_calibration]
+            run_stage("native_glove_observations.py", [*infer,"--adapter",a.adapter])
+        else:
+            run_stage("wilor_multiview_inference.py", infer)
     if shared.exists() and (not (shared / "summary.json").is_file()):
         shutil.rmtree(shared)
     fit = [
