@@ -268,7 +268,8 @@
         "status": "suggested",
         "region": "thumb_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.7317059548365811,
@@ -416,7 +417,8 @@
         "status": "suggested",
         "region": "index_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.869042809539121,
@@ -564,7 +566,8 @@
         "status": "suggested",
         "region": "middle_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.8415590116658564,
@@ -712,7 +715,8 @@
         "status": "suggested",
         "region": "ring_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.7464587275185972,
@@ -860,7 +864,8 @@
         "status": "suggested",
         "region": "pinky_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.6094245755677585,
@@ -1158,7 +1163,8 @@
         "status": "suggested",
         "region": "thumb_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.43041752426597124,
@@ -1306,7 +1312,8 @@
         "status": "suggested",
         "region": "index_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.13836331062406082,
@@ -1454,7 +1461,8 @@
         "status": "suggested",
         "region": "middle_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.12061359291099641,
@@ -1602,7 +1610,8 @@
         "status": "suggested",
         "region": "ring_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.1814145779896436,
@@ -1750,7 +1759,8 @@
         "status": "suggested",
         "region": "pinky_tip",
         "surface": "dorsal",
-        "notes": "自动预填，贴点区域及表面均待确认；投影存在不代表该点可见。",
+        "mounting_site": "fingernail",
+        "notes": "采集者确认末端 marker 贴在指甲上。照片中的预填坐标、甲面上的精确位置及球心高度仍需按录制标定。",
         "point": {
           "view": "dorsal",
           "x": 0.29934156652250377,

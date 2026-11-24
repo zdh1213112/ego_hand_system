@@ -1,5 +1,6 @@
 """Strict opt-in config for the shared personal-shape/24-marker pipeline."""
 import json
+import math
 from pathlib import Path
 
 def load_personal_config(path=None):
@@ -51,7 +52,8 @@ def load_joint_refit_config(path=None):
  section = data.get('joint_refit')
  if section is None: return {'enabled': False}
  if not isinstance(section, dict): raise ValueError('joint_refit must be an object')
- allowed = {'enabled', 'placement', 'sample_stride'}
+ boolean_options = ('sdk_marker_gaps', 'dorsal_ring_attachment', 'bounded_articulation', 'preserve_visible_contours', 'temporal_articulation')
+ allowed = {'enabled', 'placement', 'sample_stride', 'joint_limit_weight', 'min_markers_per_finger', *boolean_options}
  if set(section) - allowed: raise ValueError('Unknown joint_refit setting: ' + ', '.join(sorted(set(section) - allowed)))
  enabled = section.get('enabled', False)
  if type(enabled) is not bool: raise ValueError('joint_refit.enabled must be a JSON boolean')
@@ -62,4 +64,24 @@ def load_joint_refit_config(path=None):
  if not placement.is_file(): raise FileNotFoundError(placement)
  stride = section.get('sample_stride', 8)
  if type(stride) is not int or stride < 1: raise ValueError('joint_refit.sample_stride must be an integer >= 1')
- return {'enabled': True, 'placement': str(placement), 'sample_stride': stride}
+ result = {'enabled': True, 'placement': str(placement), 'sample_stride': stride}
+ if 'joint_limit_weight' in section:
+  weight = section['joint_limit_weight']
+  if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
+   raise ValueError('joint_refit.joint_limit_weight must be finite and nonnegative')
+  result['joint_limit_weight'] = weight
+ if 'min_markers_per_finger' in section:
+  minimum = section['min_markers_per_finger']
+  if type(minimum) is not int or not 0 <= minimum <= 4:
+   raise ValueError('joint_refit.min_markers_per_finger must be an integer from 0 to 4')
+  result['min_markers_per_finger'] = minimum
+ for name in boolean_options:
+  if name in section:
+   if type(section[name]) is not bool:
+    raise ValueError(f'joint_refit.{name} must be a JSON boolean')
+   result[name] = section[name]
+ if result.get('temporal_articulation') and not result.get('bounded_articulation'):
+  raise ValueError('joint_refit.temporal_articulation requires bounded_articulation')
+ if result.get('preserve_visible_contours') and not result.get('bounded_articulation'):
+  raise ValueError('joint_refit.preserve_visible_contours requires bounded_articulation')
+ return result
