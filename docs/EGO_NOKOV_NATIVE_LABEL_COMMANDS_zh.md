@@ -15,7 +15,7 @@ bash scripts/export_ego_nokov_labels.sh \
 | 双手，各有完整 24 点手套定义 | 自适应双腕、解剖和 MCP 拟合，逐曝光导出，再对训练划分执行 v4 右小指修正和异常样本剔除 | `optimized/labels/`，读取 `optimized/train.jsonl` 和 `optimized/val.jsonl` |
 | 仅左手或仅右手 | 已有的 `native_nokov_temporal.json` 单手时序流程，执行 NOKOV 与 SDK 逐指拟合、关节约束和轮廓核对 | `optimized/dense/fit/final/export/merged/` |
 
-例如本文的 `pair_20261111_191855` 只录到了右手，执行第二行。双手录制可用工作区的 `../work/labels_20261120/raw_groups/183304` 验证第一行。终端会打印识别到的左右手、方法和输出位置，`settings.json` 会记录实际分支、配置内容和录制路径。默认在工作区 `work/<录制名>_labels_<时间>/` 新建输出。可用 `--output /你的/新目录` 指定位置，加 `--dry-run` 只检查输入并查看分支，中断后用相同配置和输出目录加 `--resume` 继续。
+例如本文的 `pair_20261111_191855` 只录到了右手，执行第二行。验证第一行时，将 `--recording` 指向你的双手录制目录，例如 `/你的/双手录制目录/183304`。终端会打印识别到的左右手、方法和输出位置，`settings.json` 会记录实际分支、配置内容和录制路径。默认在工作区 `work/<录制名>_labels_<时间>/` 新建输出。可用 `--output /你的/新目录` 指定位置，加 `--dry-run` 只检查输入并查看分支，中断后用相同配置和输出目录加 `--resume` 继续。
 
 ### 两次需要核对的位置
 
@@ -140,7 +140,7 @@ cd /home/p3/data_sda1/EGO_glove
 - 每段录制时间轴上最后 10% 的时刻做验证集，其余做训练集。加入新录制不会打乱已有录制的划分。
 - 图片和标签用硬链接，不额外占磁盘。
 - 输出目录要用新名字，或者先删掉旧目录；内容不同的已有目录会报错。
-- 不在 `work/` 下的旧结果用 `--extra 目录/export/merged` 加进来。例如 192916 的旧优化标签：`--extra wilor_training/output/native_kb_training_20261111/joint_refit_v5_dense/fit/final/export/merged`。用上面的命令重跑 192916 之后，就不用再加 `--extra`。
+- 默认搜索目录以外的旧结果用 `--extra 目录/export/merged` 加进来。例如 192916 的旧优化标签：`--extra wilor_training/output/native_kb_training_20261111/joint_refit_v5_dense/fit/final/export/merged`。用上面的命令重跑 192916 之后，就不用再加 `--extra`。
 
 训练前，先把 `wilor_training/output/native_kb_training_20261111/joint_refit_train.yaml` 里的 `paths.dataset_root` 改成上面的汇总目录，再启动：
 
