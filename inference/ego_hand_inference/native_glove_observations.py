@@ -44,7 +44,7 @@ def crop_hand(image, box, side, calibration, config, *, rectified=False, rescale
     rgb = crop[:,:,::-1].astype(np.float32)/255.
     rgb = (rgb-np.asarray(config.MODEL.IMAGE_MEAN,np.float32))/np.asarray(config.MODEL.IMAGE_STD,np.float32)
     sample = dict(img=torch.from_numpy(np.ascontiguousarray(rgb.transpose(2,0,1))),crop_transform=transform.astype(np.float32),
-                  crop_box_size=np.float32(size),camera_K=K,camera_distortion=calibration['D'],
+                  crop_box_size=np.float32(size),camera_K=K,camera_distortion=np.asarray(calibration['D'], np.float32),
                   bbox_xyxy=box,image_size=image_size,side=side)
     if view is not None:
         sample['perspective_view'] = view
@@ -152,7 +152,9 @@ def main():
         for cam in manifest['camera_ids']:
             spec=json.loads((args.dataset/'calibration'/(cam+'.json')).read_text())
             if spec['model']!='KB':raise ValueError(f'Native physical-KB adapter requires KB calibration on {cam}')
-            cal=dict(id=cam,K=np.asarray(spec['K'],np.float32),D=np.asarray(spec['distortion'],np.float32),
+            # Match the training loader's precision when building the OpenCV sampling maps.
+            distortion_type = np.float64 if args.rectified else np.float32
+            cal=dict(id=cam,K=np.asarray(spec['K'],np.float32),D=np.asarray(spec['distortion'],distortion_type),
                      size=np.asarray(spec['image_size'],np.float32))
             folder=args.output/cam;folder.mkdir()
             reader=SequentialVideoReader(args.dataset/'cameras'/cam/manifest['storage']['video_filename'],tuple(spec['image_size']))
