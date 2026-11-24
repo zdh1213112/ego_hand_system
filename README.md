@@ -1,6 +1,6 @@
 # EGO Hand System
 
-[![CI](https://github.com/zdh1213112/ego_hand_system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zdh1213112/ego_hand_system/actions/workflows/ci.yml)
+[![CI](https://github.com/XenseRobotics-AI/ego_hand_system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/XenseRobotics-AI/ego_hand_system/actions/workflows/ci.yml)
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-3776AB)
 
 面向 **Orbbec EGO4 / EGO-4B 头戴相机**的手部三维重建系统，支持 NOKOV 标签导出、手部模型训练和四目推理，并保留实时跟踪与 VIO 工作流。
@@ -65,7 +65,7 @@ flowchart LR
 需要 Linux、Conda、Git、FFmpeg，以及支持当前 PyTorch 运行时的 NVIDIA 驱动。
 
 ```bash
-git clone https://github.com/zdh1213112/ego_hand_system.git
+git clone https://github.com/XenseRobotics-AI/ego_hand_system.git
 cd ego_hand_system
 git submodule update --init third_party/MANO third_party/basalt third_party/WiLoR
 bash scripts/setup_python_environment.sh
