@@ -41,6 +41,7 @@ NO_VIDEO=0
 NO_DIAGNOSTIC_VIDEO=0
 STOP_AFTER_INFERENCE=0
 FINAL_VIDEO_ENABLED=0
+PER_CAMERA_VIDEO=0
 ORIGINAL_VIDEO_ENABLED="${EGO_WILOR_ORIGINAL_VIDEO:-0}"
 FINAL_2D_RESIDUAL_FALLBACK_PX="${EGO_FINAL_2D_RESIDUAL_FALLBACK_PX:-35}"
 FINAL_2D_RESIDUAL_PERCENTILE="${EGO_FINAL_2D_RESIDUAL_PERCENTILE:-95}"
@@ -103,6 +104,7 @@ usage() {
   echo "--mcap FILE_OR_DIR detects GEN and Orbbec camera topics. An EGO4 recording directory must contain one MCAP; select a part for multi-part recordings."
   echo "EGO4 optional: --calibration-json FILE uses an explicit camera_calibrations JSON when the source YAML is unavailable."
   echo "Optional: --final-video generates the final video(s) selected by --wilor-mode; disabled by default."
+  echo "WiLoR: --per-camera-video writes each camera's native skeleton+mesh video and their grid under OUTPUT/per_camera_video/. Works with --stop-after-inference or --final-video; --no-video disables all videos."
   echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
   echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos. Both keeps both branches."
   echo "Shared MANO fitting: --shared-steps N (100), --shared-batch-size N (32). --no-diagnostic-video skips only the diagnostic video."
@@ -122,7 +124,7 @@ usage() {
 
 while (($#)); do
   case "$1" in
-    --no-video|--no-diagnostic-video|--no-native-recovery|--no-pose-transition|--stop-after-inference|--final-video|-h|--help) ;;
+    --no-video|--no-diagnostic-video|--no-native-recovery|--no-pose-transition|--stop-after-inference|--final-video|--per-camera-video|-h|--help) ;;
     --*)
       if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then
         echo "Missing value for $1" >&2
@@ -207,6 +209,7 @@ while (($#)); do
     --no-diagnostic-video) NO_DIAGNOSTIC_VIDEO=1; shift ;;
     --stop-after-inference) STOP_AFTER_INFERENCE=1; shift ;;
     --final-video) FINAL_VIDEO_ENABLED=1; shift ;;
+    --per-camera-video) PER_CAMERA_VIDEO=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -219,6 +222,14 @@ case "$POSE_BACKEND/$POSE_POLICY" in
   wilor/native-wrist|wilor/shared-fit|fah/shared-fit|gem/) ;;
   *) echo "Unsupported --pose-policy '$POSE_POLICY' for backend '$POSE_BACKEND'" >&2; exit 2 ;;
 esac
+if ((PER_CAMERA_VIDEO)) && [[ "$POSE_BACKEND" != wilor ]]; then
+  echo "--per-camera-video requires the WiLoR backend" >&2; exit 2
+fi
+RENDER_PER_CAMERA=$((PER_CAMERA_VIDEO && !NO_VIDEO))
+NEED_WILOR_MANO=0
+if [[ "$WILOR_MODE" != legacy || "$RENDER_PER_CAMERA" == 1 || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ]]; then
+  NEED_WILOR_MANO=1
+fi
 if [[ -z "$MCAP" || -z "$OUTPUT" ]]; then
   usage >&2
   exit 2
@@ -855,7 +866,7 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
   else
     if [[ -n "$WILOR_CHECKPOINT" ]]; then INFERENCE_ARGS+=(--checkpoint "$WILOR_CHECKPOINT"); fi
     if [[ -n "$WILOR_ADAPTER" ]]; then INFERENCE_ARGS+=(--adapter "$WILOR_ADAPTER"); fi
-    if [[ "$WILOR_MODE" != legacy || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ]]; then
+    if ((NEED_WILOR_MANO)); then
       INFERENCE_ARGS+=(--save-mano-params)
     fi
     if [[ -n "$EXTERNAL_BOXES" ]]; then INFERENCE_ARGS+=(--external-boxes "$EXTERNAL_BOXES"); fi
@@ -865,12 +876,7 @@ else
   echo "[multiview] reuse $POSE_LABEL predictions"
 fi
 
-if ((STOP_AFTER_INFERENCE)); then
-  echo "[multiview] inference checkpoint complete: $RAW_PREDICTIONS"
-  exit 0
-fi
-
-if [[ "$POSE_BACKEND" == wilor && ( "$WILOR_MODE" != legacy || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ) ]]; then
+if [[ "$POSE_BACKEND" == wilor ]] && ((NEED_WILOR_MANO && (!STOP_AFTER_INFERENCE || RENDER_PER_CAMERA))); then
   run_python - "$RAW_PREDICTIONS/summary.json" <<'PY'
 import json
 from pathlib import Path
@@ -879,8 +885,18 @@ summary = json.loads(Path(sys.argv[1]).read_text())
 if not summary.get("save_mano_params", False):
     raise SystemExit("WiLoR mesh rendering/shared fitting needs saved MANO parameters. These cached predictions "
                      "were made without --save-mano-params. Use a new --output directory with "
-                     "--final-video or --wilor-mode shared/both; the existing output is preserved.")
+                     "--per-camera-video, --final-video (hybrid) or --wilor-mode shared/both.")
 PY
+fi
+
+if ((RENDER_PER_CAMERA)); then
+  run_python "$ROOT/scripts/render_per_camera_wilor.py" \
+    --dataset "$NORMALIZED" --predictions "$RAW_PREDICTIONS" --output "$OUTPUT/per_camera_video" \
+    --cameras "${CAMERAS[@]}" --device "$DEVICE" --max-frames "$MAX_FRAMES"
+fi
+if ((STOP_AFTER_INFERENCE)); then
+  echo "[multiview] inference checkpoint complete: $RAW_PREDICTIONS"
+  exit 0
 fi
 
 if ((GLOVE_MARKER_ASSIST)) && [[ ! -f "$PREDICTIONS/summary.json" ]]; then

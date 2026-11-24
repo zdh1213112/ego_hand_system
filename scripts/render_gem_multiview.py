@@ -61,6 +61,11 @@ def draw_mesh_surface(image, vertices, faces, intrinsics, side, alpha=MESH_STYLE
         from camera_models import project_points
         xy, valid = project_points(calibration, xyz)
         valid &= np.isfinite(xy).all(axis=1) & (np.abs(xy) < 1e6).all(axis=1)
+    return draw_projected_mesh(image, xyz, faces, xy, valid, side, alpha)
+
+
+def draw_projected_mesh(image, xyz, faces, xy, valid, side, alpha=MESH_STYLE["alpha"]):
+    """Rasterize projected triangles in depth order using the shared mesh style."""
     faces = faces[valid[faces].all(axis=1)]
     if not len(faces):
         return False

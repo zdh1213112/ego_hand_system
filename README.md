@@ -258,6 +258,13 @@ Orbbec EGO4 原始 MCAP 按相机通道识别录制格式，默认以 camera0 �
 
 #### 输出视频分别是什么
 
+WiLoR 使用 `--per-camera-video` 可查看融合前的单视角结果。四路录制会在
+`OUTPUT/per_camera_video/` 生成 `camera0.mp4` 到 `camera3.mp4` 和 `native_4view.mp4`。
+单路视频保留输入分辨率，四宫格按所选相机顺序逐行拼接同一批同步画面。
+每个检测框按检测器手侧选择当前帧的 WiLoR 假设，骨架使用保存的 21 个图像关节，
+网格使用同一假设的 MANO 参数和相机平移。原始模型使用 WiLoR 虚拟针孔投影，
+`physical_kb` 微调模型使用对应相机的 KB 标定。有框但无法确定唯一手侧假设时只画框。
+
 以四路、未启用辅助分支的 `both` 模式为例：
 
 ```text
