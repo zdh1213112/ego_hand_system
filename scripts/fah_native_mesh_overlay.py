@@ -1,4 +1,5 @@
 """Overlay saved FAH meshes using their original inference intrinsics."""
+import json
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ class FahNativeMeshOverlay:
     def __init__(self, predictions, records):
         self.root = Path(predictions).resolve()
         self.records, self.meshes, self.intrinsics, self.faces = {}, {}, {}, {}
+        self.calibrations = {}
         self.audits = []
         self.stats = {"requested": 0, "drawn": 0, "missing": 0, "outside_image": 0}
         for camera, rows in records.items():
@@ -30,6 +32,9 @@ class FahNativeMeshOverlay:
                     if key in self.meshes[camera]:
                         raise ValueError(f"{camera}: duplicate FAH mesh {key}")
                     self.meshes[camera][key] = (mesh.copy(), int(side))
+                if "kb_calibration_json" in archive:
+                    from ego_data.calibration import CameraCalibration
+                    self.calibrations[camera] = CameraCalibration.from_dict(json.loads(archive["kb_calibration_json"].item()))
                 self.intrinsics[camera] = K.copy()
                 self.faces[camera] = {1: faces.copy(), 0: faces[:, [0, 2, 1]].copy()}
             for frame, record in self.records[camera].items():
@@ -50,13 +55,14 @@ class FahNativeMeshOverlay:
             return
         hypothesis = int(hand["hypothesis_index"])
         vertices, native_side = self.meshes[camera][source, hypothesis]
-        drawn = draw_mesh_surface(image, vertices, self.faces[camera][native_side], self.intrinsics[camera], side)
+        options = {"calibration": self.calibrations[camera]} if camera in self.calibrations else {}
+        drawn = draw_mesh_surface(image, vertices, self.faces[camera][native_side], self.intrinsics[camera], side, **options)
         self.stats["drawn" if drawn else "outside_image"] += 1
         self.audits.append({**audit, "hypothesis_index": hypothesis, "native_side": native_side, "mesh_drawn": bool(drawn)})
 
     def summary(self):
         return {"model": "FAH native MANO", "predictions": str(self.root),
                 "geometry": "original FAH fitted per-camera vertices; camera coordinates in metres",
-                "projection": "original FAH pinhole intrinsics on unchanged pixels",
+                "projection": {cam: "KB" if cam in self.calibrations else "pinhole" for cam in self.intrinsics},
                 "intrinsics": {camera: K.tolist() for camera, K in self.intrinsics.items()},
                 "shared_multiview_mesh": False, **MESH_STYLE, **self.stats}

@@ -11,6 +11,7 @@ import argparse
 from contextlib import nullcontext
 import csv
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -18,6 +19,53 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+
+
+def training_root():
+    default = Path(__file__).resolve().parents[2] / "wilor_training"
+    return Path(os.environ.get("WILOR_TRAINING_ROOT", default)).resolve()
+
+
+def geometry_sources():
+    directory = training_root() / "tools/hand_finetune"
+    return [directory / name for name in ("crop_geometry.py", "fah_views.py")]
+
+
+def predict_camera_hands(method, image, boxes, scores, side_groups, K, kb_camera, export_parameters):
+    """Run and fit in the network camera, then return joints and fitted mesh in the physical camera."""
+    import torch
+
+    views = None
+    with torch.no_grad():
+        if kb_camera is None:
+            counts = [len(group) for group in side_groups]
+            hands = method.est.process_image(image, boxes=np.repeat(boxes, counts, axis=0),
+                is_right=np.asarray([s for group in side_groups for s in group], bool),
+                scores=np.repeat(scores, counts), cam_int=np.asarray(K, np.float32)) if len(boxes) else []
+        else:
+            if image.shape[1::-1] != kb_camera.image_size:
+                raise ValueError(f"{kb_camera.camera_id}: video frame and KB calibration sizes differ")
+            path = str(training_root())
+            if path not in sys.path:
+                sys.path.insert(0, path)
+            try:
+                from tools.hand_finetune.fah_views import native_prediction, predict_views
+            except ModuleNotFoundError as exc:
+                if exc.name not in ("tools", "tools.hand_finetune", "tools.hand_finetune.fah_views"):
+                    raise
+                raise ImportError(f"Set WILOR_TRAINING_ROOT to the matching wilor_training checkout (tried {path})") from exc
+            hands, views = predict_views(method.est, image, boxes, scores, side_groups,
+                                         kb_camera.K, kb_camera.distortion)
+
+    if export_parameters:
+        parameters = fit_meshes(method, hands)
+    else:
+        method._fit_meshes(hands)
+        parameters = [None] * len(hands)
+    if views is not None:
+        for i, (hand, view) in enumerate(zip(hands, views, strict=True)):
+            hands[i], parameters[i] = native_prediction(hand, view, parameters[i])
+    return hands, parameters
 
 
 def backend_config(root, model, weights, mano_dir, sam3d):
@@ -28,6 +76,7 @@ def backend_config(root, model, weights, mano_dir, sam3d):
              sam3d / "model_config.yaml", sam3d / "assets/mhr_model.pt",
              Path(__file__), root / "bench/methods/fah.py"]
     paths.extend(sorted((root / "fah").glob("*.py")))
+    paths.extend(path for path in geometry_sources() if path.is_file())
     signatures = []
     for path in paths:
         path = path.resolve()
@@ -35,7 +84,7 @@ def backend_config(root, model, weights, mano_dir, sam3d):
         signatures.append({"path": str(path), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns})
     return {"name": "fah", "model": model, "fah_root": str(root.resolve()),
             "mode": "framewise_dual_hypothesis", "mesh": "mano", "assets": signatures,
-            "camera_model_for_pose": "pinhole_approximation_on_original_pixels"}
+            "camera_model_for_pose": "KB_local_perspective_other_native_FAH"}
 
 
 def load_external_boxes(root, cameras, rows):
@@ -194,6 +243,7 @@ def main():
     import cv2
     import torch
     import fah
+    from ego_data.calibration import CameraCalibration
     from ego_data.dataset import SequentialVideoReader
 
     device = "cuda" if args.device == "auto" else args.device
@@ -226,6 +276,13 @@ def main():
         K = np.asarray(calibration["K"], dtype=np.float32)
         if K.shape != (3, 3) or not np.isfinite(K).all() or np.any(np.diag(K)[:2] <= 0):
             raise ValueError(f"{camera}: invalid intrinsics")
+        kb_camera = None
+        mode = "native_pinhole" if calibration.get("model", "PINHOLE").upper() == "PINHOLE" else "pinhole_approximation"
+        if calibration.get("model", "").upper() == "KB":
+            kb_camera = CameraCalibration.from_dict(calibration)
+            if kb_camera.image_size != tuple(manifest["image_size"]):
+                raise ValueError(f"{camera}: manifest and KB calibration image sizes differ")
+            mode = "KB_local_perspective"
         model.reset()
         detector.conf = confidences[camera]
         root = output / camera
@@ -247,10 +304,8 @@ def main():
                     boxes, scores, sides, sources = select_detections(
                         np.asarray(boxes, np.float32).reshape(-1, 4), np.asarray(scores, np.float32),
                         np.asarray(sides, np.int8), sources, args.max_detections_per_class)
-                    with torch.no_grad():
-                        hands = method.est.process_image(image, boxes=np.repeat(boxes, 2, axis=0),
-                            is_right=np.tile([False, True], len(boxes)), scores=np.repeat(scores, 2), cam_int=K)
-                        parameters = fit_meshes(method, hands)
+                    hands, parameters = predict_camera_hands(method, image, boxes, scores,
+                        [(False, True)] * len(boxes), K, kb_camera, export_parameters=True)
                     converted, vertices = adapt_hands(hands, parameters, boxes, scores, sides, sources)
                     record = {"sync_index": int(row["sync_index"]), "camera_id": camera,
                         "source_frame_index": frame_id, "timestamp_ns": int(row[f"{camera}_timestamp_ns"]),
@@ -268,20 +323,21 @@ def main():
             reader.close()
         np.savez_compressed(root / "meshes.npz", vertices_camera_m=np.asarray(meshes, np.float32).reshape(-1, 778, 3),
             source_frame_indices=np.asarray(mesh_frames, np.int64), hypothesis_indices=np.asarray(mesh_hypotheses, np.int32),
-            is_right=np.asarray(mesh_sides, np.int8), faces_right=faces, K=K)
+            is_right=np.asarray(mesh_sides, np.int8), faces_right=faces, K=K,
+            **({"kb_calibration_json": json.dumps(kb_camera.to_dict())} if kb_camera else {}))
         summary = {"frame_count": len(rows), "detected_frame_count": detected_frames,
             "physical_box_count": physical_boxes, "hypothesis_count": len(meshes),
             "detector_confidence": confidences[camera], "intrinsics": K.tolist(),
-            "inference_seconds": time.perf_counter() - camera_start}
+            "camera_model_for_pose": mode, "inference_seconds": time.perf_counter() - camera_start}
         (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         summaries[camera] = summary
     summary = {"schema_version": 1, "stage": "fah_multiview_dual_hypothesis", "dataset": str(dataset),
         "backend": backend, "camera_ids": cameras, "frame_count": len(rows), "save_mano_params": True,
         "native_mesh": "camera*/meshes.npz: camera coordinates in metres; right-hand triangle winding",
-        "image_preprocessing": "unchanged normalized video pixels", "gpu_profile": args.gpu_profile,
+        "image_preprocessing": "detector on source video; KB hand boxes rectified to local perspective", "gpu_profile": args.gpu_profile,
         "batch_size": args.batch_size, "frame_batch_size": 1,
         "requested_frame_batch_size": args.frame_batch_size,
-        "camera_model_for_pose": "pinhole approximation; fusion uses original calibration",
+        "camera_model_for_pose": {camera: s["camera_model_for_pose"] for camera, s in summaries.items()},
         "inference_seconds": time.perf_counter() - started, "cameras": summaries}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
