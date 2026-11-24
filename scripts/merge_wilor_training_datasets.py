@@ -54,6 +54,19 @@ def _common(summaries: list[dict[str, Any]], key: str) -> Any:
     return values[0] if all(value == values[0] for value in values) else None
 
 
+def record_label_fit_provenance(merged: dict[str, Any], summaries: list[dict[str, Any]]) -> None:
+    """Preserve the fitted supervision of each recording, including mixed-generation datasets."""
+    for key in ("label_fit_strategy", "finger_rotation_limits_applied", "measured_marker_allowance_mm",
+                "bounded_pose_visible_contour_refinement", "silhouette_supervision", "source_optimized_fit"):
+        for i, source in enumerate(summaries):
+            if key in source:
+                merged["label_generation_by_source"][str(i)][key] = source[key]
+        if key != "source_optimized_fit" and all(key in source for source in summaries):
+            common = _common(summaries, key)
+            if common is not None:
+                merged[key] = common
+
+
 def _source_experiment_name(dataset: Path) -> str:
     return dataset.parent.name
 
@@ -229,6 +242,7 @@ def main() -> int:
                 for source_id, record in enumerate(source_records)
             }
             merged_summary["projection_fields"] = first.get("projection_fields", {})
+        record_label_fit_provenance(merged_summary, summaries)
         (temporary / "summary.json").write_text(
             json.dumps(merged_summary, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",

@@ -2,6 +2,7 @@
 """Export native-camera NOKOV/MANO labels using only physical camera geometry."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -18,6 +19,28 @@ from export_multiview_wilor_training_dataset import (
     _select_sync_indices, _limit_to_sync_groups)
 from wilor_label_projection import project_label_points
 from wilor_frame_annotations import require_both_hands, assign_image_paths, write_frame_index
+
+
+def existing_native_frames(root, dataset, calibrations, jpeg_quality):
+    if root is None:
+        return {}
+    root = root.resolve()
+    summary = json.loads((root/'summary.json').read_text())
+    if (Path(summary['source_dataset']).resolve() != dataset or summary.get('stored_image_horizontally_flipped', False)
+            or summary.get('image_space') != 'native_raw' or summary.get('jpeg_quality', 95) != jpeg_quality):
+        raise ValueError('Cached images must use the same native dataset, orientation and JPEG quality')
+    for name in calibrations:
+        if summary['camera_calibrations'][name]['sha256'] != _sha256(dataset/'calibration'/f'{name}.json'):
+            raise ValueError(f'Cached image calibration differs for {name}')
+    frames = {}
+    with (root/'index.jsonl').open() as f:
+        for row in map(json.loads, f):
+            key = row['camera'], row['source_frame_index'], row['reference_timestamp_ns']
+            path = root/row['image']
+            if row.get('stored_image_horizontally_flipped') or (key in frames and path != frames[key]):
+                raise ValueError('Inconsistent cached native frame')
+            frames[key] = path
+    return frames
 
 
 def main():
@@ -38,6 +61,7 @@ def main():
     p.add_argument('--max-reprojection-median-px',type=float,default=25.)
     p.add_argument('--max-reprojection-p95-px',type=float,default=60.)
     p.add_argument('--jpeg-quality',type=int,default=95)
+    p.add_argument('--reuse-native-images-from',type=Path,help='reuse matching RGB frames from an earlier native export of this recording')
     a=p.parse_args()
     if a.sample_stride<0 or a.max_samples<0 or not 0<=a.bbox_margin<=1 or not 0<a.min_visible_vertex_fraction<=1 or not 1<=a.jpeg_quality<=100:
         p.error('invalid sampling, bounding-box or JPEG parameters')
@@ -48,6 +72,7 @@ def main():
     camera_ids=list(dict.fromkeys(a.cameras))
     if not set(camera_ids+[a.reference_camera]).issubset(manifest['camera_ids']):raise ValueError('unknown cameras')
     cal={c:CameraCalibration.load(dataset/'calibration'/f'{c}.json') for c in set(camera_ids+[a.reference_camera])}
+    cached_images=existing_native_frames(a.reuse_native_images_from,dataset,cal,a.jpeg_quality)
     size=tuple(manifest['image_size'])
     if any(c.model!='KB' or c.image_size!=size for c in cal.values()):raise ValueError('require matching-size KB cameras')
     fit_summary=json.loads((fit/'summary.json').read_text())
@@ -90,9 +115,10 @@ def main():
             if i is None or not bool(track['render_valid'][i]):
                 reject('missing_or_invalid_mano_fit');continue
             errors=np.asarray(track['observation_error_m' if marker_fit else 'joint_error_m'][i],float)*1000
-            if errors.shape!=(21,) or not np.isfinite(errors).all():
+            valid=np.asarray(track['observation_valid'][i],bool) if marker_fit and 'observation_valid' in track else np.ones(21,bool)
+            if errors.shape!=(21,) or valid.shape!=(21,) or not valid.any() or not np.isfinite(errors[valid]).all():
                 reject('incomplete_nokov_joint_fit');continue
-            median,p95=float(np.median(errors)),float(np.percentile(errors,95))
+            median,p95=float(np.median(errors[valid])),float(np.percentile(errors[valid],95))
             if median>a.max_nokov_fit_median_mm or p95>a.max_nokov_fit_p95_mm:
                 reject('mano_nokov_3d_fit_error',median_mm=median,p95_mm=p95);continue
             trans_ref=track['translation'][i].astype(np.float32)
@@ -125,7 +151,7 @@ def main():
                     except ValueError:
                         reject('native_marker_projection_failed',camera=camera);continue
                 pixel_error=np.linalg.norm(quality_px-target,axis=-1)
-                med,high=_finite_error(pixel_error)
+                med,high=_finite_error(pixel_error[valid])
                 if med>a.max_reprojection_median_px or high>a.max_reprojection_p95_px:
                     reject('native_mano_reprojection_error',camera=camera,median_px=med,p95_px=high);continue
                 if not _all_points_inside(joint_px,size):
@@ -147,6 +173,7 @@ def main():
                     reference_camera=a.reference_camera,source_frame_index=int(sync[frame][f'{camera}_frame_index']),
                     reference_timestamp_ns=int(sync[frame]['reference_timestamp_ns']))
                 if marker_fit:
+                    metadata['tracked_quality_point_count']=int(valid.sum())
                     joint_errors = np.asarray(track['joint_error_m'][i], float) * 1000
                     metadata['fit_nokov_joint_median_mm'] = float(np.nanmedian(joint_errors))
                     metadata['fit_nokov_joint_p95_mm'] = float(np.nanpercentile(joint_errors, 95))
@@ -164,7 +191,8 @@ def main():
         pending,missing=require_both_hands(pending);rejected.extend(missing)
     pending.sort(key=lambda x:(x['sync_index'],x['side'],camera_ids.index(x['camera'])))
     selected,sampling=_select_sync_indices(pending,sync,a.sample_stride)
-    pending=[x for x in pending if x['sync_index'] in set(selected)]
+    selected_set=set(selected)
+    pending=[x for x in pending if x['sync_index'] in selected_set]
     pending=_limit_to_sync_groups(pending,selected,a.max_samples)
     if not pending:raise RuntimeError('no complete native hand samples passed quality checks')
     assign_image_paths(pending,True)
@@ -179,8 +207,25 @@ def main():
         for item in pending:
             label=dict(item['label']);label['joints_2d']=torch.from_numpy(label['joints_2d'])
             np.save(temporary/item['metadata']['label'],label,allow_pickle=True)
+        reused=0
         for camera in camera_ids:
             chosen={int(x['sync_index']):x for x in pending if x['camera']==camera}
+            if cached_images:
+                for sync_id,item in list(chosen.items()):
+                    meta=item['metadata']
+                    prior=cached_images.get((camera,meta['source_frame_index'],meta['reference_timestamp_ns']))
+                    if prior is None or not prior.is_file():
+                        continue
+                    dest=temporary/meta['image']
+                    try:
+                        os.link(prior.resolve(),dest)
+                    except OSError as error:
+                        import errno
+                        if error.errno != errno.EXDEV:
+                            raise
+                        shutil.copyfile(prior,dest)
+                    reused+=1
+                    del chosen[sync_id]
             if not chosen:continue
             reader=SequentialVideoReader(dataset/'cameras'/camera/manifest['storage']['video_filename'],size)
             try:
@@ -215,6 +260,9 @@ def main():
                 min_visible_vertex_fraction=a.min_visible_vertex_fraction))
         if personal_fit:
             summary.update(joint_pose_attachment_optimization_enabled=bool(fit_summary.get('joint_pose_attachment_optimization_enabled',False)),personal_marker24_optimization_enabled=True, approved_for_training=False, source='raw NOKOV24 + MANO surface attachment fit + native contour refinement', fit_error_point_semantics='surface_marker_centres')
+        summary['jpeg_quality']=a.jpeg_quality
+        if a.reuse_native_images_from:
+            summary['native_frame_reuse']=dict(source=str(a.reuse_native_images_from.resolve()),images=reused)
         (temporary/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
         temporary.rename(output)
     except Exception:

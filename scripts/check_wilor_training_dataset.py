@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
@@ -60,7 +61,15 @@ def _array(value: Any, dtype: np.dtype, shape: tuple[int, ...], name: str) -> No
 
 def _contract(sample: dict[str, Any], torch) -> None:
     expected = EXPECTED_KEYS + (("image_space", "camera_model", "distortion") if sample.get("image_space") == "native_raw" else ())
-    if tuple(sample) != expected:
+    flags = ("pass_surface", "tip_relaxed", "isolated_pose")
+    for key in flags:
+        if key in sample and not isinstance(sample[key], (bool, np.bool_)):
+            raise ValueError(f"{key} must be a boolean")
+    if "cuff_points_observed" in sample:
+        count = sample["cuff_points_observed"]
+        if isinstance(count, (bool, np.bool_)) or not isinstance(count, (int, np.integer)) or not 0 <= count <= 3:
+            raise ValueError("cuff_points_observed must be an integer from 0 to 3")
+    if tuple(k for k in sample if k not in (*flags, "cuff_points_observed")) != expected:
         raise ValueError(f"keys: expected {expected}, got {tuple(sample)}")
     if sample.get("image_space") == "native_raw":
         if sample.get("camera_model") != "KB":
@@ -183,6 +192,13 @@ def _replay_mano(
     return maximum_vertex_error, maximum_joint_error
 
 
+def _decoded_image_size(path: Path) -> tuple[int, int]:
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"cannot decode image: {path}")
+    return image.shape[:2]
+
+
 def main() -> int:
     args = parse_args()
     if (args.max_samples < 0 or args.projection_tolerance_px <= 0
@@ -253,16 +269,18 @@ def main() -> int:
     maximum_projection_error = 0.0
     side_counts = {0: 0, 1: 0}
     records: list[tuple[Path, dict[str, Any]]] = []
+    # Decode shared camera frames once, before the label pass. Interleaving
+    # older camera files with newly written geometry incurs a seek per sample.
+    selected_images = sorted({root / index_by_stem[path.stem]["image"] for path in selected})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        image_sizes = dict(zip(selected_images, pool.map(_decoded_image_size, selected_images)))
     for label_path in selected:
         sample = np.load(label_path, allow_pickle=True).item()
         _contract(sample, torch)
         if reference_signature is not None and _signature(sample) != reference_signature:
             raise ValueError(f"{label_path}: schema signature differs from reference")
         image_path = root / index_by_stem[label_path.stem]["image"]
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"cannot decode image: {image_path}")
-        height, width = image.shape[:2]
+        height, width = image_sizes[image_path]
         bbox = sample["bbox"]
         if not (
             0 <= bbox[0] < bbox[2] < width
