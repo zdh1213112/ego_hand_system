@@ -31,6 +31,12 @@ def pixel_to_z_ray(pixels, K, distortion):
     return torch.cat((normalized, torch.ones_like(normalized[:, :1])), -1)
 
 
+def project_pinhole(points, K):
+    normalized = points[..., :2] / points[..., 2:].clamp_min(.01)
+    focal = torch.stack((K[:, 0, 0], K[:, 1, 1]), dim=-1)
+    return normalized * focal[:, None] + K[:, None, :2, 2]
+
+
 def physical_points_to_crop(points, root, root_joint, batch, kb=True):
     """Canonical joints/vertices -> native physical pixels -> training crop."""
     left = batch['side'] == 0
@@ -41,8 +47,7 @@ def physical_points_to_crop(points, root, root_joint, batch, kb=True):
     if kb:
         pixels = project_kb(camera, K, batch['camera_distortion'].float())
     else:
-        projected = torch.bmm(camera, K.transpose(1, 2))
-        pixels = projected[..., :2] / projected[..., 2:].clamp_min(0.01)
+        pixels = project_pinhole(camera, K)
     x = torch.where(left[:, None], batch['image_size'][:, :1]-pixels[..., 0]-1, pixels[..., 0])
     pixels = torch.stack((x, pixels[..., 1]), -1)
     affine = batch['crop_transform'].float()
@@ -65,7 +70,7 @@ def bounded_wrist_pixel(pixel, bbox):
     return center + radius * torch.tanh((pixel-center)/radius)
 
 
-def native_box_depth_prior(joints, wrist_pixel, initial_depth, batch):
+def native_box_depth_prior(joints, wrist_pixel, initial_depth, batch, kb=True):
     """Estimate metric scale from predicted MANO size and the observed box.
 
     Uses no ground-truth root or joint target. The factor accounts for box
@@ -73,14 +78,19 @@ def native_box_depth_prior(joints, wrist_pixel, initial_depth, batch):
     """
     K = batch['camera_K'].float()
     D = batch['camera_distortion'].float()
-    ray = pixel_to_z_ray(wrist_pixel, K, D)
+    if kb:
+        ray = pixel_to_z_ray(wrist_pixel, K, D)
+    else:
+        xy = (wrist_pixel - K[:, :2, 2]) / torch.stack((K[:, 0, 0], K[:, 1, 1]), -1)
+        ray = torch.cat((xy, torch.ones_like(xy[:, :1])), -1)
     relative = joints.float() - joints[:, :1].float()
     relative = relative.clone()
     relative[..., 0] *= torch.where(batch['side'][:, None] == 0, -1., 1.)
     box_wh = (batch['bbox_xyxy'][:, 2:] - batch['bbox_xyxy'][:, :2]).float().clamp_min(2.)
     depth = initial_depth
     for _ in range(2):
-        pixels = project_kb(relative + (ray*depth[:, None])[:, None], K, D)
+        points = relative + (ray*depth[:, None])[:, None]
+        pixels = project_kb(points, K, D) if kb else project_pinhole(points, K)
         extent = pixels.amax(1) - pixels.amin(1)
         scale = (extent / (box_wh * .85)).amax(-1).clamp(.2, 5.)
         depth = (depth * scale).clamp(.05, 3.)

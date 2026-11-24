@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         help="Aligned Nokov marker archive for marker21 evaluation; repeat per recording",
     )
     parser.add_argument("--device", default="auto")
-    parser.add_argument('--camera-model', choices=['auto', 'virtual', 'physical_perspective', 'physical_kb'], default='auto')
+    parser.add_argument('--camera-model', choices=['auto', 'virtual', 'physical_perspective', 'physical_kb', 'kb_bbox_pinhole'], default='auto')
     parser.add_argument(
         "--amp", action=argparse.BooleanOptionalAction, default=True
     )
@@ -121,17 +121,6 @@ def main() -> int:
             raise ValueError("--marker-input must be SOURCE_EXPERIMENT=NPZ")
         name, path = entry.split("=", 1)
         marker_inputs[name] = _resolved(Path(path))
-    dataset = GloveDataset(
-        manifest, max_samples=args.max_samples, marker_inputs=marker_inputs,
-        camera_model=manifest_camera_model(manifest) if args.camera_model == 'auto' else args.camera_model,
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-    )
     config = GloveTrainingConfig(
         root=root,
         checkpoint=checkpoint,
@@ -142,6 +131,22 @@ def main() -> int:
     model = load_glove_model(config, device)
     if adapter is not None:
         load_adapter_weights(adapter, model)
+    camera_mode = manifest_camera_model(manifest) if args.camera_model == 'auto' else args.camera_model
+    if model.physical_camera_enabled and model.physical_camera_head.camera_model == 'kb_bbox_pinhole':
+        if manifest_camera_model(manifest) != 'physical_kb' or args.camera_model not in ('auto', 'kb_bbox_pinhole'):
+            raise ValueError('The bbox-pinhole adapter requires native KB images and rectified crops')
+        camera_mode = 'kb_bbox_pinhole'
+    dataset = GloveDataset(
+        manifest, max_samples=args.max_samples, marker_inputs=marker_inputs,
+        camera_model=camera_mode,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
     if args.camera_model != 'auto':
         model.physical_camera_enabled = args.camera_model != 'virtual'
         if model.physical_camera_enabled:

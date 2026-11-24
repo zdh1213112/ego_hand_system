@@ -133,13 +133,15 @@ class TrainingConfig:
                 f"data.type {self.data_type!r} cannot supply recipe "
                 f"{self.recipe_type!r}"
             )
-        if self.camera_model not in {"virtual", "physical_perspective", "physical_kb"}:
+        if self.camera_model == "kb_bbox_pinhole" and self.recipe_type != "joint_lora_finetune":
+            raise ValueError("kb_bbox_pinhole requires the joint_lora_finetune glove recipe")
+        if self.camera_model not in {"virtual", "physical_perspective", "physical_kb", "kb_bbox_pinhole"}:
             raise ValueError(f"unknown recipe.camera_model: {self.camera_model!r}")
-        if self.recipe_type in {"physical_camera_finetune", "marker_camera_finetune", "marker_offset_finetune"} and self.camera_model not in {"physical_perspective", "physical_kb"}:
+        if self.recipe_type in {"physical_camera_finetune", "marker_camera_finetune", "marker_offset_finetune"} and self.camera_model not in {"physical_perspective", "physical_kb", "kb_bbox_pinhole"}:
             raise ValueError("physical camera recipes require camera_model: physical_perspective")
         if self.recipe_type in {"marker_camera_finetune", "marker_offset_finetune"} and not self.marker_inputs:
             raise ValueError("marker recipes require data.marker_inputs")
-        if self.camera_model in {"physical_perspective", "physical_kb"} and self.data_type != "glove_camera":
+        if self.camera_model in {"physical_perspective", "physical_kb", "kb_bbox_pinhole"} and self.data_type != "glove_camera":
             raise ValueError("physical_perspective requires glove_camera data")
         if self.recipe_type == "domain_adapt":
             if self.vit_tuning not in {"lora", "full"}:
@@ -213,7 +215,7 @@ class TrainingConfig:
             if self.recipe_type == "domain_adapt"
             else set(UNIFIED_LOSS_NAMES).difference({"local_keypoints_3d"})
         )
-        if self.camera_model not in {"physical_perspective", "physical_kb"} and self.losses.get("physical_root_3d", 0) > 0:
+        if self.camera_model not in {"physical_perspective", "physical_kb", "kb_bbox_pinhole"} and self.losses.get("physical_root_3d", 0) > 0:
             raise ValueError("physical_root_3d requires physical_perspective camera")
         marker_losses = ("marker_keypoints_2d", "marker_keypoints_3d", "marker_root_3d")
         if self.recipe_type not in {"marker_camera_finetune", "marker_offset_finetune"} and any(self.losses.get(name, 0) > 0 for name in marker_losses):

@@ -175,14 +175,16 @@ class WiLoR(pl.LightningModule):
         batch_size = batch['img'].shape[0]
         coarse = self._forward_coarse(batch, project=True)
         focal_length = coarse['focal_length']
-        native_kb = self.physical_camera_enabled and self.physical_camera_head.camera_model == 'physical_kb'
+        camera_model = self.physical_camera_head.camera_model if self.physical_camera_enabled else None
+        native_kb = camera_model == 'physical_kb'
+        calibrated_refinement = camera_model in ('physical_kb', 'kb_bbox_pinhole')
         refinement_kwargs = {}
-        if native_kb:
+        if calibrated_refinement:
             coarse_root, coarse_pixels = self.physical_camera_head(
                 coarse['coarse_keypoints_3d'], coarse['coarse_keypoints_2d'],
                 coarse['coarse_pred_cam'], coarse['coarse_cam_t'], focal_length, batch)
             refinement_kwargs['vertex_crop_points'] = physical_points_to_crop(
-                coarse['coarse_vertices'], coarse_root, coarse['coarse_keypoints_3d'][:, :1], batch)
+                coarse['coarse_vertices'], coarse_root, coarse['coarse_keypoints_3d'][:, :1], batch, kb=native_kb)
             coarse['coarse_keypoints_2d'] = coarse_pixels
             coarse['coarse_root_camera_m'] = coarse_root
         pred_mano_params, pred_cam = self.refine_net(
@@ -215,7 +217,7 @@ class WiLoR(pl.LightningModule):
         output['pred_vertices'] = pred_vertices.reshape(batch_size, -1, 3)
         output['coarse_keypoints_3d'] = coarse['coarse_keypoints_3d']
         output['coarse_keypoints_2d'] = coarse['coarse_keypoints_2d']
-        if native_kb:
+        if calibrated_refinement:
             output['coarse_root_camera_m'] = coarse['coarse_root_camera_m']
         pred_cam_t = pred_cam_t.reshape(-1, 3)
         focal_length = focal_length.reshape(-1, 2)

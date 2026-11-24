@@ -175,6 +175,20 @@ def evaluate_glove_set(
             )
             pred_root = pred_3d[index] - pred_3d[index, :1]
             gt_root = gt_3d[index, :, :3] - gt_3d[index, :1, :3]
+            if "view_rotation" in batch:
+                from tools.hand_finetune.crop_geometry import PerspectiveCrop
+                rotation = batch["view_rotation"][index].numpy()
+                view = PerspectiveCrop(rotation, batch["camera_K"][index].numpy(),
+                                       batch["raw_K"][index].numpy(), batch["camera_distortion"][index].numpy(),
+                                       int(batch["img"].shape[-1]))
+                pred_image, gt_image = view.native_pixels(pred_image), view.native_pixels(gt_image)
+                bboxes[index] = batch["raw_bbox"][index].numpy()
+                canonical_rotation = view.physical_mano_orientation(np.eye(3), bool(sides[index])).T
+                pred_root = pred_root @ pred_root.new_tensor(canonical_rotation)
+                gt_root = gt_root @ gt_root.new_tensor(canonical_rotation)
+                if physical_roots is not None:
+                    physical_roots[index] = physical_roots[index] @ rotation
+                    target_roots[index] = target_roots[index] @ rotation
             visibility = gt_crop[index, :, 2] > 0
             point_errors = np.linalg.norm(pred_image - gt_image, axis=1)
             visible_count = int(visibility.sum())

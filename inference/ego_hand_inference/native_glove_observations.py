@@ -21,21 +21,34 @@ from ego_hand_inference.inference_common import choose_device, load_detector, _t
 TRAINING_ROOT = Path(__file__).resolve().parents[2] / 'training'
 sys.path.insert(0, str(TRAINING_ROOT))
 from wilor.datasets.utils import crop_points_to_image, expand_to_aspect_ratio, generate_image_patch_cv2
+from wilor.datasets.bbox_pinhole import rectify_hand
 from wilor.models import load_wilor
 from wilor.utils import recursive_to
 
 
-def crop_hand(image, box, side, calibration, config):
-    center = (box[:2] + box[2:]) / 2
-    size = float(expand_to_aspect_ratio(2*(box[2:]-box[:2]), target_aspect_ratio=[192,256]).max())
+def crop_hand(image, box, side, calibration, config, *, rectified=False, rescale=2.):
     res = config.MODEL.IMAGE_SIZE
-    crop, transform = generate_image_patch_cv2(image, float(center[0]), float(center[1]), size, size,
-        res, res, side==0, 1., 0, border_mode=cv2.BORDER_CONSTANT)
+    view = None
+    K, image_size = calibration['K'], calibration['size']
+    if rectified:
+        view, crop = rectify_hand(image, box, K, calibration['D'], res, rescale, side == 0)
+        size = float(res)
+        transform = np.eye(2, 3, dtype=np.float32)
+        K, box = view.K.astype(np.float32), view.bounds.astype(np.float32)
+        image_size = np.array([res, res], np.float32)
+    else:
+        center = (box[:2] + box[2:]) / 2
+        size = float(expand_to_aspect_ratio(rescale*(box[2:]-box[:2]), target_aspect_ratio=[192,256]).max())
+        crop, transform = generate_image_patch_cv2(image, float(center[0]), float(center[1]), size, size,
+            res, res, side==0, 1., 0, border_mode=cv2.BORDER_CONSTANT)
     rgb = crop[:,:,::-1].astype(np.float32)/255.
     rgb = (rgb-np.asarray(config.MODEL.IMAGE_MEAN,np.float32))/np.asarray(config.MODEL.IMAGE_STD,np.float32)
-    return dict(img=torch.from_numpy(np.ascontiguousarray(rgb.transpose(2,0,1))),crop_transform=transform.astype(np.float32),
-                crop_box_size=np.float32(size),camera_K=calibration['K'],camera_distortion=calibration['D'],
-                bbox_xyxy=box,image_size=calibration['size'],side=side)
+    sample = dict(img=torch.from_numpy(np.ascontiguousarray(rgb.transpose(2,0,1))),crop_transform=transform.astype(np.float32),
+                  crop_box_size=np.float32(size),camera_K=K,camera_distortion=calibration['D'],
+                  bbox_xyxy=box,image_size=image_size,side=side)
+    if view is not None:
+        sample['perspective_view'] = view
+    return sample
 
 
 def run_frames(images, detector, model, config, calibration, threshold, args, device, pool):
@@ -61,10 +74,12 @@ def run_frames(images, detector, model, config, calibration, threshold, args, de
     hands=[[] for _ in images]
     def prepare(record):
         frame,box,info=record
-        return crop_hand(images[frame],box,info['is_right'],calibration,config)
+        return crop_hand(images[frame],box,info['is_right'],calibration,config,
+                         rectified=args.rectified, rescale=args.rescale)
     for start in range(0,len(proposals),args.batch_size):
         rows=proposals[start:start+args.batch_size]
         samples=list(pool.map(prepare,rows))
+        views = [sample.pop('perspective_view', None) for sample in samples]
         batch=recursive_to(default_collate(samples),device)
         amp=device.type=='cuda' and torch.cuda.is_bf16_supported()
         with torch.inference_mode(),torch.autocast(device_type=device.type,dtype=torch.bfloat16,enabled=amp):
@@ -77,12 +92,21 @@ def run_frames(images, detector, model, config, calibration, threshold, args, de
             left=info['is_right']==0
             relative=joints[i].copy()
             if left:relative[:,0]*=-1
-            uv=crop_points_to_image(pixels[i],samples[i]['crop_transform'],calibration['size'],left)
-            trans=roots[i]-relative[0]
+            uv=crop_points_to_image(pixels[i],samples[i]['crop_transform'],samples[i]['image_size'],left)
+            root = roots[i]
+            params = {k:v[i] for k,v in mano.items()}
+            view = views[i]
+            if view is not None:
+                uv = view.native_pixels(uv)
+                relative = (relative - relative[0]) @ view.rotation + relative[0]
+                root = root @ view.rotation
+                params['global_orient'] = view.physical_mano_orientation(params['global_orient'], not left)
+                info['input_camera_model'] = 'kb_bbox_pinhole'
+            trans=root-relative[0]
             if not np.isfinite(uv).all() or not np.isfinite(relative).all() or not np.isfinite(trans).all():
                 raise ValueError('Non-finite native camera prediction')
             info.update(joints_2d=uv.tolist(),joints_3d_camera_relative=relative.tolist(),camera_translation=trans.tolist(),
-                        physical_root_camera_m=roots[i].tolist(),mano={k:v[i].tolist() for k,v in mano.items()})
+                        physical_root_camera_m=root.tolist(),mano={k:v.tolist() for k,v in params.items()})
             hands[frame].append(info)
     return hands
 
@@ -108,8 +132,13 @@ def main():
     device=choose_device(args.device)
     model,config=load_wilor(str(args.checkpoint),str(args.model_config),mano_path=args.mano_model_dir,
                             adapter_path=args.adapter,init_renderer=False)
-    if not model.physical_camera_enabled or model.physical_camera_head.camera_model!='physical_kb':
+    if not model.physical_camera_enabled or model.physical_camera_head.camera_model not in ('physical_kb', 'kb_bbox_pinhole'):
         raise ValueError('The adapter must include the trained physical-KB camera head')
+    args.rectified = model.physical_camera_head.camera_model == 'kb_bbox_pinhole'
+    args.rescale = 2.
+    if args.rectified:
+        metadata = torch.load(args.adapter, weights_only=False, map_location='cpu')['training_metadata']
+        args.rescale = metadata['config']['data']['rescale_factor']
     model.to(device).eval()
     if args.compile_backbone:model.backbone=torch.compile(model.backbone)
     detector=load_detector(args.detector,device)
@@ -146,6 +175,8 @@ def main():
     summary=dict(dataset=str(args.dataset.resolve()),frame_count=len(rows),camera_ids=manifest['camera_ids'],
                  hypotheses_per_detection=2,save_mano_params=True,adapter=str(args.adapter.resolve()),
                  base_checkpoint=str(args.checkpoint.resolve()),camera_model='physical_kb',cameras=camera_stats)
+    if args.rectified:
+        summary['input_camera_model'] = 'kb_bbox_pinhole'
     (args.output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
 
 

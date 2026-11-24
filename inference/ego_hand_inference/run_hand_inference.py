@@ -109,7 +109,7 @@ def parse_args(argv=None):
         from ego_hand_inference.orbbec_io import sha256_file
         payload=torch.load(a.adapter,map_location='cpu',weights_only=False)
         modifications=payload.get('model_modifications',{})
-        if payload.get('format')!='wilor_glove_trainable_v2' or modifications.get('physical_camera_model')!='physical_kb':
+        if payload.get('format')!='wilor_glove_trainable_v2' or modifications.get('physical_camera_model') not in ('physical_kb', 'kb_bbox_pinhole'):
             p.error('--adapter requires a native physical-KB glove checkpoint')
         source=payload['training_metadata']['config']
         for name,key in (('checkpoint','base_checkpoint'),('model_config','model_config')):
@@ -276,6 +276,7 @@ def main(argv=None):
     if a.adapter:
         model_files.append(a.adapter)
         code.extend(sorted((ROOT/'training/wilor').rglob('*.py')))
+        code.append(ROOT/'training/tools/hand_finetune/crop_geometry.py')
     if a.detector_crop_calibration:
         model_files.append(a.detector_crop_calibration)
     options = {

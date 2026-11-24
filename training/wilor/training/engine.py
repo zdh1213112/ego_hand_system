@@ -368,7 +368,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         load_trainable_weights(preload, model)
         if config.init_weights is not None:
             initialized_from = _artifact(config.init_weights)
-    if config.camera_model in {"physical_perspective", "physical_kb"}:
+    if config.camera_model in {"physical_perspective", "physical_kb", "kb_bbox_pinhole"}:
         model.physical_camera_enabled = True
         model.physical_camera_head.camera_model = config.camera_model
     if config.recipe_type in {"marker_camera_finetune", "marker_offset_finetune"}:

@@ -263,7 +263,7 @@ def restore_checkpoint_modifications(
     if modifications.get("physical_camera"):
         model.physical_camera_enabled = True
         camera_model = modifications.get('physical_camera_model', 'physical_perspective')
-        if camera_model not in {'physical_perspective', 'physical_kb'}:
+        if camera_model not in {'physical_perspective', 'physical_kb', 'kb_bbox_pinhole'}:
             raise ValueError(f'{source}: unsupported physical camera model {camera_model}')
         model.physical_camera_head.camera_model = camera_model
         model.physical_camera_head.native_root_prior = modifications.get('native_root_prior', 'virtual')

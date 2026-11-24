@@ -28,8 +28,7 @@ def _native_pixels(rays, K, distortion):
     return np.where((theta < _theta_limit(tuple(distortion)))[..., None], xy, np.nan)
 
 
-def crop_camera(box, K, distortion, size, padding=1.2):
-    """Return physical-to-view rotation and intrinsics, using only the box and calibration."""
+def _box_view(box, K, distortion, size, padding, width_factor):
     x1, y1, x2, y2 = np.asarray(box, dtype=np.float64)
     if not (x2 > x1 and y2 > y1 and size > 1 and padding > 0):
         raise ValueError(f"Invalid KB crop geometry for box {box}")
@@ -57,10 +56,19 @@ def crop_camera(box, K, distortion, size, padding=1.2):
     aligned = rays[1:] @ rotation.T
     if not np.isfinite(aligned).all() or np.any(aligned[:, 2] <= 0):
         raise ValueError(f"Invalid KB crop geometry for box {box}")
-    extent = np.abs(aligned[:, :2] / aligned[:, 2:]).max()
+    normalized = aligned[:, :2] / aligned[:, 2:]
+    extent = (np.abs(normalized) * [width_factor, 1.]).max()
     center = (size - 1) / 2
     focal = center / (padding * extent)
     intrinsics = np.array([[focal, 0., center], [0., focal, center], [0., 0., 1.]])
+    pixels = normalized * focal + center
+    bounds = np.concatenate((pixels.min(axis=0), pixels.max(axis=0)))
+    return rotation, intrinsics, bounds
+
+
+def crop_camera(box, K, distortion, size, padding=1.2):
+    """Return physical-to-view rotation and intrinsics for a native detector box."""
+    rotation, intrinsics, _ = _box_view(box, K, distortion, size, padding, 1.)
     return rotation, intrinsics
 
 
@@ -77,17 +85,18 @@ class PerspectiveCrop:
     source_K: np.ndarray
     distortion: np.ndarray
     size: int
+    bounds: np.ndarray | None = None
 
     @classmethod
-    def from_box(cls, box, K, distortion, size):
+    def from_box(cls, box, K, distortion, size, padding=1.2, width_factor=1.):
         K = np.asarray(K, dtype=np.float64)
         distortion = np.asarray(distortion, dtype=np.float64).reshape(4)
         if (K.shape != (3, 3) or not np.isfinite(K).all() or not np.isfinite(distortion).all()
                 or min(K[0, 0], K[1, 1]) <= 0 or not np.allclose(K[2], [0, 0, 1])
                 or not np.allclose([K[0, 1], K[1, 0]], 0)):
             raise ValueError("Expected finite KB4 calibration and zero-skew intrinsics")
-        rotation, intrinsics = crop_camera(box, K, distortion, size)
-        return cls(rotation, intrinsics, K, distortion, size)
+        rotation, intrinsics, bounds = _box_view(box, K, distortion, size, padding, width_factor)
+        return cls(rotation, intrinsics, K, distortion, size, bounds)
 
     def native_pixels(self, view_pixels):
         """Unmirrored perspective pixels -> physical rays -> native fisheye pixels."""
@@ -99,7 +108,9 @@ class PerspectiveCrop:
         # Physical z is affine in view x,y, so its minimum is attained at a corner.
         extent = self.K[0, 2] / self.K[0, 0]
         min_z = self.rotation[2, 2] - extent * np.abs(self.rotation[:2, 2]).sum()
-        if min_z > 0 and _theta_limit(tuple(self.distortion)) >= np.pi / 2:
+        # The largest ray length occurs at a corner of the perspective square.
+        max_theta = np.arccos(np.clip(min_z / np.sqrt(1 + 2 * extent**2), -1, 1))
+        if min_z > 0 and max_theta < _theta_limit(tuple(self.distortion)):
             maps = cv2.fisheye.initUndistortRectifyMap(
                 self.source_K, self.distortion, self.rotation, self.K,
                 (self.size, self.size), cv2.CV_32FC1)

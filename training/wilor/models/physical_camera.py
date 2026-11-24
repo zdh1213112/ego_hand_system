@@ -84,10 +84,11 @@ class PhysicalCameraHead(nn.Module):
         depth_base = (
             weak_cam_t[:, 2] * focal_crop / virtual_focal_length[:, 0]
         ).clamp(0.05, 3.0)
-        geometric_prior = self.camera_model == 'physical_kb' and self.native_root_prior == 'bbox_geometry'
+        native_kb = self.camera_model == 'physical_kb'
+        geometric_prior = self.camera_model in ('physical_kb', 'kb_bbox_pinhole') and self.native_root_prior == 'bbox_geometry'
         if geometric_prior:
             wrist_prior = bounded_wrist_pixel(wrist_raw, batch['bbox_xyxy'].float())
-            depth_base = native_box_depth_prior(joints, wrist_prior, depth_base, batch)
+            depth_base = native_box_depth_prior(joints, wrist_prior, depth_base, batch, kb=native_kb)
 
         features = torch.stack((
             weak_cam[:, 0], weak_cam[:, 1], weak_cam[:, 2],

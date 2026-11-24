@@ -272,7 +272,7 @@ class GloveDataset(Dataset):
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.camera_model = camera_model
-        if camera_model == 'physical_kb' and marker_inputs:
+        if camera_model in ('physical_kb', 'kb_bbox_pinhole') and marker_inputs:
             raise ValueError('Native marker supervision needs native marker archives; legacy rectified marker inputs are unsupported')
         if not self.manifest.is_file():
             raise FileNotFoundError(f"Manifest does not exist: {self.manifest}")
@@ -405,9 +405,11 @@ class GloveDataset(Dataset):
             raise IOError(f"Could not read image: {image_path}")
         height, width = image.shape[:2]
 
-        label = self._load_label(label_path, allow_native=self.camera_model == 'physical_kb')
+        rectify = self.camera_model == 'kb_bbox_pinhole'
+        native_camera = self.camera_model == 'physical_kb' or rectify
+        label = self._load_label(label_path, allow_native=native_camera)
         native = label.get('image_space') == 'native_raw'
-        if native != (self.camera_model == 'physical_kb'):
+        if native != native_camera:
             raise ValueError(f'{label_path}: image space and configured camera model disagree')
         distortion = np.asarray(label.get('distortion', np.zeros(4)), dtype=np.float64)
         if native and (label.get('camera_model') != 'KB' or distortion.shape != (4,) or not np.isfinite(distortion).all()):
@@ -438,25 +440,23 @@ class GloveDataset(Dataset):
             bbox = np.concatenate([low, high]).astype(np.float32)
             center = (bbox[:2] + bbox[2:]) / 2
             box_wh = bbox[2:] - bbox[:2]
-        scaled_wh = self.rescale_factor * box_wh
-        crop_wh = expand_to_aspect_ratio(
-            scaled_wh, target_aspect_ratio=[192, 256])
-        box_size = float(np.max(crop_wh))
-
         is_left = side == 0
-        crop, transform = generate_image_patch_cv2(
-            image,
-            float(center[0]),
-            float(center[1]),
-            box_size,
-            box_size,
-            self.image_size,
-            self.image_size,
-            is_left,
-            1.0,
-            0,
-            border_mode=cv2.BORDER_CONSTANT,
-        )
+        view = None
+        if rectify:
+            from .bbox_pinhole import rectify_hand, view_mano_orientation
+            raw_box = bbox
+            view, crop = rectify_hand(image, raw_box, K, distortion, self.image_size,
+                                      self.rescale_factor, is_left)
+            transform = np.eye(2, 3, dtype=np.float32)
+            box_size = float(self.image_size)
+        else:
+            scaled_wh = self.rescale_factor * box_wh
+            crop_wh = expand_to_aspect_ratio(scaled_wh, target_aspect_ratio=[192, 256])
+            box_size = float(np.max(crop_wh))
+            crop, transform = generate_image_patch_cv2(
+                image, float(center[0]), float(center[1]), box_size, box_size,
+                self.image_size, self.image_size, is_left, 1., 0, border_mode=cv2.BORDER_CONSTANT,
+            )
 
         # The label's 778x2 ``joints_2d`` field is actually vertex projection.
         # Derive the required 21 joint pixels from the 3D joints instead.
@@ -475,6 +475,18 @@ class GloveDataset(Dataset):
             & (joints_2d[:, 1] >= 0.0)
             & (joints_2d[:, 1] < float(height))
         )
+        camera_root = joints_3d[0] + trans
+        if view is not None:
+            # Rotate around the MANO wrist for pose targets; physical roots rotate about the camera.
+            joints_3d = (view.view_points(joints_3d - joints_3d[0], False) + joints_3d[0]).astype(np.float32)
+            camera_root = view.view_points(camera_root, False).astype(np.float32)
+            points_view = view.view_points(points, False)
+            if np.any(points_view[:, 2] <= 0):
+                raise ValueError(f'Hand crosses the perspective crop horizon in {label_path}')
+            K = view.K.astype(np.float32)
+            joints_2d = (points_view[:, :2] / points_view[:, 2:] * K.diagonal()[:2] + K[:2, 2]).astype(np.float32)
+            bbox = view.bounds.astype(np.float32)
+            width = height = self.image_size
         if is_left:
             joints_2d[:, 0] = width - joints_2d[:, 0] - 1.0
             joints_3d = joints_3d.copy()
@@ -521,6 +533,8 @@ class GloveDataset(Dataset):
                 self._as_numpy(raw_value).astype(np.float32).reshape(shape)
                 if valid else np.zeros(shape, dtype=np.float32)
             )
+            if view is not None and valid and name == 'global_orient':
+                value = view_mano_orientation(view, value, right=not is_left)
             mano_params[name] = torch.from_numpy(value).float()
             has_mano_params[name] = torch.tensor(valid, dtype=torch.bool)
 
@@ -535,10 +549,7 @@ class GloveDataset(Dataset):
             "crop_box_size": torch.tensor(box_size, dtype=torch.float32),
             "camera_K": torch.from_numpy(K).float(),
             "camera_distortion": torch.from_numpy(distortion.astype(np.float32)),
-            "camera_root_m": torch.from_numpy(
-                self._as_numpy(label["joints_3d"]).astype(np.float32).reshape(21, 3)[0]
-                + trans
-            ).float(),
+            "camera_root_m": torch.from_numpy(camera_root).float(),
             "bbox_xyxy": torch.from_numpy(bbox).float(),
             "image_size": torch.tensor([width, height], dtype=torch.float32),
             "mano_params": mano_params,
@@ -555,6 +566,9 @@ class GloveDataset(Dataset):
             "camera": str(row.get("camera", "")),
             "side": side,
         }
+        if view is not None:
+            sample.update(raw_bbox=torch.from_numpy(raw_box), raw_K=torch.from_numpy(view.source_K.copy()),
+                          view_rotation=torch.from_numpy(view.rotation.copy()))
         source_experiment = str(row.get("source_experiment", ""))
         if self.surface_targets is not None:
             sample.update(self.surface_targets.sample(
