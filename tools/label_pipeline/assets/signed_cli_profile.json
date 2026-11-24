@@ -1,0 +1,34 @@
+{
+  "label_pipeline": {
+    "dual_hand": "adaptive_wrist_v4",
+    "single_hand_config": "native_nokov_temporal.json",
+    "marker_placement": "glove_marker_placement.json",
+    "observation_weights": {
+      "detector": "ego_hand_system/models/wilor/2.0_glove_wilor_3680.pt",
+      "checkpoint": "wilor_training/output/native_kb_training_20261111/coarse_start.ckpt",
+      "adapter": "wilor_training/output/glove_joints_20261120_v2_coarse_start_12000steps/best_trainable.pt",
+      "model_config": "wilor_training/pretrained_models/model_config.yaml"
+    },
+    "seed_alignment": "native_nokov_mount_seed.json"
+  },
+  "single_hand_config": {
+    "enabled": true,
+    "placement": "glove_marker_placement.json",
+    "sample_stride": 8,
+    "joint_limit_weight": 0.05,
+    "min_markers_per_finger": 3,
+    "sdk_marker_gaps": true,
+    "dorsal_ring_attachment": true,
+    "bounded_articulation": true,
+    "preserve_visible_contours": true,
+    "temporal_articulation": true
+  },
+  "runtime": {
+    "observation_batch_size": 32,
+    "observation_frame_batch_size": 8,
+    "observation_preprocess_workers": 8,
+    "single_workers": 16,
+    "single_fps": 30.0,
+    "single_baseline_stride": 8
+  }
+}

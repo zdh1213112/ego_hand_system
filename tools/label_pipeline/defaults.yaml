@@ -1,0 +1,79 @@
+fit_method: legacy
+sample_stride: 4                # run_joint_refit_recording.py, 005 calibration in pipeline section 2
+joint_limit_weight: 0.05        # cohort.py:62, round 1
+min_markers_per_finger: 3       # cohort.py:89, round 1
+tip_kink_mm: 3.0                # fit_recording.py, soft35 round 2
+tip_cap_mm: 3.5                 # fit_recording.py, soft35 round 2
+conflict_tip_cap_mm: 5.0        # experiment.py:403, anatomy rounds
+mount_bounds_mm: [-2, 8]        # rounds.py, wide3 round 5
+thumb_mount_bounds_mm: [-4, 10] # fit_wide.py, wide3 round 5
+prior_weight: {left: 0.03, right: 0.3}  # anatomy_mounts/rounds.py WEIGHTS
+mcp_out_mm: {left: 1.5, right: 3.0}     # fit_outward.py:35, round 7
+legacy_recording_overrides: {group_009: {mcp_out_mm: {right: 1.8}}}  # round 7 signed right-hand exception
+surface_median_mm: 2.5          # soft35 common.gate_and_errors
+surface_max_mm: 8.0             # soft35 common.gate_and_errors
+occlusion_limit: 0.30           # export_hands.py:113, round 10
+train_ratio: 0.9                # build_splits.py:10
+holdout_by_time: true           # build_splits.py:10
+split_seed: 42                  # build_splits.py:10
+# Unmodified upstream native fitting programs load these production modules themselves.
+native_tool_roots:
+  - nokov_ego_hand_validation/integration/pipeline
+  - nokov_ego_hand_validation/tools
+  - wilor_training/tools
+  - wilor_training/wilor
+  - wilor_training/prepare_glove_dataset.py
+  - wilor_training/output/dependencies/nvdiffrast_runtime  # Native silhouette rasterizer, scripts/joint_refit/README_zh.md
+training_mano_directory: wilor_training/mano_data/mano_v1_2  # prepare_glove_dataset.py --mano-path, verified against the fitting model
+v4:
+  fit:
+    batch_size: 160
+    min_observed_markers: 3
+    replay_tolerance_m: 0.00001
+    marker_weights: [0.25, 0.8, 1.1, 2.0]
+    finite_difference_deg: 0.5
+    regularization: [0.06, 0.25, 0.08, 0.25]
+    max_angle_step_deg: [7.0, 2.5, 9.0, 2.5]
+    min_nail_residual_mm: 0.75
+    line_search: [1.0, 0.65, 0.35]
+    angle_tolerance_deg: 0.01
+    min_nail_gain_mm: 0.20
+    max_other_marker_loss_mm: 0.35
+    max_tip_displacement_mm: 3.0
+  optics:
+    roi_padding_px: 11
+    core_sigma_px: 1.25
+    surround_sigma_px: 4.0
+    dilation_size: 5
+    min_dog: 8
+    min_intensity: 115
+    patch_border_px: 6
+    ring_offsets_px: [[5,0],[4,4],[0,5],[-4,4],[-5,0],[-4,-4],[0,-5],[4,-4]]
+    ring_contrast: 6
+    min_ring_samples: 6
+    min_depth_m: 0.015
+    image_margin_px: 15
+    min_marker_distance_px: 8
+    min_identified_markers: 3
+    match_radius_px: 4.0
+    match_margin_px: 2
+    workers: 10
+    denominator_floor: 1.0e-10
+    support_radius_px: 2.5
+    min_ray_angle_sine: 0.085
+    max_registered_distance_m: 0.008
+    max_raw_distance_m: 0.015
+    pair_reprojection_px: 1.8
+    reprojection_penalty: 0.015
+    deviation_penalty: 0.1
+    min_views: 2
+    min_gain_px: 0.25
+    max_view_loss_px: 0.25
+    max_raw_loss_mm: 1.0
+  selection:
+    min_raw_gain_mm: 0.75
+    max_raw_error_mm: 8.0
+    max_unconfirmed_loss_px: 0.25
+    require_rgb_recordings: [group_003, group_005]
+    fixed_joint_tolerance_m: 0.00001
+    bbox_tolerance_px: 0.00001

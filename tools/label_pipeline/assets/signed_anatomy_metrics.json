@@ -1,0 +1,175 @@
+{
+  "source_manifest_sha256": "daaea4d3d69f84e92a112a0b5ffb1d082e9cf56d62be5b6ec3976d4b11db41b1",
+  "groups": {
+    "group_003": {
+      "left": {
+        "valid": 3121,
+        "pass_surface": 3107,
+        "single_checked": 3735,
+        "single_rejected": 67,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.3930364199508704,
+          "zig_percent": 0.006408202499198974
+        },
+        "glove": {
+          "anatomy_passed": 15,
+          "hyper_percent": 1.99935917975008,
+          "zig_percent": 8.952258891380968
+        }
+      },
+      "right": {
+        "valid": 2864,
+        "pass_surface": 2440,
+        "single_checked": 3173,
+        "single_rejected": 0,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.670391061452514,
+          "zig_percent": 0.12569832402234637
+        },
+        "glove": {
+          "anatomy_passed": 16,
+          "hyper_percent": 3.9432029795158288,
+          "zig_percent": 1.6689944134078214
+        }
+      }
+    },
+    "group_005": {
+      "left": {
+        "valid": 1803,
+        "pass_surface": 1803,
+        "single_checked": 2583,
+        "single_rejected": 0,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.05916065816232205,
+          "zig_percent": 0.0
+        },
+        "glove": {
+          "anatomy_passed": 17,
+          "hyper_percent": 2.606766500277316,
+          "zig_percent": 3.7493067110371596
+        }
+      },
+      "right": {
+        "valid": 1172,
+        "pass_surface": 1171,
+        "single_checked": 1324,
+        "single_rejected": 0,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.005688282138794085,
+          "zig_percent": 0.0
+        },
+        "glove": {
+          "anatomy_passed": 18,
+          "hyper_percent": 0.36405005688282144,
+          "zig_percent": 2.3890784982935154
+        }
+      }
+    },
+    "group_009": {
+      "left": {
+        "valid": 1371,
+        "pass_surface": 1370,
+        "single_checked": 2941,
+        "single_rejected": 0,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.048626306831996105,
+          "zig_percent": 0.014587892049598834
+        },
+        "glove": {
+          "anatomy_passed": 14,
+          "hyper_percent": 2.513980063214199,
+          "zig_percent": 8.592268417213713
+        }
+      },
+      "right": {
+        "valid": 2016,
+        "pass_surface": 1978,
+        "single_checked": 4272,
+        "single_rejected": 0,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 1.8055555555555556,
+          "zig_percent": 0.11904761904761904
+        },
+        "glove": {
+          "anatomy_passed": 14,
+          "hyper_percent": 3.290343915343916,
+          "zig_percent": 3.194444444444444
+        }
+      }
+    },
+    "group_010": {
+      "left": {
+        "valid": 3406,
+        "pass_surface": 3404,
+        "single_checked": 5229,
+        "single_rejected": 11,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 1.7165785868075945,
+          "zig_percent": 0.023487962419260128
+        },
+        "glove": {
+          "anatomy_passed": 17,
+          "hyper_percent": 5.34351145038168,
+          "zig_percent": 7.222548443922491
+        }
+      },
+      "right": {
+        "valid": 2971,
+        "pass_surface": 2944,
+        "single_checked": 4017,
+        "single_rejected": 1,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 1.5370806686861889,
+          "zig_percent": 0.0
+        },
+        "glove": {
+          "anatomy_passed": 17,
+          "hyper_percent": 1.0411758106137103,
+          "zig_percent": 3.6216762032985534
+        }
+      }
+    },
+    "group_011": {
+      "left": {
+        "valid": 2478,
+        "pass_surface": 2478,
+        "single_checked": 1973,
+        "single_rejected": 147,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.9496906107075599,
+          "zig_percent": 0.0
+        },
+        "glove": {
+          "anatomy_passed": 17,
+          "hyper_percent": 4.619316653214958,
+          "zig_percent": 12.42130750605327
+        }
+      },
+      "right": {
+        "valid": 2356,
+        "pass_surface": 2329,
+        "single_checked": 3361,
+        "single_rejected": 32,
+        "mano": {
+          "anatomy_passed": 19,
+          "hyper_percent": 2.0854555744199206,
+          "zig_percent": 0.025466893039049237
+        },
+        "glove": {
+          "anatomy_passed": 19,
+          "hyper_percent": 0.3027730616864742,
+          "zig_percent": 1.2478777589134125
+        }
+      }
+    }
+  }
+}

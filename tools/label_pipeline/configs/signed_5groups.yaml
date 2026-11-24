@@ -1,0 +1,7 @@
+mode: from_signed
+fit_method: legacy
+frozen_root: work/signed_labels_20261120
+reference_labels: work/glove_joints_20261120/compat_v2
+output_root: work/labels_reexport_20261121
+recordings: [group_005, group_003, group_009, group_010, group_011]
+label_digest: normalize_torch_storage_id

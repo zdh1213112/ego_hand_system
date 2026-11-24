@@ -1,0 +1,96 @@
+# Legacy 回归记录
+
+| 运行 | 样本 | 字段全等 | 原图 SHA 全等 | 去除 PyTorch 存储编号后的标准 / 扩展 NPY 全等 |
+|---|---:|---:|---:|---:|
+| 005 冻结数据独立重发 | 9,931 | 9,931 | 9,931 | 9,931 / 9,931 |
+| 003 | 17,821 | 17,821 | 17,821 | 17,821 / 17,821 |
+| 009 | 9,303 | 9,303 | 9,303 | 9,303 / 9,303 |
+| 010 | 19,160 | 19,160 | 19,160 | 19,160 / 19,160 |
+| 011 | 14,581 | 14,581 | 14,581 | 14,581 / 14,581 |
+| **五段合计（含 005）** | **70,796** | **70,796** | **70,796** | **70,796 / 70,796** |
+| 005 原始 MCAP / NOKOV（分阶段运行） | 9,894 份，重合 9,744 / 9,931 | MANO 三维中位差左 0.071 / 右 0.067 mm | 使用同曝光对照 | 19 项 MANO 检查两手各 19 / 19 |
+| 005 原始 MCAP / NOKOV（单命令） | 9,735 份，重合 9,625 / 9,931 | MANO 三维中位差左 0.100 / 右 0.117 mm | 逐原图曝光核对 | 19 项 MANO 检查两手各 19/19 |
+
+005 的曝光集合无增加或缺失，训练/验证划分独立回算为 8,978 / 953。左右手分别有 1,803 / 1,172 个有效姿势。原图按手计数，双手同一曝光共享一张原图。严格和扩展字典的键、字段类型、数组类型、形状及数值全部相同，包括原有的 778 顶点投影张量。[逐曝光对比](../../../work/root_cause_20261121/legacy_probe/005_regression.json) · [时间线及划分](../../../work/root_cause_20261121/legacy_probe/group_005/timeline.json)
+
+原始 NPY 的字节 SHA 两种格式均为 0 / 9,931。签收文件的张量 pickle 含生产进程的存储编号；重写时编号及记录其长度的字段发生变化。逐文件仅将这个编号统一为一个字符、更新相应长度后，严格和扩展两种文件全部逐字节相同。用户于本轮选定按全部字段、原图原始 SHA、去编号 NPY SHA 验收。原有 SHA 继续保存在逐组报告中，正式签收文件不变。[独立编码核对](../../../work/root_cause_20261121/encoding.json)
+
+冻结包的 61,894 个条目已按实际文件内容核对。005 第一次独立重发与五段入口生成的文件分别存放，均为候选。[冻结包复核](../../../work/root_cause_20261121/freeze_check.json)
+
+五段合并有 51,573 张独立相机图，63,331 条训练样本和 7,465 条验证样本。3,029 个剔除项与发布时的逐手原因及遮挡数值逐项一致。两种 NPY 的原始字节 SHA 各为 0 / 70,796 命中，签收文件的 SHA 仍逐份保存。训练读取检查单独记录。[候选数据](../../../work/labels_reexport_20261121/dataset/) · [分段回归](../../../work/labels_reexport_20261121/legacy/)
+
+完整的原生 MANO 检查已遍历 70,796 条，最大重投影误差 0.0000611 px，最大关节回算误差 0.000164 mm。训练端的独立 profile 检查通过，真实 GloveDataset 以 physical_kb 从 train 和 val 分别读取 500 条。三个索引的样本身份与顺序均和正式 v2 相同。[全量几何](../../../work/labels_reexport_20261121/dataset/geometry_check.log) · [训练数据检查](../../../work/labels_reexport_20261121/dataset/dataset_profile.json) · [实际读取](../../../work/labels_reexport_20261121/dataset/loader_check.json) · [筛选与划分逐项复核](../../../work/labels_reexport_20261121/dataset/signed_comparison.json)
+
+005 原始回放用原签收参照左 1928、右 1032。相对签收包缺 187 份、新增 150 份。MANO 三维 P95 左 0.394 / 右 0.274 mm，手套表面点 P95 左 0.377 / 右 0.261 mm。以同一套 19 项 MANO 门槛检查手套表面链，存在与签收版相同的左 2、右 1 个超限项。单命令的独立结果见下表。[按手、坐标和覆盖对照](../../../work/root_cause_20261121/raw005_comparison.json) · [逐项解剖比较](../../../work/root_cause_20261121/raw005_anatomy.csv)
+
+<!-- traced-005 -->
+## 005 原始数据单命令回放
+
+从原始 MCAP 与同一期 NOKOV 进入默认 legacy 流程，在新的输出目录完成 step01–12。最终有 9,735 份标签、6,881 张独立图像，左右手套腕点沿用指定同步帧。与签收的 9,931 份共有 9,625 份，签收版独有 306 份，回放版独有 110 份，覆盖原签收曝光的 96.92%。两次重跑结果单独保存。下表基于与签收版共有的曝光，三维同一手姿只计一次，二维按可比相机曝光计。[回放数据](../../../work/labels_raw005_e2e_20261121/legacy/group_005) · [四机看图](../../../work/labels_raw005_e2e_20261121/legacy/group_005/review/DATASET_REVIEW.md) · [数值明细](../../../work/root_cause_20261121/raw005_e2e_comparison.json)
+
+| 手 | 共有手姿 | MANO 中位 / P95 mm | 表面点中位 / P95 mm | MANO / 表面 19 项 | 参照腕点三维差 |
+|---|---:|---:|---:|---:|---|
+| left | 1,765 | 0.100 / 0.417 | 0.095 / 0.413 | 19 / 17 | sync 1928，0.181 mm |
+| right | 1,044 | 0.117 / 0.382 | 0.087 / 0.346 | 19 / 18 | sync 1032，0.056 mm |
+
+全量原生几何检查最大 MANO 关节回算差 0.000119 mm。训练和验证各从 8,737 / 998 份中实读 500 / 500 份。逐份核对了索引与扩展 NPY 的候选标志及拟合方法，两层均为 legacy、未签收。16 张四机预览和数据文件的摘要已核对。[全量几何](../../../work/labels_raw005_e2e_20261121/legacy/group_005/geometry_check.log) · [逐份状态与读取检查](../../../work/root_cause_20261121/raw005_e2e_validation.json) · [解剖逐项对照](../../../work/root_cause_20261121/raw005_e2e_anatomy.csv)
+
+原始回放的覆盖与签收版有差异。按照同步帧和物理手对齐，119 个有界拟合保留状态相反的手姿中，有 115 个在传感器转角争议门槛改变取舍，3 个在新增 marker 残差门槛改变取舍，1 个仅出现在一边的输入参考集合。该表统计手姿，最终索引统计相机曝光。[逐姿势原因](../../../work/root_cause_20261121/raw005_e2e_decision_flips.csv)
+
+system call 记录的工作区路径去重为 74,550 个，历史 work 脚本 0 个，资源清单外路径 0 个。原生脚本调用项目内 NOKOV 同步和图像工具、现有 WiLoR 数据加载器以及安装的光栅化库。系统解释器、GPU 驱动、ffmpeg 等另列。首次按目录归类时有 1 个资源未列名，即训练读取器命令行指定的 MANO_RIGHT.pkl。与拟合模型原始 SHA 完全相同；现已从 defaults.yaml 明确提供并在调用前核验。原始审计也保留在 [补全资源声明前的记录](../../../work/root_cause_20261121/raw005_access_before_model_declaration.json)。审计用当前列明的生产依赖核对；本次开发期间加入了可视化修正及依赖声明，各子进程开始时的实际代码摘要单独存档。冻结标签没有被读取为这次求解的监督目标。[访问归类](../../../work/root_cause_20261121/raw005_access_final.json) · [原生工具内容摘要](../../../work/root_cause_20261121/observed_canonical_tools.json) · [分阶段代码与参数](../../../work/labels_raw005_e2e_20261121/legacy/group_005/records/phases)
+
+本次 strace 作业的外层终端返回码为 143。十二个阶段各自均有 complete 及产物摘要，最后一条系统调用读回了 step12 的完成记录。没有证据可将 143 归因于某个拟合阶段，或证明外层退出码为零；另行运行的整套产物核验独立记录。
+
+开发时启动的这份追踪回放在 step10 记录了当时的逐曝光 index.jsonl；随后 step11 会为同一文件增加索引信息。这份记录的求解与导出均成功，它的旧检查点不适合原地续跑。现行入口在 step10 使用独立 exposure_index.jsonl 和逐文件摘要。实测不可变索引的 SHA 与组装前的原记录完全相同，最终完整索引另存其 SHA。[逐字节检查](../../../work/root_cause_20261121/raw005_checkpoint.json)
+
+较早的 9,894 份分阶段试跑用来衡量重跑波动。其中 3,858 份补回扩展标签保留了旧的内部批准位；该目录仅作数值对照。上面的单命令回放对每条索引及扩展标签全部核实为 false，应查看这份候选。
+
+省略 fit_method 的独立 005 配置也选择了 legacy。9,931 份再次通过全字段、原图及两种去存储编号后的 SHA 检查。随后使用同配置运行 --resume 到 step11，完整验证上游记录和文件摘要，外层退出码为 0。[省略开关的回归结果](../../../work/root_cause_20261121/implicit_005_replay/legacy/group_005/regression.json)
+
+<!-- round24-raw-v4 -->
+<a id="round24-replay"></a>
+## 从原始录制单命令重跑（2026-11-23，第 24 轮）
+
+两段独立运行。双手 183304 读取原始 MCAP、同期 NOKOV、相机标定并新算 WiLoR；单右手 191855 读取该段采集的四路原始 MP4、PTS、IMU 与 NOKOV。两次调用均使用新目录，各自的观测、拟合和导出均在本次执行。
+
+| 录制 | 分支 | 实际总耗时 | 首条命令记录 | 实际设置 |
+| --- | --- | ---: | --- | --- |
+| 183304 | `adaptive_wrist_v4` | 1:24:22 | [命令与起止时间](../../../work/label_release_round24_20261123/183304_20261123_145632.json) | [settings.json](../../../work/e2e_v4_183304_20261123_145632/settings.json) |
+| 191855 | `single_hand_temporal` | 0:18:28 | [命令与起止时间](../../../work/label_release_round24_20261123/191855_20261123_162054.json) | [settings.json](../../../work/e2e_v4_191855_20261123_162054/settings.json) |
+
+两次均从 `ego_hand_system` 仓库根目录执行。
+
+```bash
+bash scripts/export_ego_nokov_labels.sh --recording /home/p3/data_sda1/EGO_glove/work/labels_20261120/raw_groups/183304 --optimization-config configs/native_nokov_v4.json --output /home/p3/data_sda1/EGO_glove/work/e2e_v4_183304_20261123_145632
+bash scripts/export_ego_nokov_labels.sh --recording /home/p3/data_sda1/EGO_glove/data/20261111/20261111_nokov_hand/pair_20261111_191855 --optimization-config configs/native_nokov_v4.json --output /home/p3/data_sda1/EGO_glove/work/e2e_v4_191855_20261123_162054
+```
+
+183304 共用 3,548 个同手、同相机、同曝光的样本，占签收版 58.80%。签收版独有 2,486 个，新回放独有 199 个。两版曝光并集的重合比例为 56.92%。[签收视频](../../../work/label_export_cli_v4_check_20261123/183304/camera0_full.mp4) · [新回放视频](../../../work/e2e_v4_183304_20261123_145632/optimized/review/camera0_full.mp4) · [逐项结果](../../../work/label_release_round24_20261123/dual_raw_comparison.json)
+
+| 183304 | 签收版 | 原始回放 |
+| --- | ---: | ---: |
+| 曝光标签 | 6,034 | 3,747 |
+| 训练 / 验证 | 5,515 / 519 | 3,432 / 315 |
+| 右小指修正手姿 / 相机标签 | 131 / 414 | 109 / 350 |
+| v4 额外剔除的训练曝光 | 0 | 0 |
+| 最终导出 MANO 19 项，左 / 右 | 19 / 19 | 19 / 19 |
+
+| 手 | 共有手姿 | 训练标签绝对 MANO 三维中位 / P95 mm | 同 005 口径的第 12 步 MANO 中位 / P95 mm | 同 005 口径 MANO 项数，原 / 新 | 签收 / 新腕参照 sync |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 左 | 158 | 4.462 / 10.822 | 4.462 / 10.822 | 19 / 19 | 1417 / 1525 |
+| 右 | 948 | 8.353 / 14.154 | 8.353 / 14.154 | 19 / 19 | 0 / 1939 |
+
+绝对三维包含根平移。相机标定、共有曝光的编号和参考时戳已逐项对齐。每个共有同步帧的每只手计一次，按 21 个关节的欧氏距离统计。解剖指标使用 005 同一原生 WiLoR 参照和门槛，最终标签按每个有导出的手姿计一次，第 12 步按所有有效轨迹手姿计。
+
+仅签收版保留的对侧记录为 pass_surface=false 1597、bounded:disputed_sensor_turn 857、isolated_pose=true 21、mesh_crosses_camera_plane 10、other_hand_occludes_target_over_30pct 1。[逐曝光明细](../../../work/label_release_round24_20261123/signed_only_exposures.csv)
+仅新版保留的对侧记录为 bounded:disputed_sensor_turn 172、pass_surface=false 15、isolated_pose=true 6、other_hand_occludes_target_over_30pct 3、bounded:added_marker_residual 3。[逐曝光明细](../../../work/label_release_round24_20261123/fresh_only_exposures.csv)
+
+[183304 同步并排视频（左签收、右原始回放）](../../../work/label_release_round24_20261123/183304_signed_vs_raw_camera0.mp4)
+
+看并排视频约 00:51 的左手（sync 1516）、01:06 的右手（sync 1981），两版均有标签。01:32–01:33 的右手清楚可见，新版因转向争议连续 36 帧没有标签。[三张同曝光原图和标签](../../../work/label_release_round24_20261123/183304_actual_frames.jpg) · [按相机 0 时间轴选帧](../../../work/label_release_round24_20261123/camera0_bookmarks.json)
+
+对齐后的 NOKOV 数值数组和安装初始矩阵完全相同，3,073 个时刻的四路曝光号全部相同。共有 WiLoR 观测的二维坐标分量中位 / P95 差为 0.52 / 1.97 px，有效观测标志有 4 处变化。左右手基线关节中位差均为 0 mm；逐指时序拟合后为 0.050 / 0.037 mm。明显的分歧出现在第 06–07 步：左右手实际用于腕部求解的参照从 1417 / 0 变为 1525 / 1939。两次腕带标定及留出手姿集合也随之改变。腕部初拟合后的 21 关节中位差升到 5.22 / 9.13 mm。左手参照的腕带重投影误差由 1.49 增至 4.22 px，右手由 1.09 降至 0.86 px。005 回放固定了历史腕参照，这次按每次实际证据独立选取，因而不能把末端差异归为浮点误差。逐级对照能定位分歧，单独更换腕参照会贡献多少仍未独立测量。[观测](../../../work/label_release_round24_20261123/raw_input_comparison.json) · [空间对齐](../../../work/label_release_round24_20261123/alignment_comparison.json) · [逐级三维差值](../../../work/label_release_round24_20261123/stage_deltas.json) · [腕参照候选](../../../work/label_release_round24_20261123/wrist_selection_comparison.json) · [实际拟合参照](../../../work/label_release_round24_20261123/wrist_fit_inputs.json)
+
+单手 191855 共有 4,414 份训练格式标签，1,176 个有导出的右手姿态。按同一门槛，右手通过 8 / 19 项。相机 0 整段 2,189 帧，其中 1,176 帧有最终标签。[单手整段视频](../../../work/e2e_v4_191855_20261123_162054/review/camera0_full.mp4) · [各指关节明细](../../../work/label_release_round24_20261123/single_raw_report.json) · [训练格式标签](../../../work/e2e_v4_191855_20261123_162054/optimized/dense/fit/final/export/merged)
+
+单手原生流程交付合并标签和 HTML 查看器。上述单手 MP4 由本轮验收从最终 NPY 按原曝光另行绘制，命令耗时统计到公共导出程序退出。原始拟合轨迹与导出标签独立回算均为 8/19，逐关节角度最大差 0.000028°。拇指 MCP 过伸占 27.64%，拇指之字形占 21.26%，两项门槛均为 2%。建议保留为候选。[轨迹独立复算](../../../work/label_release_round24_20261123/single_anatomy_crosscheck.json)
