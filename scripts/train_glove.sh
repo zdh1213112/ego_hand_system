@@ -18,7 +18,8 @@ case "${1:-}" in
   ""|-h|--help) usage; exit 0 ;;
   wilor)
     shift
-    if [[ $# == 0 ]]; then
+    if [[ $# == 0 || ($# == 2 && $1 == --mode && $2 == joint_lora) ||
+          ($# == 1 && $1 == --mode=joint_lora) ]]; then
       set -- --mode joint_lora --config "$training/configs/glove/nokov_v4_joint_lora.yaml"
     fi
     set -- "$training/train_glove.py" "$@"
