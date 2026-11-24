@@ -1,6 +1,22 @@
 # 联合重拟合（joint_refit）
 
-**现在的入口**：`bash scripts/export_ego_nokov_labels.sh --recording <录制> --optimization-config configs/native_joint_refit.json`（在 `ego_hand_system` 下运行）。它先跑基线，再调用 `scripts/run_joint_refit_recording.py`，对每段录制、每只录到的手单独标定，然后拟合全部时刻、导出并验收。命令、输出位置、续跑和汇总训练集见 [docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md](../../docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。
+## 用 NOKOV 五指 marker 和 SDK 骨架生成训练标签
+
+在 `ego_hand_system` 下运行以下命令。标签入口读取配对目录中的四路 MP4、PTS、IMU CSV 和 NOKOV 记录。11 月 16 日的 MCAP 已按原 H.264 视频和设备时间戳无损转换，五段录制均使用这套输入。每段录制会单独标定手型、腕根和手指挂点。
+
+```bash
+bash scripts/export_ego_nokov_labels.sh \
+  --recording /path/to/paired_recording \
+  --optimization-config configs/native_nokov_articulation.json
+```
+
+此配置把无名指第二挂点放到对应指骨的手背面，以 0.05 的权重约束关节。每指须有至少三个实测 marker。单点缺失时，程序用这一段录制上标定的 SDK 骨段偏移辅助拟合，可见性仍按实测点计数。程序分别处理屈伸、侧摆和扭转，拇指使用单独的旋转范围。光学折线与 SDK 骨链的转向一致且标定充分时，才用它们约束指节。对有可靠分割的画面，程序在实测点和关节验收范围内微调完整手套轮廓。
+
+原图标签在 `optimized/dense/fit/final/export/merged/`，查看器在旁边的 `viewer/index.html`，逐手验收和轮廓记录在 `optimized/dense/fit/summary.json`。双手录制要求同一时刻两手都通过，且该相机完整看到 21 个关节，才导出该视角。逐手拟合结果和最终训练标签的覆盖范围因此有差别。
+
+较早的轮廓拟合配置为 `configs/native_joint_refit.json`，与上面的逐指配置共用 `scripts/run_joint_refit_recording.py`。两个配置都先生成基线，再按录制标定、拟合和导出。[完整命令与续跑方式](../../docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)
+
+**用 NOKOV 指骨辅助缺失 marker（可选）**。在传给 `--optimization-config` 的 JSON 的 `joint_refit` 对象中设置 `sdk_marker_gaps` 为 `true`，逐帧拟合将使用本次录制标定出的 marker 到相应 SDK 骨段的局部偏移。当一根手指恰有 3 个实测点、缺失点对应的 SDK 骨段有效时，拟合才使用第 4 点的预测位置。导出中的可见性和验收仍以实测点计数。可同时设置 `min_markers_per_finger`（0～4）和 `joint_limit_weight`（非负数）。两段录制的对照使用 3 和 0.05。三个设置省略时均关闭。每次比较使用单独的输出目录，`--resume` 会检查所选设置。
 
 下面的 `run_joint_refit_labels.sh` 是旧入口，只能用于 192916，而且依赖那段录制已生成的中间结果。保留它只为复现 v1～v6 的结果。
 
@@ -12,7 +28,7 @@
 
 ## 整段录制与自动验收（v5_dense）
 - 入口脚本在采样时刻标定之后，继续执行：`build_dense_source.py`（全部1612个时刻的输入）→ `image_alignment.py`（逐帧对齐修正）→ `dense_drive.py`（冻结共享参数，全时刻拟合＋验收）→ `export.py` → `verify_export.py` → `render_video.py`。输出在 `<结果>/dense/`，标签在 `<结果>/dense/fit/final/export/merged`。
-- 验收门槛（每只手每个时刻）：对齐已由图像修正；手指 marker 不少于19个；marker 残差中位≤2.5mm 且最大≤8mm。不合格的不写入，原因在 `dense/fit/{left,right}_rejected.json`。
+- 验收门槛（每只手每个时刻）：对齐已由图像修正；20 个手指 marker 加 HandOffset 实测合计至少 19 个；marker 残差中位≤2.5mm 且最大≤8mm。不合格的不写入，原因在 `dense/fit/{left,right}_rejected.json`。
 - 本轮结果（`joint_refit_v5_dense`）：左手 1349/1612、右手 1348/1612 通过；剔除中 213 个时刻是对齐未修正，51／52 个是 marker 残差。导出 3423 张图、6846 份标签（要求双手同时合格且该视图21个关节完整），格式与 MANO 重建检查通过。
 - `verify_export.py`：随机抽1491份导出标签，把朝向相机的 marker 用标签自带相机参数投到标签自带的图上，与图中亮点比最近距离：拟合结果中位2.65px，未修正的 NOKOV 为4.91px。左手（3～4px）差于右手 camera0（1.3px）；camera2 右手 p90 为18px。结果在 `export/image_evidence_check.json`。
 - 对指：通过验收的帧里拇指与其余四指指尖靠近时 mesh 无穿透（最大1.3mm），间隙中位2～4mm，未加额外约束。
