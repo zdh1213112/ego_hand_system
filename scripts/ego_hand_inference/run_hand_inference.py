@@ -274,7 +274,7 @@ def main(argv=None):
     code = sorted((ROOT / "scripts").rglob("*.py"))
     if a.adapter:
         model_files.append(a.adapter)
-        code.extend(sorted((ROOT.parent/'wilor_training/wilor').rglob('*.py')))
+        code.extend(sorted((ROOT/'training/wilor').rglob('*.py')))
     if a.detector_crop_calibration:
         model_files.append(a.detector_crop_calibration)
     options = {

@@ -11,6 +11,26 @@ import cv2
 from typing import List, Dict, Tuple
 from yacs.config import CfgNode
 
+
+def crop_points_to_image(
+    points: np.ndarray,
+    transform: np.ndarray,
+    image_size: np.ndarray,
+    is_left: bool,
+) -> np.ndarray:
+    """Map normalized crop points back to original, unflipped image pixels."""
+    crop_points = (points[:, :2] + 0.5) * 256.0
+    homogeneous = np.concatenate(
+        [crop_points, np.ones((len(crop_points), 1), dtype=np.float32)],
+        axis=1,
+    )
+    inverse = cv2.invertAffineTransform(transform[:2].astype(np.float32))
+    source = homogeneous @ inverse.T
+    if is_left:
+        source[:, 0] = float(image_size[0]) - source[:, 0] - 1.0
+    return source.astype(np.float32)
+
+
 def expand_to_aspect_ratio(input_shape, target_aspect_ratio=None):
     """Increase the size of the bounding box to match the target shape."""
     if target_aspect_ratio is None:

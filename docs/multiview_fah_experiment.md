@@ -9,7 +9,7 @@
 把三维关节、腕部、网格和 MANO 根朝向转回真实相机坐标。网格叠加读取归档中的 KB 标定。
 标定为 PINHOLE 的视频沿用透视输入流程，DS 输入沿用原针孔近似。
 
-默认从同级 `wilor_training` 加载共享裁剪代码，两个仓库分开放置时设置 `WILOR_TRAINING_ROOT`。
+默认使用本仓库 `training/tools/hand_finetune/` 中的共享裁剪代码。需要另行指定兼容实现时设置 `WILOR_TRAINING_ROOT`。
 每个机位的 `summary.json` 会记录 `camera_model_for_pose`，原始 KB 视频应为 `KB_local_perspective`。
 
 ```text

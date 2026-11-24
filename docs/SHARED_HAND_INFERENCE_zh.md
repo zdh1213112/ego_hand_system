@@ -30,6 +30,19 @@ bash scripts/run_hand_inference.sh \
   --output output/shared_hand
 ```
 
+使用训练模块导出的 WiLoR 权重时，显式提供基础模型、检测器和 adapter。例如，将已签收的第 48,300 步权重部署为 `models/wilor/v4_step48300.pt` 后运行：
+
+```bash
+bash scripts/run_hand_inference.sh wilor \
+  --input /path/to/recording/part0001 --output output/shared_v4 \
+  --detector models/wilor/2.0_glove_wilor_3680.pt \
+  --checkpoint models/wilor/coarse_start.ckpt \
+  --model-config training/pretrained_models/model_config.yaml \
+  --mano-model-dir models/mano --adapter models/wilor/v4_step48300.pt
+```
+
+替换 `--adapter` 可评估新训练输出的 `best_trainable.pt`。省略后端名沿用 WiLoR。选用其他后端可运行 `bash scripts/run_hand_inference.sh fah --help` 或 `bash scripts/run_hand_inference.sh gem-x --help`，这两个入口接受 `--session` 或 `--mcap`，分别使用其原有多视角流程。[FAH 参数](multiview_fah_experiment.md) · [GEM-X 参数](multiview_gem_experiment.md)
+
 MCAP 使用同一命令，将 `--input` 指向 MCAP 文件或单分段目录。
 `--session` 和 `--mcap` 也可分别显式指定输入类型。完整参数见 `--help`。
 默认 Conda 环境是 `ego-hand`；可设置 `--conda-env NAME`，或使用

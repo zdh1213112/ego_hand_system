@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+case "${1:-}" in
+  wilor) shift ;;
+  fah) shift; exec bash "$ROOT/scripts/run_multiview_fah_experiment.sh" "$@" ;;
+  gem-x) shift; exec bash "$ROOT/scripts/run_multiview_gem_experiment.sh" "$@" ;;
+  -h|--help)
+    echo 'Backends: wilor (default), fah, gem-x. Use BACKEND --help for its options.'
+    ;;
+esac
 CONDA_ENV="${EGO_CONDA_ENV:-ego-hand}"
 ARGS=()
 while (($#)); do

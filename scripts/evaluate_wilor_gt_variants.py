@@ -29,7 +29,7 @@ def arguments():
     p.add_argument('--output', required=True, type=Path)
     p.add_argument('--checkpoint', type=Path, default=ROOT / 'models/wilor/wilor_final.ckpt')
     p.add_argument('--adapter', action='append', default=[], type=Path)
-    p.add_argument('--wilor-root', type=Path, default=ROOT.parent / 'wilor_training')
+    p.add_argument('--wilor-root', type=Path, default=ROOT / 'training')
     p.add_argument('--batch-size', type=int, default=32)
     p.add_argument('--chunk-images', type=int, default=48)
     p.add_argument('--workers', type=int, default=6)

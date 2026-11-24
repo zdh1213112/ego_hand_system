@@ -22,7 +22,7 @@ import numpy as np
 
 
 def training_root():
-    default = Path(__file__).resolve().parents[2] / "wilor_training"
+    default = Path(__file__).resolve().parents[1] / "training"
     return Path(os.environ.get("WILOR_TRAINING_ROOT", default)).resolve()
 
 
@@ -53,7 +53,7 @@ def predict_camera_hands(method, image, boxes, scores, side_groups, K, kb_camera
             except ModuleNotFoundError as exc:
                 if exc.name not in ("tools", "tools.hand_finetune", "tools.hand_finetune.fah_views"):
                     raise
-                raise ImportError(f"Set WILOR_TRAINING_ROOT to the matching wilor_training checkout (tried {path})") from exc
+                raise ImportError(f"Check the integrated training module or set WILOR_TRAINING_ROOT to a compatible checkout (tried {path})") from exc
             hands, views = predict_views(method.est, image, boxes, scores, side_groups,
                                          kb_camera.K, kb_camera.distortion)
 

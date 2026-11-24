@@ -12,29 +12,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from wilor.datasets.glove_dataset import FrameGroupKey, frame_group_key
+from wilor.datasets.utils import crop_points_to_image
 from wilor.utils import recursive_to
 from wilor.utils.visualization import draw_hand_overlay
 
 from .reporting import write_json, write_jsonl
-
-
-def crop_points_to_image(
-    points: np.ndarray,
-    transform: np.ndarray,
-    image_size: np.ndarray,
-    is_left: bool,
-) -> np.ndarray:
-    """Map normalized crop points back to original, unflipped image pixels."""
-    crop_points = (points[:, :2] + 0.5) * 256.0
-    homogeneous = np.concatenate(
-        [crop_points, np.ones((len(crop_points), 1), dtype=np.float32)],
-        axis=1,
-    )
-    inverse = cv2.invertAffineTransform(transform[:2].astype(np.float32))
-    source = homogeneous @ inverse.T
-    if is_left:
-        source[:, 0] = float(image_size[0]) - source[:, 0] - 1.0
-    return source.astype(np.float32)
 
 
 def group_prediction_records(

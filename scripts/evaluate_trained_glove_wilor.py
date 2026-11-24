@@ -19,8 +19,7 @@ import torch
 
 
 EGO_ROOT = Path(__file__).resolve().parents[1]
-GLOVE_ROOT = EGO_ROOT.parent
-TRAINING_ROOT = GLOVE_ROOT / "wilor_training"
+TRAINING_ROOT = EGO_ROOT / "training"
 sys.path.insert(0, str(TRAINING_ROOT))
 sys.path.insert(0, str(EGO_ROOT / "scripts"))
 

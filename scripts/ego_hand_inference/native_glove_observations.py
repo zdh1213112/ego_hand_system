@@ -18,11 +18,10 @@ from ego_data.dataset import SequentialVideoReader
 from ego_hand_inference.detector_crop import calibrated_box, load_crop_calibration
 from ego_hand_inference.inference_common import choose_device, load_detector, _top_detections_per_class
 
-TRAINING_ROOT = Path(__file__).resolve().parents[3] / 'wilor_training'
+TRAINING_ROOT = Path(__file__).resolve().parents[2] / 'training'
 sys.path.insert(0, str(TRAINING_ROOT))
-from wilor.datasets.utils import expand_to_aspect_ratio, generate_image_patch_cv2
+from wilor.datasets.utils import crop_points_to_image, expand_to_aspect_ratio, generate_image_patch_cv2
 from wilor.models import load_wilor
-from wilor.training.evaluation import crop_points_to_image
 from wilor.utils import recursive_to
 
 

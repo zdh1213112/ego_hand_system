@@ -36,6 +36,7 @@ from mcap_protobuf.decoder import DecoderFactory
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from ego_data.h264 import H264MatroskaWriter  # noqa: E402
+from ego_hand_inference.orbbec_io import recording_metadata_root
 from normalize_orbbec_ego4_session import CAMERA_SOURCES, load_ego4_calibrations
 
 
