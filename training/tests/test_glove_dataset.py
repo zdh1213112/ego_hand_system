@@ -103,6 +103,36 @@ def test_left_and_right_crop_coordinates_round_trip(tmp_path: Path) -> None:
         np.testing.assert_allclose(restored, expected, atol=1e-4)
 
 
+@pytest.mark.parametrize("side", [0, 1])
+def test_bbox_pinhole_loader_maps_to_raw_kb_and_preserves_mano(tmp_path: Path, side: int) -> None:
+    from tools.hand_finetune.crop_geometry import PerspectiveCrop
+
+    row = _write_sample(tmp_path, 0, side, 0, "camera2")
+    path = tmp_path / row["label"]
+    label = np.load(path, allow_pickle=True).item()
+    label.update(image_space="native_raw", camera_model="KB",
+                 distortion=np.array([.12, -.04, .005, 0.]),
+                 bbox=np.array([187., 73., 272., 177.]))
+    label["trans"][0] += .24
+    np.save(path, label)
+    manifest = tmp_path / "val.jsonl"
+    write_manifest_rows(manifest, [row])
+    sample = GloveDataset(manifest, camera_model="kb_bbox_pinhole")[0]
+    view = PerspectiveCrop(sample["view_rotation"].numpy(), sample["camera_K"].numpy(),
+                           sample["raw_K"].numpy(), sample["camera_distortion"].numpy(), 256)
+    pixels = crop_points_to_image(sample["keypoints_2d"].numpy(), sample["crop_transform"].numpy(),
+                                 sample["image_size"].numpy(), is_left=side == 0)
+    xyz = (label["joints_3d"] + label["trans"]).astype(np.float64)
+    expected = cv2.fisheye.projectPoints(xyz[:, None], np.zeros(3), np.zeros(3),
+                                         label["K"].astype(float), label["distortion"])[0][:, 0]
+    np.testing.assert_allclose(view.native_pixels(pixels), expected, atol=.001)
+    np.testing.assert_allclose(sample["camera_root_m"].numpy() @ view.rotation, xyz[0], atol=1e-6)
+    rect_relative = sample["keypoints_3d"].numpy()[:, :3].copy()
+    if side == 0:
+        rect_relative[:, 0] *= -1
+    np.testing.assert_allclose((rect_relative - rect_relative[0]) @ view.rotation, xyz - xyz[0], atol=1e-6)
+
+
 def test_max_frames_keeps_both_hands_in_an_interleaved_manifest(
     tmp_path: Path,
 ) -> None:

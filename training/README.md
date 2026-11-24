@@ -24,6 +24,16 @@ bash training/train.sh wilor --config training/configs/glove/nokov_v4_joint_lora
 | `last_trainable.pt` | 续训时填写到 `paths.resume`，`training.max_steps` 设置为目标总步数 |
 | `best_full.ckpt`、`last_full.ckpt` | 含完整模型的检查点，可用 `training/evaluate_glove.py` 评估 |
 
+## WiLoR 原图 bbox 去畸变实验
+
+使用相同的九段原图和 v4 标签。训练读取原图上的手框和该相机的 KB4 标定，将手框区域采样成 256 × 256 的透视图，并将 2D、3D、MANO 全局朝向和腕部目标转换到对应坐标系。该配方从 `models/wilor/v4_step48300.pt` 初始化，使用新优化器训练 15,000 步。推理时，权重中记录的 `kb_bbox_pinhole` 会自动选择同样的去畸变方式。[实验配置](configs/glove/nokov_v4_bbox_pinhole.yaml)
+
+```bash
+bash training/train.sh wilor --config training/configs/glove/nokov_v4_bbox_pinhole.yaml
+```
+
+最佳权重位于 `training/output/glove_v4_bbox_pinhole_15000/best_trainable.pt`。
+
 ## FAH-S 和 GEM-X
 
 两种后端通过同一个训练入口接收自己的算法环境、数据目录和输出目录。环境安装、基础权重和附加资产见 [FAH-S / GEM-X 使用说明](docs/training/FAH_GEM_X_zh.md)。

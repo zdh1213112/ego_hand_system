@@ -39,6 +39,8 @@ bash inference/run.sh wilor \
   --mano-model-dir models/mano --adapter models/wilor/v4_step48300.pt
 ```
 
+要试用手框去畸变权重，将上面的 `--adapter` 换为 `training/output/glove_v4_bbox_pinhole_15000/best_trainable.pt`，并指定独立的 `--output`。入口从权重识别预处理方式。检测器在原始鱼眼图上找框，WiLoR 在框对应的透视图上预测，程序再将关节和 MANO 位姿变回原相机坐标。四机视频和二维坐标都对应原图。[训练配方](../training/configs/glove/nokov_v4_bbox_pinhole.yaml)
+
 替换 `--adapter` 可评估新训练输出的 `best_trainable.pt`。省略后端名沿用 WiLoR。选用其他后端可运行 `bash inference/run.sh fah --help` 或 `bash inference/run.sh gem-x --help`，这两个入口接受 `--session` 或 `--mcap`，分别使用其原有多视角流程。[FAH 参数](../docs/multiview_fah_experiment.md) · [GEM-X 参数](../docs/multiview_gem_experiment.md)
 
 MCAP 使用同一命令，将 `--input` 指向 MCAP 文件或单分段目录。

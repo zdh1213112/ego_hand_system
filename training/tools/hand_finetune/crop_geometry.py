@@ -104,13 +104,15 @@ class PerspectiveCrop:
         rays = np.concatenate((xy, np.ones_like(xy[..., :1])), axis=-1)
         return _native_pixels(rays @ self.rotation, self.source_K, self.distortion)
 
-    def rectify(self, image):
+    def rectify(self, image, *, check_view_extent=False):
         # Physical z is affine in view x,y, so its minimum is attained at a corner.
         extent = self.K[0, 2] / self.K[0, 0]
         min_z = self.rotation[2, 2] - extent * np.abs(self.rotation[:2, 2]).sum()
         # The largest ray length occurs at a corner of the perspective square.
         max_theta = np.arccos(np.clip(min_z / np.sqrt(1 + 2 * extent**2), -1, 1))
-        if min_z > 0 and max_theta < _theta_limit(tuple(self.distortion)):
+        limit = _theta_limit(tuple(self.distortion))
+        in_domain = max_theta < limit if check_view_extent else limit >= np.pi / 2
+        if min_z > 0 and in_domain:
             maps = cv2.fisheye.initUndistortRectifyMap(
                 self.source_K, self.distortion, self.rotation, self.K,
                 (self.size, self.size), cv2.CV_32FC1)

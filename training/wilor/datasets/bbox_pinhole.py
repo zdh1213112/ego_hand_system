@@ -8,7 +8,7 @@ def rectify_hand(image, raw_box, K, distortion, resolution, rescale, left):
     # The backbone uses the central 192 columns of its 256-square input.
     view = PerspectiveCrop.from_box(raw_box, K, distortion, resolution,
                                     padding=rescale, width_factor=256 / 192)
-    patch = view.rectify(image)
+    patch = view.rectify(image, check_view_extent=True)
     if left:
         patch = np.ascontiguousarray(patch[:, ::-1])
     return view, patch
