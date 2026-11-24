@@ -16,7 +16,7 @@ import tempfile
 import cv2
 import numpy as np
 
-from ego_data.calibration import cameras_from_ego_yaml
+from ego_data.calibration import CameraCalibration, cameras_from_ego_yaml
 from ego_data.pairing import pair_timestamps_ns
 from normalize_orbbec_session import read_timestamps, sha256_file, unique_file
 
@@ -54,6 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--calibration-json", type=Path,
+                        help="explicit JSON with camera_calibrations (e.g. a labeled dataset summary); used instead of source YAML")
     parser.add_argument("--reference-camera", choices=tuple(CAMERA_SOURCES), default="camera0")
     parser.add_argument("--max-delta-us", type=int, default=1500)
     parser.add_argument("--max-frames", type=int, default=0, help="limit synchronized rows; 0 means all")
@@ -107,6 +109,35 @@ def synchronize_rows(
     return rows
 
 
+def recording_metadata_root(directory: Path) -> Path:
+    # EGOViewer stores calibration/metadata at the recording root while the
+    # selected part holds only its own video/PTS streams. Never search sibling
+    # parts when a specific part directory was requested.
+    if (not list(directory.glob("*_calibration_camera.yaml"))
+            and re.fullmatch(r"part\d+", directory.name)):
+        return directory.parent
+    return directory
+
+
+def load_ego4_calibrations(calibration_path: Path, *, explicit_json: bool = False) -> dict[str, CameraCalibration]:
+    if explicit_json:
+        value = json.loads(calibration_path.read_text())
+        entries = value["camera_calibrations"]
+        if set(entries) != set(CAMERA_SOURCES):
+            raise ValueError("calibration JSON must contain camera0 through camera3")
+        calibrations = {camera: CameraCalibration.from_dict(entry) for camera, entry in entries.items()}
+        for camera, calibration in calibrations.items():
+            if calibration.camera_id != camera:
+                raise ValueError(f"calibration JSON camera ID mismatch for {camera}")
+        return calibrations
+    source_calibrations = cameras_from_ego_yaml(calibration_path)
+    expected_ids = {source_id for _, source_id in CAMERA_SOURCES.values()}
+    if set(source_calibrations) != expected_ids:
+        raise ValueError(f"expected calibration IDs {sorted(expected_ids)}, found {sorted(source_calibrations)}")
+    return {camera: replace(source_calibrations[source_id], camera_id=camera)
+            for camera, (_, source_id) in CAMERA_SOURCES.items()}
+
+
 def normalize(args: argparse.Namespace) -> Path:
     session = args.session.expanduser().resolve()
     output = args.output.expanduser().resolve()
@@ -119,34 +150,25 @@ def normalize(args: argparse.Namespace) -> Path:
     if args.reference_camera not in CAMERA_SOURCES:
         raise ValueError(f"unknown reference camera: {args.reference_camera}")
 
-    # EGOViewer stores calibration/metadata at the recording root while the
-    # selected part holds only its own video/PTS streams. Never search sibling
-    # parts when a specific part directory was requested.
-    metadata_root = session
-    if (not list(session.glob("*_calibration_camera.yaml"))
-            and re.fullmatch(r"part\d+", session.name)):
-        metadata_root = session.parent
-    calibration_path = unique_file(metadata_root, "_calibration_camera.yaml")
-    source_calibrations = cameras_from_ego_yaml(calibration_path)
-    expected_ids = {source_id for _, source_id in CAMERA_SOURCES.values()}
-    if set(source_calibrations) != expected_ids:
-        raise ValueError(f"expected calibration IDs {sorted(expected_ids)}, found {sorted(source_calibrations)}")
+    metadata_root = recording_metadata_root(session)
+    calibration_json = getattr(args, "calibration_json", None)
+    calibration_path = (Path(calibration_json).expanduser().resolve() if calibration_json
+                        else unique_file(metadata_root, "_calibration_camera.yaml"))
+    calibrations = load_ego4_calibrations(calibration_path, explicit_json=bool(calibration_json))
     videos = {}
     pts_files = {}
     timestamps = {}
-    calibrations = {}
-    for camera, (stream, source_id) in CAMERA_SOURCES.items():
+    for camera, (stream, _) in CAMERA_SOURCES.items():
         video = session_stream_file(session, stream, timestamps=False)
         pts = session_stream_file(session, stream, timestamps=True)
         values = read_timestamps(pts)
         count, size = _video_info(video)
-        calibration = source_calibrations[source_id]
+        calibration = calibrations[camera]
         if count != len(values):
             raise ValueError(f"{camera} video has {count} frames but PTS has {len(values)} rows")
         if size != calibration.image_size:
             raise ValueError(f"{camera} video size {size} differs from calibration {calibration.image_size}")
         videos[camera], pts_files[camera], timestamps[camera] = video, pts, values
-        calibrations[camera] = replace(calibration, camera_id=camera)
 
     synchronized = synchronize_rows(timestamps, args.reference_camera, args.max_delta_us * 1000)
     if args.max_frames:
@@ -205,8 +227,8 @@ def normalize(args: argparse.Namespace) -> Path:
                 "abs_delta_us_p95": float(np.percentile(deltas, 95)),
                 "abs_delta_us_max": float(max(deltas)),
             },
-            "calibration": {"available": True, "status": "source_yaml",
-                            "sha256": sha256_file(calibration_path)},
+            "calibration": {"available": True, "status": "explicit_json" if calibration_json else "source_yaml",
+                            "path": str(calibration_path), "sha256": sha256_file(calibration_path)},
             "coordinate_system": "Orbbec cam_0 optical reference frame; distances in metres",
         }
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

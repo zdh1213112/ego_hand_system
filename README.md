@@ -254,6 +254,8 @@ bash scripts/run_multiview_gem_experiment.sh \
 `--mcap /path/to/recording.mcap`，同时按录制选择相机；GEN 六目通常是 `camera0` 到
 `camera5`，EGO4 四目是 `camera0` 到 `camera3`。
 
+Orbbec EGO4 原始 MCAP 按相机通道识别录制格式，默认以 camera0 同步四路，并读取录制附带的相机标定。
+
 #### 输出视频分别是什么
 
 以四路、未启用辅助分支的 `both` 模式为例：

@@ -20,6 +20,7 @@ INPUT_KIND="mcap"
 CAMERAS_EXPLICIT=0
 REFERENCE_EXPLICIT=0
 OUTPUT=""
+CALIBRATION_JSON=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
 DETECTOR="${EGO_WILOR_DETECTOR:-$ROOT/models/wilor/detector.pt}"
@@ -99,6 +100,8 @@ TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}
 
 usage() {
   echo "WiLoR weights: --checkpoint FILE selects the base model; --adapter FILE applies trainable/LoRA weights; --wilor-root DIR selects the matching training checkout."
+  echo "--mcap FILE_OR_DIR detects GEN and Orbbec camera topics. An EGO4 recording directory must contain one MCAP; select a part for multi-part recordings."
+  echo "EGO4 optional: --calibration-json FILE uses an explicit camera_calibrations JSON when the source YAML is unavailable."
   echo "Optional: --final-video generates the final video(s) selected by --wilor-mode; disabled by default."
   echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
   echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos. Both keeps both branches."
@@ -108,7 +111,7 @@ usage() {
   echo "Use --no-pose-transition to save unblended selected poses for transition_wilor_sources.py."
   echo "With the default hybrid renderer, final_only_Nview.mp4 uses the original skeleton and per-camera WiLoR meshes. Shared mode has its own final_shared_Nview.mp4."
   echo "WiLoR --external-boxes DIR reuses saved detector boxes (DIR/camera*/predictions.jsonl) and does not reload YOLO weights."
-  echo "Usage: $0 (--mcap FILE | --session EGO4_DIR) --output DIR [--detector FILE] [--cameras camera0 camera1 ...] [--reference-camera CAMERA] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--sam3-glove-assist 0|1] [--sam3-conda-env NAME] [--sam3-model FILE] [--sam3-prompt TEXT] [--sam3-text-only 0|1] [--sam3-refine-2d 0|1] [--sam3-max-2d-correction-px N] [--sam3-2d-correction-blend N] [--sam3-max-2d-bone-change-ratio N] [--condition-hard-threshold N] [--anatomy-refinement 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--final-renderer hybrid|fused] [--no-video] [--stop-after-inference]"
+  echo "Usage: $0 (--mcap FILE_OR_DIR | --session EGO4_DIR) --output DIR [--detector FILE] [--cameras camera0 camera1 ...] [--reference-camera CAMERA] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--sam3-glove-assist 0|1] [--sam3-conda-env NAME] [--sam3-model FILE] [--sam3-prompt TEXT] [--sam3-text-only 0|1] [--sam3-refine-2d 0|1] [--sam3-max-2d-correction-px N] [--sam3-2d-correction-blend N] [--sam3-max-2d-bone-change-ratio N] [--condition-hard-threshold N] [--anatomy-refinement 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--final-renderer hybrid|fused] [--no-video] [--stop-after-inference]"
   echo "Defaults for glove stability: --sam3-refine-2d=0, --condition-hard-threshold=150, --anatomy-refinement=0. Override with EGO_* or the explicit flags."
   echo "Six-camera default anchors: camera0+camera5 (widest baseline); camera2+camera3 is used only when the wide pair is unavailable."
   echo "EGO4 --session uses the GEN WiLoR/fusion/temporal pipeline with four calibrated cameras; preferred anchor pair is camera0+camera1."
@@ -131,6 +134,7 @@ while (($#)); do
     --mcap) MCAP="$2"; INPUT_KIND="mcap"; shift 2 ;;
     --session|--experimental-session-3d) MCAP="$2"; INPUT_KIND="session"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
+    --calibration-json) CALIBRATION_JSON="$2"; shift 2 ;;
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
     --detector) DETECTOR="$2"; shift 2 ;;
@@ -215,6 +219,57 @@ case "$POSE_BACKEND/$POSE_POLICY" in
   wilor/native-wrist|wilor/shared-fit|fah/shared-fit|gem/) ;;
   *) echo "Unsupported --pose-policy '$POSE_POLICY' for backend '$POSE_BACKEND'" >&2; exit 2 ;;
 esac
+if [[ -z "$MCAP" || -z "$OUTPUT" ]]; then
+  usage >&2
+  exit 2
+fi
+
+run_python() {
+  conda run --no-capture-output -n "$CONDA_ENV" \
+    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/python_deps/wilor_runtime:$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" \
+    TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
+    python "$@"
+}
+
+# A recording root may hold one MCAP in part0001/. Select a part explicitly
+# when there are multiple captures. --session keeps preferring existing MP4 exports.
+if [[ -d "$MCAP" ]]; then
+  shopt -s nullglob globstar
+  mcap_files=("$MCAP"/*.mcap "$MCAP"/part[0-9]*/*.mcap)
+  camera_exports=("$MCAP"/*_camera_*.mp4 "$MCAP"/part[0-9]*/**/*_camera_*.mp4)
+  shopt -u nullglob globstar
+  if [[ "$INPUT_KIND" == mcap ]] || (( ${#mcap_files[@]} && ! ${#camera_exports[@]} )); then
+    if (( ${#mcap_files[@]} != 1 )); then
+      echo "Expected one MCAP in $MCAP, found ${#mcap_files[@]}; select a part directory or .mcap file." >&2
+      exit 2
+    fi
+    MCAP="${mcap_files[0]}"
+    INPUT_KIND=mcap
+  fi
+fi
+CALIBRATION_YAML=""
+if [[ "$INPUT_KIND" == mcap ]]; then
+  [[ -f "$MCAP" ]] || { echo "MCAP does not exist: $MCAP" >&2; exit 2; }
+  input_info="$(run_python - "$MCAP" "$CALIBRATION_JSON" <<'PYPROBE'
+from pathlib import Path
+import sys
+from normalize_orbbec_multiview_mcap import mcap_input_kind
+from normalize_orbbec_ego4_session import recording_metadata_root, unique_file
+
+source = Path(sys.argv[1]).resolve()
+kind = mcap_input_kind(source)
+print(kind)
+if kind == "orbbec_mcap" and not sys.argv[2]:
+    print(unique_file(recording_metadata_root(source.parent), "_calibration_camera.yaml"))
+PYPROBE
+)"
+  mapfile -t input_fields <<< "$input_info"
+  INPUT_KIND="${input_fields[0]}"
+  CALIBRATION_YAML="${input_fields[1]:-}"
+fi
+if [[ -n "$CALIBRATION_JSON" && "$INPUT_KIND" == mcap ]]; then
+  echo "--calibration-json requires an Orbbec input" >&2; exit 2
+fi
 [[ "$SHARED_STEPS" =~ ^[1-9][0-9]*$ && "$SHARED_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
   echo "Shared steps/batch size must be positive integers" >&2; exit 2;
 }
@@ -236,13 +291,16 @@ if ((RUN_LEGACY_BRANCH && ORIGINAL_VIDEO_ENABLED)) && [[ -z "${EGO_WILOR_UNDISTO
   exit 2
 fi
 
-if [[ "$INPUT_KIND" == "session" ]]; then
+if [[ "$INPUT_KIND" != mcap ]]; then
   if ((CAMERAS_EXPLICIT == 0)); then CAMERAS=(camera0 camera1 camera2 camera3); fi
   if ((REFERENCE_EXPLICIT == 0)); then REFERENCE_CAMERA="camera0"; fi
-  if [[ "${CAMERAS[*]}" != "camera0 camera1 camera2 camera3" ]]; then
+  if [[ "$INPUT_KIND" == session && "${CAMERAS[*]}" != "camera0 camera1 camera2 camera3" ]]; then
     echo "EGO4 MP4 exports require camera0 camera1 camera2 camera3 in calibration order" >&2
     exit 2
   fi
+  for camera in "${CAMERAS[@]}"; do
+    [[ "$camera" =~ ^camera[0-3]$ ]] || { echo "Unknown EGO4 camera: $camera" >&2; exit 2; }
+  done
 fi
 
 case "$GPU_PROFILE" in
@@ -268,10 +326,6 @@ case "$GPU_PROFILE" in
     ;;
 esac
 
-if [[ -z "$MCAP" || -z "$OUTPUT" ]]; then
-  usage >&2
-  exit 2
-fi
 if ((${#CAMERAS[@]} < 2)); then
   echo "at least two cameras are required" >&2
   exit 2
@@ -298,7 +352,7 @@ done
   echo "reference camera is not in the selected camera set: $REFERENCE_CAMERA" >&2
   exit 2
 }
-if [[ "$INPUT_KIND" == "session" && "${CAMERA_SEEN[camera1]:-}" == 1 && "${CAMERA_SEEN[camera0]:-}" == 1 ]]; then
+if [[ "$INPUT_KIND" != mcap && "${CAMERA_SEEN[camera1]:-}" == 1 && "${CAMERA_SEEN[camera0]:-}" == 1 ]]; then
   ANCHOR_CAMERAS=(camera0 camera1)
   ANATOMY_PROTECTED_CAMERAS=(camera0 camera1)
 elif [[ "${CAMERA_SEEN[camera0]:-}" == 1 && "${CAMERA_SEEN[camera5]:-}" == 1 ]]; then
@@ -318,8 +372,6 @@ else
 fi
 if [[ "$INPUT_KIND" == "session" ]]; then
   [[ -d "$MCAP" ]] || { echo "EGO4 session does not exist: $MCAP" >&2; exit 2; }
-else
-  [[ -f "$MCAP" ]] || { echo "MCAP does not exist: $MCAP" >&2; exit 2; }
 fi
 if [[ -n "$EXTERNAL_BOXES" ]]; then
   [[ "$POSE_BACKEND" != gem ]] || { echo "--external-boxes is currently a WiLoR/FAH option" >&2; exit 2; }
@@ -442,6 +494,9 @@ CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
 export EGO_WILOR_EXTERNAL_BOXES="$EXTERNAL_BOXES"
 export EGO_WILOR_CHECKPOINT="$WILOR_CHECKPOINT"
 export EGO_WILOR_ADAPTER="$WILOR_ADAPTER"
+export EGO_SESSION_CALIBRATION_JSON="$CALIBRATION_JSON"
+export EGO_ORBBEC_MCAP_CALIBRATION_YAML="$CALIBRATION_YAML"
+export EGO_MULTIVIEW_INPUT_KIND="$INPUT_KIND"
 CAMERA_CONFIDENCE_ARGS=()
 for CAMERA in "${CAMERAS[@]}"; do
   case "$CAMERA" in
@@ -451,13 +506,6 @@ for CAMERA in "${CAMERAS[@]}"; do
   esac
   CAMERA_CONFIDENCE_ARGS+=(--camera-confidence "${CAMERA}=${CONFIDENCE}")
 done
-
-run_python() {
-  conda run --no-capture-output -n "$CONDA_ENV" \
-    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/python_deps/wilor_runtime:$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" \
-    TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
-    python "$@"
-}
 
 run_sam3_python() {
   conda run --no-capture-output -n "$SAM3_CONDA_ENV" \
@@ -594,9 +642,18 @@ config = {
 }
 if source.is_dir():
     config["session"] = config.pop("mcap")
+if os.environ["EGO_MULTIVIEW_INPUT_KIND"] == "orbbec_mcap":
+    config["mcap"]["kind"] = "orbbec_ego_pro_mcap"
+if os.environ["EGO_MULTIVIEW_INPUT_KIND"] != "mcap":
     config["camera_confidences"] = {
         camera: config["camera_confidences"][camera] for camera in camera_ids
     }
+calibration_json = os.environ.get("EGO_SESSION_CALIBRATION_JSON")
+calibration_yaml = os.environ.get("EGO_ORBBEC_MCAP_CALIBRATION_YAML")
+if calibration_json or calibration_yaml:
+    import hashlib
+    calibration = Path(calibration_json or calibration_yaml).resolve()
+    config["calibration_override" if calibration_json else "calibration_yaml"] = {"path": str(calibration), "sha256": hashlib.sha256(calibration.read_bytes()).hexdigest()}
 if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "wilor" and any(
     os.environ.get(key) for key in ("EGO_WILOR_CHECKPOINT", "EGO_WILOR_ADAPTER", "EGO_WILOR_ROOT")
 ):
@@ -731,10 +788,17 @@ fi
 
 if [[ ! -f "$NORMALIZED/manifest.json" ]]; then
   echo "[multiview] normalize and synchronize ${CAMERAS[*]}"
-  if [[ "$INPUT_KIND" == "session" ]]; then
+  CALIBRATION_ARGS=()
+  if [[ -n "$CALIBRATION_JSON" ]]; then CALIBRATION_ARGS+=(--calibration-json "$CALIBRATION_JSON"); fi
+  if [[ "$INPUT_KIND" == orbbec_mcap ]]; then
+    if [[ -n "$CALIBRATION_YAML" ]]; then CALIBRATION_ARGS+=(--calibration-yaml "$CALIBRATION_YAML"); fi
+    run_python "$ROOT/scripts/normalize_orbbec_multiview_mcap.py" \
+      --input "$MCAP" --output "$NORMALIZED" --cameras "${CAMERAS[@]}" \
+      --reference-camera "$REFERENCE_CAMERA" --max-delta-us 1500 --max-frames "$MAX_FRAMES" "${CALIBRATION_ARGS[@]}"
+  elif [[ "$INPUT_KIND" == "session" ]]; then
     run_python "$ROOT/scripts/normalize_orbbec_ego4_session.py" \
       --session "$MCAP" --output "$NORMALIZED" \
-      --reference-camera "$REFERENCE_CAMERA" --max-delta-us 1500 --max-frames "$MAX_FRAMES"
+      --reference-camera "$REFERENCE_CAMERA" --max-delta-us 1500 --max-frames "$MAX_FRAMES" "${CALIBRATION_ARGS[@]}"
   else
     run_python "$ROOT/scripts/normalize_multiview_recording.py" \
       --input "$MCAP" --output "$NORMALIZED" \
@@ -872,7 +936,7 @@ fi
 if ((RUN_LEGACY_BRANCH)) && [[ ! -f "$FUSION/summary.json" ]]; then
   if [[ -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
     echo "[multiview] fuse calibrated undistorted pinhole rays with RANSAC"
-  elif [[ "$INPUT_KIND" == "session" ]]; then
+  elif [[ "$INPUT_KIND" != mcap ]]; then
     echo "[multiview] fuse calibrated KB rays with RANSAC"
   else
     echo "[multiview] fuse native Double-Sphere rays with RANSAC"
