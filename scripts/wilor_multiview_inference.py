@@ -22,6 +22,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 import wilor_inference as base  # noqa: E402
 from ego_data.dataset import SequentialVideoReader  # noqa: E402
+from ego_hand_inference.ego_data.calibration import CameraCalibration  # noqa: E402
+from wilor_physical_inference import prepare_physical_batch, physical_camera_outputs  # noqa: E402
 from wilor.datasets.utils import (  # noqa: E402
     convert_cvimg_to_tensor,
     expand_to_aspect_ratio,
@@ -34,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--checkpoint", type=Path, default=PROJECT_ROOT / "models/wilor/wilor_final.ckpt")
+    parser.add_argument("--adapter", type=Path, help="trainable/LoRA weights applied after --checkpoint")
     parser.add_argument("--model-config", type=Path, default=PROJECT_ROOT / "models/wilor/model_config.yaml")
     parser.add_argument("--detector", type=Path, default=PROJECT_ROOT / "models/wilor/detector.pt")
     parser.add_argument(
@@ -45,6 +48,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--mano-model-dir", type=Path, default=PROJECT_ROOT / "models/mano")
+    parser.add_argument(
+        "--save-mano-params", action="store_true",
+        help="save canonical MANO rotations/shape for shared multiview fitting (no vertex archive)",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
@@ -144,7 +151,10 @@ def _load_external_boxes(
                 row = json.loads(line)
                 if "sync_index" not in row:
                     continue
-                by_sync[int(row["sync_index"])] = row
+                sync_index = int(row["sync_index"])
+                if sync_index in by_sync:
+                    raise ValueError(f"external proposals for {camera} duplicate sync_index {sync_index}")
+                by_sync[sync_index] = row
         missing = [
             int(row["sync_index"]) for row in sync_rows
             if int(row["sync_index"]) not in by_sync
@@ -154,6 +164,14 @@ def _load_external_boxes(
                 f"external proposals for {camera} do not cover "
                 f"{len(missing)} synchronized frames (first={missing[:3]})"
             )
+        for sync in sync_rows:
+            row = by_sync[int(sync["sync_index"])]
+            if ("source_frame_index" in row
+                    and int(row["source_frame_index"]) != int(sync[f"{camera}_frame_index"])):
+                raise ValueError(f"external proposals for {camera} have a source frame mismatch")
+            if ("timestamp_ns" in row
+                    and int(row["timestamp_ns"]) != int(sync[f"{camera}_timestamp_ns"])):
+                raise ValueError(f"external proposals for {camera} have a timestamp mismatch")
         result[camera] = [by_sync[int(row["sync_index"])] for row in sync_rows]
     return result
 
@@ -171,6 +189,8 @@ def infer_dual(
     frame, detector, model, model_cfg, device, confidence: float,
     iou: float, rescale_factor: float, batch_size: int,
     external_boxes: dict[str, Any] | None = None,
+    save_mano_params: bool = False,
+    calibration=None,
 ) -> list[dict[str, Any]]:
     import torch
 
@@ -197,6 +217,11 @@ def infer_dual(
     records: list[dict[str, Any] | None] = [None] * len(dataset)
     for batch in loader:
         batch = base.recursive_to(batch, device)
+        physical = getattr(model, "physical_camera_enabled", False)
+        if physical:
+            indices = batch["personid"].detach().cpu().numpy()
+            prepare_physical_batch(batch, hypothesis_boxes[indices], calibration,
+                                   model.physical_camera_head.camera_model)
         with torch.inference_mode():
             result = model(batch)
         multiplier = 2 * batch["right"] - 1
@@ -210,6 +235,8 @@ def infer_dual(
             pred_cam, batch["box_center"].float(), batch["box_size"].float(),
             image_size, focal_length,
         ).detach().cpu().numpy()
+        if physical:
+            camera_full, physical_pixels = physical_camera_outputs(result, batch, calibration)
         for index in range(batch["img"].shape[0]):
             hypothesis_index = int(batch["personid"][index].item())
             detection_index = int(source_indices[hypothesis_index])
@@ -222,6 +249,8 @@ def infer_dual(
                 joints3d, camera, focal_length,
                 image_size[index].detach().cpu().numpy(),
             )
+            if physical:
+                joints2d = physical_pixels[index]
             records[hypothesis_index] = {
                 "detection_index": detection_index,
                 "hypothesis_index": hypothesis_index,
@@ -237,6 +266,12 @@ def infer_dual(
                 "camera_translation": camera.tolist(),
                 "joints_2d": joints2d.tolist(),
             }
+            if save_mano_params:
+                records[hypothesis_index]["joints_3d_camera_relative"] = joints3d.tolist()
+                records[hypothesis_index]["mano"] = {
+                    key: value[index].detach().float().cpu().tolist()
+                    for key, value in result["pred_mano_params"].items()
+                }
     return [record for record in records if record is not None]
 
 
@@ -472,6 +507,7 @@ def _infer_prepared_batched(
     runtime_stats: dict[str, int] | None = None,
     full_output: bool = False,
     include_vertices: bool = False,
+    calibration=None,
 ) -> list[list[dict[str, Any]]]:
     """Run WiLoR on crops that may have been prepared beside a prior batch."""
     import torch
@@ -501,6 +537,12 @@ def _infer_prepared_batched(
                 )
                 for key, value in batch.items()
             }
+            physical = getattr(model, "physical_camera_enabled", False)
+            if physical:
+                boxes = [states[int(fi)]["boxes"][states[int(fi)]["source_indices"][int(hi)]]
+                         for fi, hi in zip(frame_indices, hypothesis_indices)]
+                prepare_physical_batch(batch, boxes, calibration,
+                                       model.physical_camera_head.camera_model)
             with torch.inference_mode(), torch.autocast(
                 device_type="cuda", dtype=torch.float16,
             ):
@@ -542,6 +584,8 @@ def _infer_prepared_batched(
         rights = batch["right"].detach().float().cpu().numpy()
         image_sizes = image_size.detach().cpu().numpy()
         cameras = camera_full.detach().float().cpu().numpy()
+        if physical:
+            cameras, physical_pixels = physical_camera_outputs(result, batch, calibration)
         joints = result["pred_keypoints_3d"].detach().float().cpu().numpy()
         joints[:, :, 0] *= (2 * rights - 1)[:, None]
         if full_output:
@@ -561,6 +605,8 @@ def _infer_prepared_batched(
             joints2d = base.project_points(
                 joints[index], cameras[index], focal_length, image_sizes[index],
             )
+            if physical:
+                joints2d = physical_pixels[index]
             record = {
                 "detection_index": detection_index,
                 "hypothesis_index": int(hypothesis_index),
@@ -600,6 +646,8 @@ def infer_dual_batched(
     preprocess_executor: ThreadPoolExecutor | None = None,
     runtime_stats: dict[str, int] | None = None,
     external_boxes: list[dict[str, Any]] | None = None,
+    save_mano_params: bool = False,
+    calibration=None,
 ) -> list[list[dict[str, Any]]]:
     """Run a complete detector/crop/WiLoR batch without pipeline scheduling."""
     prepared = _prepare_dual_batched(
@@ -608,7 +656,9 @@ def infer_dual_batched(
         external_boxes,
     )
     return _infer_prepared_batched(
-        prepared, model, model_cfg, device, batch_size, runtime_stats
+        prepared, model, model_cfg, device, batch_size, runtime_stats,
+        full_output=save_mano_params,
+        calibration=calibration,
     )
 
 
@@ -705,7 +755,7 @@ def main() -> int:
         flush=True,
     )
     model, model_cfg = base.load_wilor_model(
-        args.checkpoint, args.model_config, args.mano_model_dir
+        args.checkpoint, args.model_config, args.mano_model_dir, adapter=args.adapter
     )
     model = model.to(device).eval()
     if accelerated:
@@ -738,6 +788,8 @@ def main() -> int:
     inference_started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=preprocess_workers) as preprocess_executor:
         for camera in cameras:
+            calibration = (CameraCalibration.load(dataset / "calibration" / f"{camera}.json")
+                           if getattr(model, "physical_camera_enabled", False) else None)
             camera_root = output / camera
             camera_root.mkdir()
             prediction_path = camera_root / "predictions.jsonl"
@@ -766,6 +818,8 @@ def main() -> int:
                                     external_boxes=external_by_camera[camera][
                                         chunk_start:chunk_start + len(frames)
                                     ] if external_by_camera is not None else None,
+                                    save_mano_params=args.save_mano_params,
+                                    calibration=calibration,
                                 ),
                             )
                             for chunk_start, chunk, frames
@@ -786,6 +840,8 @@ def main() -> int:
                                         args.batch_size,
                                         external_boxes=external_by_camera[camera][ordinal]
                                         if external_by_camera is not None else None,
+                                        save_mano_params=args.save_mano_params,
+                                        calibration=calibration,
                                     )
                                     for ordinal, frame in enumerate(
                                         frames, start=chunk_start
@@ -858,6 +914,14 @@ def main() -> int:
         "schema_version": 1,
         "stage": "wilor_multiview_dual_hypothesis",
         "dataset": str(dataset),
+        "model": {
+            "checkpoint": str(args.checkpoint.resolve()),
+            "adapter": str(args.adapter.resolve()) if args.adapter else None,
+            "wilor_root": str(base.WILOR_ROOT),
+            "detector": str(args.detector.resolve()),
+            "camera_model": (model.physical_camera_head.camera_model
+                             if getattr(model, "physical_camera_enabled", False) else "virtual_perspective"),
+        },
         "external_boxes": (
             str(args.external_boxes.resolve())
             if args.external_boxes is not None else None
@@ -865,6 +929,7 @@ def main() -> int:
         "camera_ids": list(cameras),
         "frame_count": len(rows),
         "hypotheses_per_detection": 2,
+        "save_mano_params": args.save_mano_params,
         "gpu_profile": args.gpu_profile,
         "frame_batch_size": frame_batch_size,
         "hypothesis_batch_size": args.batch_size,

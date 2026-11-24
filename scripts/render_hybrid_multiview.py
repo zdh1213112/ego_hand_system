@@ -20,8 +20,9 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ego_data.calibration import CameraCalibration
+from ego_hand_inference.ego_data.calibration import CameraCalibration
 from ego_data.dataset import SequentialVideoReader
+from multiview_original_projection import OriginalVideoProjection
 from render_multiview_wilor import (
     _create_video_writer,
     _draw_final_2d_fallback,
@@ -37,8 +38,26 @@ from render_native_2d_multiview import _select_camera_tracks, _smooth_track
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path)
+    parser.add_argument(
+        "--original-dataset", type=Path,
+        help="display on the corresponding raw normalized videos; keep tracking/trust in --dataset coordinates",
+    )
     parser.add_argument("--fusion", required=True, type=Path)
     parser.add_argument("--predictions", required=True, type=Path)
+    parser.add_argument(
+        "--gem-mesh-predictions", type=Path,
+        help="also overlay the selected per-camera SOMA mesh from camera*/gem_pose.pt",
+    )
+    parser.add_argument(
+        "--shared-mano-mesh", type=Path,
+        help="overlay the same shared MANO mesh as the shared video; keep the legacy skeleton unchanged",
+    )
+    parser.add_argument('--wilor-native-mesh', action='store_true', help='restore each camera original WiLoR mesh from saved MANO parameters')
+    parser.add_argument('--wilor-native-predictions', type=Path, help='original WiLoR predictions if skeleton predictions have been assisted')
+    parser.add_argument('--native-mano-model-dir', type=Path, default=Path(__file__).resolve().parents[1] / 'models/mano')
+    parser.add_argument('--native-model-config', type=Path, default=Path(__file__).resolve().parents[1] / 'models/wilor/model_config.yaml')
+    parser.add_argument('--native-mesh-device', default='cuda')
+    parser.add_argument('--fah-mesh-predictions', type=Path, help='overlay original per-camera FAH MANO meshes')
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cameras", nargs="+", default=None)
     parser.add_argument("--columns", type=int, default=0)
@@ -165,6 +184,15 @@ def main() -> int:
         raise ValueError("joint residual must be positive and minimum fused run at least one")
     if args.smoothing_radius < 0 or args.max_hold_frames < 0:
         raise ValueError("smoothing radius and hold frames must be non-negative")
+    if args.gem_mesh_predictions is not None and args.original_dataset is not None:
+        raise ValueError("GEM mesh overlays currently require the unchanged inference images")
+    if args.shared_mano_mesh is not None and (args.gem_mesh_predictions is not None or args.original_dataset is not None):
+        raise ValueError("shared MANO mesh requires its fitting dataset and cannot be combined with another mesh overlay")
+    if args.wilor_native_mesh and any(value is not None for value in (args.shared_mano_mesh, args.gem_mesh_predictions, args.original_dataset)):
+        raise ValueError('native WiLoR mesh cannot be combined with another mesh or another image coordinate system')
+    if args.fah_mesh_predictions is not None and (args.wilor_native_mesh or any(value is not None for value in
+            (args.shared_mano_mesh, args.gem_mesh_predictions, args.original_dataset))):
+        raise ValueError('FAH meshes require the original inference images and cannot be combined with another mesh')
     dataset = args.dataset.resolve()
     fusion = args.fusion.resolve()
     predictions = args.predictions.resolve()
@@ -173,15 +201,51 @@ def main() -> int:
     cameras = tuple(dict.fromkeys(args.cameras or available))
     if sorted(set(cameras) - set(available)):
         raise ValueError("selected cameras are not present in the dataset")
+    original_projection = (
+        OriginalVideoProjection(dataset, args.original_dataset, cameras)
+        if args.original_dataset is not None else None
+    )
+    display_dataset = original_projection.root if original_projection else dataset
+    display_manifest = original_projection.manifest if original_projection else manifest
     with (dataset / "multiview_frames.csv").open("r", encoding="utf-8", newline="") as stream:
         frame_rows = list(csv.DictReader(stream))
     frame_rows = frame_rows[: args.max_frames or None]
     frame_ids = [int(row["sync_index"]) for row in frame_rows]
+    shared_mesh = None
+    if args.shared_mano_mesh is not None:
+        from ego_hand_inference.shared_mesh_overlay import SharedManoMeshOverlay
+        shared_mesh = SharedManoMeshOverlay(args.shared_mano_mesh, dataset, cameras, frame_ids)
     accepted = _load_jsonl(fusion / "accepted.jsonl")
     prediction_rows = {
         camera: _load_jsonl(predictions / camera / "predictions.jsonl")
         for camera in cameras
     }
+    mesh_overlay = None
+    if args.gem_mesh_predictions is not None:
+        from render_gem_multiview import GemMeshOverlay, MESH_STYLE
+        mesh_overlay = GemMeshOverlay(args.gem_mesh_predictions, cameras)
+    elif args.wilor_native_mesh or args.fah_mesh_predictions is not None:
+        native_root = (args.fah_mesh_predictions or args.wilor_native_predictions or predictions).resolve()
+        native_rows = prediction_rows if native_root == predictions else {
+            camera: _load_jsonl(native_root / camera / 'predictions.jsonl') for camera in cameras}
+        for row in frame_rows:
+            for camera in cameras:
+                native = native_rows[camera][int(row['sync_index'])]
+                if (int(native['source_frame_index']) != int(row[f'{camera}_frame_index'])
+                        or int(native['timestamp_ns']) != int(row[f'{camera}_timestamp_ns'])):
+                    raise ValueError('native mesh frame/timestamp differs from displayed video')
+        if args.fah_mesh_predictions is not None:
+            from fah_native_mesh_overlay import FahNativeMeshOverlay
+            mesh_overlay = FahNativeMeshOverlay(native_root, native_rows)
+        else:
+            from wilor_native_mesh_overlay import WilorNativeMeshOverlay
+            mesh_overlay = WilorNativeMeshOverlay(native_root, native_rows, manifest['image_size'],
+                args.native_mano_model_dir, args.native_model_config, args.native_mesh_device)
+    if mesh_overlay:
+        for records in prediction_rows.values():
+            for record in records.values():
+                for hand in record.get("hands", []):
+                    hand["mesh_source_frame_index"] = int(record["source_frame_index"])
     native_tracks: dict[tuple[str, int], list[dict[str, Any] | None]] = {}
     for camera in cameras:
         selected = _select_camera_tracks(
@@ -222,6 +286,24 @@ def main() -> int:
             trusted_poses[camera, side] = [
                 (stable[index], points) for index, (_, points) in enumerate(samples)
             ]
+    if original_projection:
+        # All decisions above were made with the inference calibration/pixels.
+        # Convert only the selected display tracks and trusted 3D projections.
+        for camera in cameras:
+            for side in (0, 1):
+                native_tracks[camera, side] = [
+                    original_projection.native_view(camera, item)
+                    for item in native_tracks[camera, side]
+                ]
+                converted = []
+                for index, (trusted, points) in enumerate(trusted_poses[camera, side]):
+                    if trusted:
+                        hand = next(item for item in accepted[frame_ids[index]]["hands"]
+                                    if int(item.get("side", -1)) == side)
+                        points = original_projection.fused_points(camera, hand["joints_base_m"], points)
+                        trusted = int(np.isfinite(points).all(axis=1).sum()) >= 5
+                    converted.append((trusted, points))
+                trusted_poses[camera, side] = converted
     if args.columns:
         columns = int(args.columns)
     elif len(cameras) == 6:
@@ -231,7 +313,7 @@ def main() -> int:
     else:
         columns = max(1, int(np.ceil(np.sqrt(len(cameras)))))
     row_count = int(np.ceil(len(cameras) / columns))
-    image_size = tuple(manifest["image_size"])
+    image_size = tuple(display_manifest["image_size"])
     tile_height = int(round(args.tile_width * image_size[1] / image_size[0]))
     frame_size = (args.tile_width * columns, tile_height * row_count)
     output = args.output.resolve()
@@ -240,23 +322,30 @@ def main() -> int:
     timestamps = np.asarray([int(row["reference_timestamp_ns"]) for row in frame_rows], dtype=np.int64)
     delta = np.diff(timestamps).astype(np.float64) / 1e9
     fps = float(1.0 / np.median(delta[delta > 0])) if np.any(delta > 0) else 30.0
-    writer, codec = _create_video_writer(output, fps, frame_size, args.video_codec)
+    temporary = output.with_name(output.stem + ".partial.mp4")
+    writer, codec = _create_video_writer(temporary, fps, frame_size, args.video_codec)
     readers = {
         camera: SequentialVideoReader(
-            dataset / "cameras" / camera / manifest["storage"]["video_filename"], image_size,
+            display_dataset / "cameras" / camera / display_manifest["storage"]["video_filename"], image_size,
         )
         for camera in cameras
     }
     fused_count = 0
+    fused_hand_count = 0
     native_count = 0
     start = time.perf_counter()
+    audit_path = output.with_suffix('.mesh_projections.jsonl')
+    audit_stream = audit_path.open('w') if shared_mesh else None
     try:
         for index, row in enumerate(frame_rows):
             sync_index = frame_ids[index]
             result = accepted.get(sync_index)
             tiles = []
+            mesh_audit = {'sync_index': sync_index, 'cameras': {}}
             for camera in cameras:
                 image = readers[camera].read(int(row[f"{camera}_frame_index"]))
+                if shared_mesh:
+                    mesh_audit['cameras'][camera] = shared_mesh.draw(image, sync_index, calibrations[camera])
                 used_fused = False
                 used_native = False
                 drawn_sides: set[int] = set()
@@ -268,14 +357,21 @@ def main() -> int:
                         trusted, projected = trusted_poses[camera, side][index]
                         if trusted:
                             final_view = dict(hand.get("views", {}).get(camera, {}))
+                            if original_projection:
+                                final_view = original_projection.view(camera, final_view)
+                            if mesh_overlay:
+                                mesh_overlay.draw(image, camera, int(row[f"{camera}_frame_index"]), final_view, side)
                             _draw_final_detection(image, final_view, side, "refined")
                             _draw_refined_hand(image, projected, side, 0, final_only=True)
+                            fused_hand_count += 1
                             used_fused = True
                             drawn_sides.add(side)
                         else:
                             native_side = 1 - side if args.physical_side_swap else side
                             item = native_tracks[(camera, native_side)][index]
                             if item is not None and side not in drawn_sides:
+                                if mesh_overlay:
+                                    mesh_overlay.draw(image, camera, int(row[f"{camera}_frame_index"]), item, side)
                                 _draw_final_2d_fallback(image, item, side)
                                 native_count += 1
                                 used_native = True
@@ -291,6 +387,8 @@ def main() -> int:
                         native_side = 1 - side if args.physical_side_swap else side
                         item = native_tracks[(camera, native_side)][index]
                         if item is not None:
+                            if mesh_overlay:
+                                mesh_overlay.draw(image, camera, int(row[f"{camera}_frame_index"]), item, side)
                             _draw_final_2d_fallback(image, item, side)
                             native_count += 1
                             used_native = True
@@ -302,6 +400,8 @@ def main() -> int:
                         item = native_tracks[(camera, native_side)][index]
                         if item is not None:
                             display_side = 1 - native_side if args.physical_side_swap else native_side
+                            if mesh_overlay:
+                                mesh_overlay.draw(image, camera, int(row[f"{camera}_frame_index"]), item, display_side)
                             _draw_final_2d_fallback(image, item, display_side)
                             native_count += 1
                             used_native = True
@@ -311,6 +411,16 @@ def main() -> int:
                     else "FUSED3D" if used_fused
                     else "NATIVE2D"
                 )
+                if original_projection:
+                    state = "RAW<-UNDISTORTED " + (state if used_fused or used_native else "NO_POSE")
+                elif args.wilor_native_mesh:
+                    state = 'WILOR LEGACY ' + state + ' | NATIVE MESH'
+                elif args.fah_mesh_predictions is not None:
+                    state = 'FAH ' + state + ' | NATIVE MESH'
+                elif mesh_overlay:
+                    state = "GEM-X | " + (state if used_fused or used_native else "NO_POSE") + " | MESH"
+                elif shared_mesh:
+                    state = "LEGACY " + state + " | SHARED MANO MESH"
                 cv2.putText(
                     image, f"{camera} | {state} | frame {sync_index}",
                     (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
@@ -323,6 +433,8 @@ def main() -> int:
                 np.hstack(tiles[offset:offset + columns])
                 for offset in range(0, len(tiles), columns)
             ]))
+            if audit_stream:
+                audit_stream.write(json.dumps(mesh_audit, allow_nan=False) + '\n')
             if (index + 1) % 100 == 0 or index + 1 == len(frame_rows):
                 elapsed = time.perf_counter() - start
                 print(
@@ -333,6 +445,9 @@ def main() -> int:
         for reader in readers.values():
             reader.close()
         writer.release()
+        if audit_stream:
+            audit_stream.close()
+    temporary.replace(output)
     summary = {
         "schema_version": 1,
         "stage": "trusted_fused_3d_native_2d_fallback_multiview_review",
@@ -350,9 +465,48 @@ def main() -> int:
             "max_stereo_difference_mm": float(args.max_stereo_difference_mm),
         },
         "fused_camera_tiles": int(fused_count),
+        "fused_camera_hand_tiles": int(fused_hand_count),
         "native_2d_camera_hand_tiles": int(native_count),
         "codec": codec, "output": str(output),
     }
+    if original_projection:
+        summary["original_display"] = {
+            "dataset": str(display_dataset),
+            "image_size": list(image_size),
+            "projection": "original KB/DS calibration; original optical axes",
+            "tracking_and_trust_domain": "inference dataset pixels (before display conversion)",
+            "native_2d": "pinhole rays reprojected through original calibration",
+            "boxes": "axis-aligned envelope of sampled warped box perimeter",
+            "out_of_view_joints": "hidden, including predictions outside the inference image",
+        }
+    if args.gem_mesh_predictions is not None:
+        summary["mesh"] = {
+            "model": "GEM-X SOMA", "predictions": str(args.gem_mesh_predictions.resolve()),
+            "geometry": "per-camera reconstruction, not multiview-fused geometry",
+            "projection": "same pinhole approximation as GEM inference; original images unchanged",
+            "selection": "same detection and hypothesis as the displayed final skeleton",
+            **MESH_STYLE, **mesh_overlay.stats,
+        }
+    if args.wilor_native_mesh or args.fah_mesh_predictions is not None:
+        summary['mesh'] = mesh_overlay.summary()
+        summary['skeleton_and_mesh_share_model'] = False
+        summary['shared_multiview_mesh'] = False
+        summary['skeleton_mode'] = 'original legacy hybrid with native 2D fallback'
+        summary['raw_images_without_undistortion'] = 'undistortion' not in manifest
+        summary['video_size'] = list(frame_size)
+        summary['tile_width'] = args.tile_width
+        native_audit = output.with_suffix('.native_mesh.jsonl')
+        with native_audit.open('w') as stream:
+            for entry in mesh_overlay.audits:
+                stream.write(json.dumps(entry) + '\n')
+        summary['native_mesh_audit'] = str(native_audit)
+    if shared_mesh:
+        summary['mesh'] = shared_mesh.summary()
+        summary['mesh_projections'] = str(audit_path)
+        summary['skeleton_and_mesh_share_model'] = False
+        summary['skeleton_mode'] = 'legacy hybrid with native 2D fallback'
+        summary['raw_images_without_undistortion'] = 'undistortion' not in manifest
+        summary['tile_width'] = args.tile_width
     output.with_suffix(".json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"Hybrid multiview video: {output}")
     return 0

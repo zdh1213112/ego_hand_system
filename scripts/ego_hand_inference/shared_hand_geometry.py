@@ -8,6 +8,9 @@ from ego_hand_inference.camera_models import project_points, unproject_points
 from ego_hand_inference.camera_models.kb import theta_limit
 
 
+ASSOCIATION_VERSION = 'wrist_gated_incremental_consensus_v2'
+
+
 def project_base(camera, points):
     xyz = (np.asarray(points) - camera.T_base_camera[:3, 3]) @ camera.T_base_camera[:3, :3]
     pixels, valid = project_points(camera, xyz)
@@ -59,11 +62,58 @@ def _residual(points, observation, calibrations):
     return errors
 
 
+def _consistent_geometry(selected, calibrations, threshold_px, min_angle_deg):
+    """Accept a view set only if its triangulation preserves wrist consensus."""
+    values = list(selected.values())
+    points, angle, forward = intersect_observations(values)
+    errors = np.stack([_residual(points, observation, calibrations) for observation in values])
+    good = forward & (angle >= min_angle_deg) & ((errors <= threshold_px).sum(axis=0) >= 2)
+    # A good median can hide one catastrophic wrist. Every participating view
+    # must support the root, which defines both hand identity and placement.
+    if good.sum() < 12 or not good[0] or np.any(errors[:, 0] > threshold_px):
+        return None
+    radius = np.linalg.norm(points[good] - points[0], axis=1).max()
+    median = float(np.median(errors[:, good]))
+    if (not .04 < radius < .40 or np.linalg.norm(points[0]) > 3.
+            or median > threshold_px or np.any(np.median(errors[:, good], axis=1) > threshold_px)):
+        return None
+    return points, angle, good, median
+
+
+def _association_audit(candidate, observations, calibrations, threshold_px):
+    excluded = []
+    for camera, options in observations.items():
+        if camera in candidate['selected']:
+            continue
+        alternatives = []
+        for observation in options:
+            if int(observation['hand']['is_right']) != candidate['side']:
+                continue
+            errors = _residual(candidate['points'], observation, calibrations)
+            median = float(np.median(errors[candidate['valid']]))
+            alternatives.append((median, observation, errors))
+        if not alternatives:
+            excluded.append({'camera': camera, 'reason': 'no_valid_hypothesis'})
+            continue
+        median, observation, errors = min(alternatives, key=lambda item: item[0])
+        hand = observation['hand']
+        reason = ('wrist_reprojection_outlier' if errors[0] > threshold_px else
+                  'joint_reprojection_outlier' if median > threshold_px else 'inconsistent_triangulation')
+        excluded.append({'camera': camera, 'detection_index': int(hand['detection_index']),
+                         'hypothesis_index': int(hand['hypothesis_index']), 'reason': reason,
+                         'wrist_px': float(errors[0]) if np.isfinite(errors[0]) else None,
+                         'median_px': median if np.isfinite(median) else None})
+    return {'version': ASSOCIATION_VERSION, 'wrist_threshold_px': float(threshold_px),
+            'reference_cameras': list(candidate['selected']), 'excluded_views': excluded}
+
+
 def associate_hands(records, calibrations, *, threshold_px=30.0, min_angle_deg=1.0, max_detections=3):
     """Associate one or two hands independently; sides are soft detector evidence.
 
     Both handedness hypotheses compete, but a detector box can belong to
     only one physical hand. Never require both hands to be visible together.
+    Extend each seed with one consistent view at a time; a rejected extension
+    must not destroy the valid subset that already reconstructs the hand.
     """
     observations = prepare_observations(records, calibrations, max_detections)
     candidates = {}
@@ -72,15 +122,11 @@ def associate_hands(records, calibrations, *, threshold_px=30.0, min_angle_deg=1
             side = int(a['hand']['is_right'])
             if side != int(b['hand']['is_right']):
                 continue
-            points, angle, forward = intersect_observations([a, b])
-            errors = np.stack([_residual(points, o, calibrations) for o in (a, b)])
-            good = forward & (angle >= min_angle_deg) & (errors.max(axis=0) <= threshold_px)
-            if good.sum() < 12 or not good[0]:
-                continue
-            radius = np.linalg.norm(points[good] - points[0], axis=1)
-            if not 0.04 < np.max(radius) < 0.40 or np.linalg.norm(points[0]) > 3.0:
-                continue
             selected = {first: a, second: b}
+            geometry = _consistent_geometry(selected, calibrations, threshold_px, min_angle_deg)
+            if geometry is None:
+                continue
+            points, angle, good, median = geometry
             for camera, options in observations.items():
                 if camera in selected:
                     continue
@@ -88,20 +134,18 @@ def associate_hands(records, calibrations, *, threshold_px=30.0, min_angle_deg=1
                 for observation in options:
                     if int(observation['hand']['is_right']) != side:
                         continue
-                    err = _residual(points, observation, calibrations)[good]
-                    if np.median(err) <= threshold_px and (err <= threshold_px * 1.5).sum() >= 10:
+                    errors = _residual(points, observation, calibrations)
+                    err = errors[good]
+                    if (errors[0] <= threshold_px and np.median(err) <= threshold_px
+                            and (err <= threshold_px * 1.5).sum() >= 10):
                         choices.append((float(np.median(err)), observation))
-                if choices:
-                    selected[camera] = min(choices, key=lambda item: item[0])[1]
-            points, angle, forward = intersect_observations(list(selected.values()))
-            errors = np.stack([_residual(points, o, calibrations) for o in selected.values()])
-            support = (errors <= threshold_px).sum(axis=0)
-            good = forward & (angle >= min_angle_deg) & (support >= 2)
-            if good.sum() < 12 or not good[0]:
-                continue
-            median = float(np.median(errors[:, good]))
-            if median > threshold_px:
-                continue
+                for _, observation in sorted(choices, key=lambda item: item[0]):
+                    trial = {**selected, camera: observation}
+                    geometry = _consistent_geometry(trial, calibrations, threshold_px, min_angle_deg)
+                    if geometry is not None:
+                        selected = trial
+                        points, angle, good, median = geometry
+                        break
             votes = [float(o['hand']['confidence']) * (1 if o['hand'].get('detector_is_right') == side else -1)
                      for o in selected.values()]
             score = 8 * len(selected) + good.sum() - median / 2 + 4 * sum(votes)
@@ -121,6 +165,8 @@ def associate_hands(records, calibrations, *, threshold_px=30.0, min_angle_deg=1
             continue
         chosen.append(candidate)
         used_boxes.update(boxes)
+    for candidate in chosen:
+        candidate['association'] = _association_audit(candidate, observations, calibrations, threshold_px)
     return chosen
 
 

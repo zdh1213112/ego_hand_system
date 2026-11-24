@@ -9,9 +9,9 @@ remuxes the streams losslessly, synchronizes their device timestamps, and
 marks calibration as unavailable instead of inventing extrinsics.  Raw 2-D
 WiLoR inference and the native 2-D renderer do not need calibration.
 
-If a separately measured calibration is available, ``--calibration-dir`` can
-point to a directory containing ``camera0.json`` ... ``camera3.json``; the
-files are copied into the normalized dataset and the manifest records them.
+Use ``--calibration-yaml`` for the recorder's camera calibration or
+``--calibration-json`` for an EGO4 calibration summary. The existing
+``--calibration-dir`` input accepts one normalized JSON file per camera.
 """
 
 from __future__ import annotations
@@ -36,15 +36,10 @@ from mcap_protobuf.decoder import DecoderFactory
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from ego_data.h264 import H264MatroskaWriter  # noqa: E402
+from normalize_orbbec_ego4_session import CAMERA_SOURCES, load_ego4_calibrations
 
 
-DEFAULT_TOPICS = {
-    "camera0": "/camera/left",
-    # Keep MCAP and four-MP4 exports in the same calibration ID order.
-    "camera1": "/camera/right",
-    "camera2": "/camera/right_side",
-    "camera3": "/camera/left_side",
-}
+DEFAULT_TOPICS = {camera: f"/camera/{stream}" for camera, (stream, _) in CAMERA_SOURCES.items()}
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,10 +62,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--width", type=int, default=0)
     parser.add_argument("--height", type=int, default=0)
-    parser.add_argument(
+    calibration = parser.add_mutually_exclusive_group()
+    calibration.add_argument(
         "--calibration-dir", type=Path, default=None,
         help="optional directory with camera*.json calibration files",
     )
+    calibration.add_argument("--calibration-yaml", type=Path, help="EGO recording camera calibration")
+    calibration.add_argument("--calibration-json", type=Path, help="explicit EGO4 camera_calibrations JSON")
     parser.add_argument(
         "--allow-truncated", action="store_true",
         help="keep complete messages if the MCAP ends in a partial record",
@@ -125,6 +123,15 @@ def _topic_map(cameras: tuple[str, ...], overrides: list[str]) -> dict[str, str]
     return topics
 
 
+def _metadata_path(source: Path) -> Path:
+    local = source.with_name(f"meta_{source.stem}.json")
+    if local.is_file():
+        return local
+    root = recording_metadata_root(source.parent)
+    stem = source.stem.removesuffix(f"_{source.parent.name}") if root != source.parent else source.stem
+    return root / f"meta_{stem}.json"
+
+
 def _image_size(args: argparse.Namespace, source: Path) -> tuple[int, int]:
     if (args.width, args.height) != (0, 0):
         if args.width <= 0 or args.height <= 0:
@@ -132,13 +139,8 @@ def _image_size(args: argparse.Namespace, source: Path) -> tuple[int, int]:
         return int(args.width), int(args.height)
     # The recorder writes this metadata beside the MCAP.  Keep the adapter
     # usable without metadata by falling back to the EGO Pro documented mode.
-    candidates = [
-        source.with_name(f"meta_{source.stem}.json"),
-        source.parent / f"meta_{source.stem}.json",
-    ]
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
+    candidate = _metadata_path(source)
+    if candidate.is_file():
         try:
             metadata = json.loads(candidate.read_text(encoding="utf-8"))
             streams = metadata.get("streams", {})
@@ -236,7 +238,19 @@ def normalize(args: argparse.Namespace) -> Path:
     if args.max_delta_us < 0 or args.max_frames < 0:
         raise ValueError("max-delta-us/max-frames must be non-negative")
     topics = _topic_map(cameras, args.camera_topic)
-    image_size = _image_size(args, source)
+    calibration_yaml = getattr(args, "calibration_yaml", None)
+    calibration_json = getattr(args, "calibration_json", None)
+    calibration_path = calibration_yaml or calibration_json
+    if calibration_path:
+        calibration_path = calibration_path.expanduser().resolve()
+        calibrations = load_ego4_calibrations(calibration_path, explicit_json=bool(calibration_json))
+        image_size = calibrations[args.reference_camera].image_size
+        if any(calibrations[c].image_size != image_size for c in cameras):
+            raise ValueError("selected cameras have different calibration image sizes")
+        if (args.width or args.height) and (args.width, args.height) != image_size:
+            raise ValueError(f"requested image size differs from calibration {image_size}")
+    else:
+        image_size = _image_size(args, source)
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -306,14 +320,28 @@ def normalize(args: argparse.Namespace) -> Path:
             ])
         _write_csv(temporary / "multiview_frames.csv", fields, synchronized)
 
-        calibration_available, calibration_hashes = _copy_calibration(
-            args.calibration_dir, temporary, cameras, image_size
-        )
+        if calibration_path:
+            calibration_dir = temporary / "calibration"
+            calibration_dir.mkdir()
+            calibration_hashes = {}
+            for camera in cameras:
+                path = calibration_dir / f"{camera}.json"
+                calibrations[camera].save(path)
+                calibration_hashes[camera] = sha256_file(path)
+            calibration_info = {
+                "available": True, "status": "source_yaml" if calibration_yaml else "explicit_json",
+                "path": str(calibration_path), "source_sha256": sha256_file(calibration_path),
+                "sha256": calibration_hashes,
+            }
+        else:
+            available, hashes = _copy_calibration(args.calibration_dir, temporary, cameras, image_size)
+            calibration_info = {"available": available, "status": "external_json" if available else "not_in_mcap",
+                                "sha256": hashes}
         deltas = [
             abs(float(row[f"{camera}_delta_us"]))
             for row in synchronized for camera in cameras if camera != args.reference_camera
         ]
-        source_meta = source.with_name(f"meta_{source.stem}.json")
+        source_meta = _metadata_path(source)
         if source_meta.is_file():
             shutil.copy2(source_meta, temporary / "source_meta.json")
         manifest = {
@@ -344,14 +372,10 @@ def normalize(args: argparse.Namespace) -> Path:
                 "abs_delta_us_p95": float(np.percentile(deltas, 95)) if deltas else 0.0,
                 "abs_delta_us_max": float(max(deltas)) if deltas else 0.0,
             },
-            "calibration": {
-                "available": calibration_available,
-                "status": "external_json" if calibration_available else "not_in_mcap",
-                "sha256": calibration_hashes,
-            },
+            "calibration": calibration_info,
             "coordinate_system": (
-                "external calibration coordinate system"
-                if calibration_available else
+                "Orbbec cam_0 optical reference frame; distances in metres" if calibration_yaml else
+                "external calibration coordinate system" if calibration_info["available"] else
                 "unknown; raw camera pixel coordinates only (no extrinsics in MCAP)"
             ),
         }

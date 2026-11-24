@@ -322,7 +322,7 @@ for MCAP in "${MCAPS[@]}"; do
   RECORD_OUTPUT="$OUTPUT_ROOT/$STEM"
   LOG_PATH="$OUTPUT_ROOT/${STEM}.log"
   STARTED="$(date +%s)"
-  CMD=("$SINGLE" --mcap "$MCAP" --output "$RECORD_OUTPUT")
+  CMD=("$SINGLE" --mcap "$MCAP" --output "$RECORD_OUTPUT" --wilor-mode "${EGO_WILOR_MODE:-legacy}")
   [[ -n "$CONDA_ENV" ]] && CMD+=(--conda-env "$CONDA_ENV")
   [[ -n "$DEVICE" ]] && CMD+=(--device "$DEVICE")
   [[ -n "$DETECTOR" ]] && CMD+=(--detector "$DETECTOR")

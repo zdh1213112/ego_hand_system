@@ -28,9 +28,12 @@
 | 四目共享 MANO 推理 | Orbbec 四路原图，跨视角关联、共享三维模型、四目视频与结果导出 | `scripts/run_hand_inference.sh` · [说明](docs/SHARED_HAND_INFERENCE_zh.md) |
 | 双目离线重建 | Orbbec，MediaPipe、WiLoR、三角化、稳定化及 MANO 拟合 | `scripts/run_offline.sh` · [完整操作](docs/ADVANCED_WORKFLOWS_zh.md#离线启动) |
 | Orbbec 四目融合 | KB 射线、多视角 WiLoR、RANSAC 与时序处理 | `scripts/run_multiview_wilor_experiment.sh` · [说明](docs/ADVANCED_WORKFLOWS_zh.md#四目多视角融合) |
+| GEM-X / FAH 多视角推理 | Orbbec 四目共享拟合、逐机位推理及视频 | [GEM-X 实验](docs/multiview_gem_experiment.md) · [FAH 实验](docs/multiview_fah_experiment.md) |
 | EGO + NOKOV 标签 | 原图对齐、双手 MANO 拟合、标签导出与验收 | `scripts/export_ego_nokov_labels.sh` · [命令清单](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) |
 | 实时跟踪与 VIO | Orbbec 实时手部、Basalt 轨迹及多模态联动 | [实时使用](docs/EGO_REALTIME.md) · [世界轨迹](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md) |
 | 标签检查与查看 | 数据集检查、投影验证与可视化 | [标签查看器](docs/WILOR_LABEL_VIEWER_zh.md) · [数据交接约定](docs/MANO_GLOVE_LABEL_HANDOFF_zh.md) |
+
+WiLoR 默认使用 `native-wrist`，在多视角确定的腕部位置上使用一个支持机位的原始手指姿态。实验入口 `scripts/run_multiview_wilor_experiment.sh` 支持 `--pose-policy shared-fit` 选择联合拟合的手姿，也可用 `--per-camera-video` 导出融合前四路骨架和网格。单视角与多视角的标注、投影与评分约定见[统一标签评估说明](docs/HAND_MODEL_EVALUATION_ZH.md)。
 
 四目共享推理的处理流程：
 
