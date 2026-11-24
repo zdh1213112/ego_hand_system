@@ -1,0 +1,4 @@
+# Linux x86_64, Python 3.11. The GEM package also pins Transformers and SOMA-X.
+torch==2.10.0
+torchvision==0.25.0
+gem @ https://codeload.github.com/NVlabs/GEM-X/tar.gz/4aef1452e5df171deff4f293c08e643eb450981e

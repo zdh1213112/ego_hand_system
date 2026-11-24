@@ -1,0 +1,7 @@
+# Linux x86_64, Python 3.11. CUDA wheels can also be preinstalled.
+torch==2.6.0
+torchvision==0.21.0
+timm==1.0.31
+numpy==1.26.4
+opencv-python==4.11.0.86
+fah @ https://codeload.github.com/noahcao/FAH/tar.gz/2b13dd9c7fc04ad173a76ab89beac9266d2d59ac

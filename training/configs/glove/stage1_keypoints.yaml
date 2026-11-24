@@ -1,0 +1,49 @@
+schema_version: 2
+
+experiment:
+  name: glove_stage1_keypoints
+
+paths:
+  dataset_root: datasets/wilor_training_labels_motion/dataset
+  checkpoint: pretrained_models/wilor_final.ckpt
+  model_config: pretrained_models/model_config.yaml
+  mano_path: mano_data/mano_v1_2
+  output: output/glove_stage1_keypoints
+  train_manifest: null
+  val_manifest: null
+  resume: null
+  init_adapter: null
+
+training:
+  max_steps: 1000
+  batch_size: 16
+  num_workers: 4
+  seed: 42
+  device: cuda:0
+  amp: true
+  max_train_samples: null
+
+optimization:
+  coarse_lr: 0.0001
+  refiner_lr: 0.00001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+
+checkpointing:
+  save_steps: 50
+
+validation:
+  val_steps: 50
+  max_batches: null
+  final_visualization: true
+  batch_size: 16
+  max_samples: null
+
+losses:
+  keypoints_2d: 0.01
+  keypoints_3d: 0.05
+  coarse_keypoints_2d: 0.005
+  coarse_keypoints_3d: 0.025
+  global_orient: 0.0
+  hand_pose: 0.0
+  betas: 0.0

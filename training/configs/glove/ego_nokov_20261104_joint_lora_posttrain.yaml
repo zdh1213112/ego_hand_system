@@ -1,0 +1,55 @@
+schema_version: 3
+experiment:
+  name: ego_nokov_20261104_joint_lora_posttrain
+paths:
+  dataset_root: ../work/20261104/wilor_training_195844_195732_cam01
+  checkpoint: pretrained_models/wilor_final.ckpt
+  model_config: pretrained_models/model_config.yaml
+  mano_path: mano_data/mano_v1_2
+  output: output/ego_nokov_20261104_joint_lora_posttrain
+  train_manifest: null
+  val_manifest: null
+  resume: null
+  init_weights: output/ego_nokov_20261104_joint_lora/best_trainable.pt
+data:
+  type: glove_camera
+  image_size: 256
+  rescale_factor: 2.0
+  npz_cache_size: 8
+recipe:
+  type: refiner_finetune
+  vit_tuning: null
+  lora: null
+training:
+  max_steps: 1000
+  batch_size: 4
+  num_workers: 4
+  seed: 42
+  device: cuda:0
+  amp: true
+  max_train_samples: null
+  gradient_accumulation_steps: 8
+optimization:
+  vit_lr: 0.0
+  pose_head_lr: 0.0
+  coarse_lr: 0.0001
+  refiner_lr: 1.0e-05
+  weight_decay: 0.0001
+  grad_clip: 1.0
+checkpointing:
+  save_steps: 50
+validation:
+  val_steps: 50
+  max_batches: null
+  batch_size: 4
+  max_samples: 32
+  final_visualization: true
+losses:
+  local_keypoints_3d: 0.0
+  keypoints_2d: 0.01
+  keypoints_3d: 0.05
+  coarse_keypoints_2d: 0.005
+  coarse_keypoints_3d: 0.025
+  global_orient: 0.001
+  hand_pose: 0.001
+  betas: 0.0005

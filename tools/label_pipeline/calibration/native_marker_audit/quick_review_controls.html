@@ -1,0 +1,17 @@
+<section class="box" id="human-review"><h2>你的逐帧复核（右手）</h2><p>每张对比图选一次即可；没有选择的保持“未复核”。这些是你的视觉判断，不会自动修改训练标签。</p><div id="decisions"><button data-verdict="candidate_better">优化更好</button><button data-verdict="baseline_better">基线更好</button><button data-verdict="similar">差不多</button><button data-verdict="uncertain">看不清／无法判断</button><button data-verdict="unreviewed">撤销本帧结论</button></div><p id="verdict-status"></p><textarea id="review-note" placeholder="可选备注，例如：拇指偏外、手腕偏移" style="width:95%;height:60px;font:inherit"></textarea><p><button id="next-unreviewed">下一张未复核</button><button id="save-reviews">导出复核结果</button><span id="review-count"></span></p><p>结论在当前浏览器自动暂存。完成后导出 JSON，把文件路径发给我，我再按你的复核结果分析；页面不会自动把记录发给我。</p></section>
+<script>
+const reviewKey='mesh-visual-review:pose-locked-v1:pair_20261111_192916:right';
+let reviews={};try{reviews=JSON.parse(localStorage.getItem(reviewKey)||'{}')}catch(e){}
+const verdictNames={candidate_better:'优化更好',baseline_better:'基线更好',similar:'差不多',uncertain:'看不清／无法判断'};
+function currentCard(){return items()[i]}
+function cardKey(c){return c.camera+'/'+c.sync+'/right'}
+function pauseReview(){if(t){clearInterval(t);t=null;$('play').textContent='播放采样帧'}}
+function saveReview(){try{localStorage.setItem(reviewKey,JSON.stringify(reviews))}catch(e){$('verdict-status').textContent+='；本机暂存失败，请及时导出'}}
+function refreshReview(){const c=currentCard(),r=c?reviews[cardKey(c)]:null;$('verdict-status').textContent=c?c.camera+' · sync '+c.sync+' · '+(r?verdictNames[r.verdict]:'未复核'):'当前没有可复核画面';$('review-note').value=r?.note||'';$('review-note').disabled=!c;document.querySelectorAll('[data-verdict]').forEach(b=>{b.disabled=!c;b.style.outline=r?.verdict===b.dataset.verdict?'3px solid #66e9b0':'none'});$('review-count').textContent='已复核 '+cards.filter(c=>reviews[cardKey(c)]).length+' / '+cards.length}
+const originalDraw=draw;draw=function(){originalDraw();refreshReview()};
+document.querySelectorAll('[data-verdict]').forEach(b=>b.onclick=()=>{pauseReview();const c=currentCard();if(!c)return;const k=cardKey(c);if(b.dataset.verdict==='unreviewed')delete reviews[k];else reviews[k]={camera:c.camera,sync:c.sync,hand:'right',image:c.image,verdict:b.dataset.verdict,note:$('review-note').value,reviewed_at:new Date().toISOString()};refreshReview();saveReview()});
+$('review-note').onfocus=pauseReview;$('review-note').oninput=()=>{const c=currentCard();if(c&&reviews[cardKey(c)]){reviews[cardKey(c)].note=$('review-note').value;saveReview()}};
+$('next-unreviewed').onclick=()=>{pauseReview();const current=currentCard(),start=cards.indexOf(current);for(let n=1;n<=cards.length;n++){const c=cards[(start+n)%cards.length];if(!reviews[cardKey(c)]){$('cam').value=c.camera;i=items().findIndex(x=>x.sync===c.sync);draw();return}}$('verdict-status').textContent='这组对比图已全部复核，可以导出结果。'};
+$('save-reviews').onclick=()=>{pauseReview();const payload={schema:'mesh_visual_review_v1',recording:'pair_20261111_192916',experiment:'marker24_pilot_pose_locked',scope:'right_hand_sampled_frames',total_cards:cards.length,records:cards.filter(c=>reviews[cardKey(c)]).map(c=>reviews[cardKey(c)]),exported_at:new Date().toISOString()},url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='mesh_visual_review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+$('image').before($('human-review'));refreshReview();
+</script>

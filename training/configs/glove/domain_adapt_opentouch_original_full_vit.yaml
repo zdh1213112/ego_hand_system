@@ -1,0 +1,66 @@
+schema_version: 3
+
+experiment:
+  name: opentouch_original_domain_adapt_full_vit
+
+paths:
+  dataset_root: datasets/opentouch_original/training
+  checkpoint: pretrained_models/wilor_final.ckpt
+  model_config: pretrained_models/model_config.yaml
+  mano_path: mano_data/mano_v1_2
+  output: output/opentouch_original_domain_adapt_full_vit
+  train_manifest: null
+  val_manifest: null
+  resume: null
+  init_weights: null
+
+data:
+  type: opentouch
+  image_size: 256
+  rescale_factor: 2.0
+  npz_cache_size: 8
+
+recipe:
+  type: domain_adapt
+  vit_tuning: full
+  lora: null
+
+training:
+  # Effective batch = 4 * 32 = 128. At 8000 optimizer steps this is
+  # 4.54 complete passes over the 225715-sample training manifest.
+  max_steps: 8000
+  batch_size: 128
+  num_workers: 8
+  seed: 42
+  device: cuda:0
+  amp: true
+  max_train_samples: null
+  gradient_accumulation_steps: 1
+
+optimization:
+  vit_lr: 0.00001
+  pose_head_lr: 0.0
+  coarse_lr: 0.0
+  refiner_lr: 0.0
+  weight_decay: 0.0001
+  grad_clip: 1.0
+
+checkpointing:
+  save_steps: 500
+
+validation:
+  val_steps: 1000
+  max_batches: null
+  batch_size: 16
+  max_samples: null
+  final_visualization: false
+
+losses:
+  local_keypoints_3d: 1.0
+  keypoints_2d: 0.0
+  keypoints_3d: 0.0
+  coarse_keypoints_2d: 0.0
+  coarse_keypoints_3d: 0.0
+  global_orient: 0.0
+  hand_pose: 0.0
+  betas: 0.0

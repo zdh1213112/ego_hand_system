@@ -1,0 +1,67 @@
+# Latest prepared native KB labels: datasets/trainset_v1 (2026-11-14).
+# Preserves output/trainset_v1_full.yaml settings; writes to a fresh directory.
+schema_version: 3
+experiment:
+  name: joint_refit_192916_191855
+paths:
+  dataset_root: datasets/trainset_v1
+  checkpoint: output/native_kb_training_20261111/coarse_start.ckpt
+  model_config: pretrained_models/model_config.yaml
+  mano_path: mano_data/mano_v1_2
+  output: output/trainset_v1_joint_lora
+  train_manifest: null
+  val_manifest: null
+  resume: null
+  init_weights: null
+data:
+  type: glove_camera
+  image_size: 256
+  rescale_factor: 2.0
+  npz_cache_size: 8
+recipe:
+  type: joint_lora_finetune
+  vit_tuning: lora
+  lora:
+    blocks: all
+    targets:
+    - attn.qkv
+    - attn.proj
+    rank: 4
+    alpha: 8.0
+    dropout: 0.05
+  camera_model: physical_kb
+training:
+  max_steps: 4000
+  batch_size: 4
+  num_workers: 4
+  seed: 42
+  device: cuda:0
+  amp: true
+  max_train_samples: null
+  gradient_accumulation_steps: 8
+optimization:
+  vit_lr: 1.0e-05
+  pose_head_lr: 0.0
+  coarse_lr: 1.0e-05
+  refiner_lr: 1.0e-05
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  camera_lr: 0.0003
+checkpointing:
+  save_steps: 100
+validation:
+  val_steps: 100
+  max_batches: null
+  batch_size: 4
+  max_samples: null
+  final_visualization: true
+losses:
+  local_keypoints_3d: 0.0
+  keypoints_2d: 0.01
+  keypoints_3d: 0.05
+  coarse_keypoints_2d: 0.005
+  coarse_keypoints_3d: 0.025
+  global_orient: 0.001
+  hand_pose: 0.001
+  betas: 0.0005
+  physical_root_3d: 0.5
