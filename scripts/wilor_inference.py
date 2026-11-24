@@ -58,7 +58,8 @@ def load_detector(checkpoint_path: Path, device: torch.device):
         torch.load = original_torch_load
 
 
-def load_wilor_model(checkpoint: Path, config: Path, mano_model_dir: Path):
+def load_wilor_model(checkpoint: Path, config: Path, mano_model_dir: Path,
+                     adapter: Path | None = None):
     model_cfg = get_config(str(config), update_cachedir=True)
     model_cfg.defrost()
     if "vit" in model_cfg.MODEL.BACKBONE.TYPE and "BBOX_SHAPE" not in model_cfg.MODEL:
@@ -74,6 +75,18 @@ def load_wilor_model(checkpoint: Path, config: Path, mano_model_dir: Path):
     model = WiLoR.load_from_checkpoint(
         str(checkpoint), strict=False, cfg=model_cfg, map_location="cpu"
     )
+    if adapter is not None:
+        try:
+            from wilor.models.adapter import load_adapter_weights
+        except ImportError as error:
+            raise RuntimeError(
+                "Trainable weights require the training WiLoR checkout; "
+                "set EGO_WILOR_ROOT or --wilor-root to that checkout"
+            ) from error
+        payload = load_adapter_weights(adapter, model)
+        print(f"Loaded WiLoR adapter: {adapter.resolve()} | "
+              f"step={payload.get('step')} | "
+              f"modifications={payload.get('model_modifications', {})}", flush=True)
     return model, model_cfg
 
 

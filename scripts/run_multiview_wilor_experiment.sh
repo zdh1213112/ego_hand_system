@@ -19,6 +19,8 @@ OUTPUT=""
 CONDA_ENV="ego-hand"
 DEVICE="cuda"
 DETECTOR="${EGO_WILOR_DETECTOR:-$ROOT/models/wilor/detector.pt}"
+WILOR_CHECKPOINT="${EGO_WILOR_CHECKPOINT:-}"
+WILOR_ADAPTER="${EGO_WILOR_ADAPTER:-}"
 EXTERNAL_BOXES=""
 CAMERAS=(camera0 camera1 camera2 camera3 camera4 camera5)
 REFERENCE_CAMERA="camera2"
@@ -92,6 +94,7 @@ TEMPORAL_HAND_IDENTITY_MAX_GAP="${EGO_TEMPORAL_HAND_IDENTITY_MAX_GAP:-60}"
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
+  echo "WiLoR weights: --checkpoint FILE selects the base model; --adapter FILE applies trainable/LoRA weights; --wilor-root DIR selects the matching training checkout."
   echo "Optional: --final-video generates the final video(s) selected by --wilor-mode; disabled by default."
   echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
   echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos. Both keeps both branches."
@@ -124,6 +127,9 @@ while (($#)); do
     --conda-env) CONDA_ENV="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
     --detector) DETECTOR="$2"; shift 2 ;;
+    --checkpoint) WILOR_CHECKPOINT="$2"; shift 2 ;;
+    --adapter) WILOR_ADAPTER="$2"; shift 2 ;;
+    --wilor-root) export EGO_WILOR_ROOT="$2"; shift 2 ;;
     --external-boxes) EXTERNAL_BOXES="$2"; shift 2 ;;
     --cameras)
       CAMERAS_EXPLICIT=1
@@ -252,6 +258,12 @@ fi
 if ((${#CAMERAS[@]} < 2)); then
   echo "at least two cameras are required" >&2
   exit 2
+fi
+if [[ -n "$WILOR_CHECKPOINT" || -n "$WILOR_ADAPTER" ]]; then
+  [[ "$POSE_BACKEND" == wilor ]] || { echo "--checkpoint/--adapter require the WiLoR backend" >&2; exit 2; }
+  for WEIGHT in "$WILOR_CHECKPOINT" "$WILOR_ADAPTER"; do
+    [[ -z "$WEIGHT" || -f "$WEIGHT" ]] || { echo "WiLoR weights do not exist: $WEIGHT" >&2; exit 2; }
+  done
 fi
 declare -A CAMERA_SEEN=()
 for CAMERA in "${CAMERAS[@]}"; do
@@ -411,6 +423,8 @@ FINAL_VIDEO="$FUSION/final_only_${#CAMERAS[@]}view.mp4"
 ORIGINAL_VIDEO="$FUSION/final_on_original_${#CAMERAS[@]}view.mp4"
 CAMERA_CSV="$(IFS=,; echo "${CAMERAS[*]}")"
 export EGO_WILOR_EXTERNAL_BOXES="$EXTERNAL_BOXES"
+export EGO_WILOR_CHECKPOINT="$WILOR_CHECKPOINT"
+export EGO_WILOR_ADAPTER="$WILOR_ADAPTER"
 CAMERA_CONFIDENCE_ARGS=()
 for CAMERA in "${CAMERAS[@]}"; do
   case "$CAMERA" in
@@ -566,6 +580,11 @@ if source.is_dir():
     config["camera_confidences"] = {
         camera: config["camera_confidences"][camera] for camera in camera_ids
     }
+if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "wilor" and any(
+    os.environ.get(key) for key in ("EGO_WILOR_CHECKPOINT", "EGO_WILOR_ADAPTER", "EGO_WILOR_ROOT")
+):
+    from wilor_checkpoint_metadata import checkpoint_metadata
+    config["pose_backend"] = checkpoint_metadata()
 if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "gem":
     checkpoint = Path(os.environ["EGO_GEM_CHECKPOINT"]).resolve()
     assets = Path(os.environ["EGO_GEM_SOMA_ASSETS"]).resolve()
@@ -753,6 +772,8 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
       run_python "$ROOT/scripts/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     fi
   else
+    if [[ -n "$WILOR_CHECKPOINT" ]]; then INFERENCE_ARGS+=(--checkpoint "$WILOR_CHECKPOINT"); fi
+    if [[ -n "$WILOR_ADAPTER" ]]; then INFERENCE_ARGS+=(--adapter "$WILOR_ADAPTER"); fi
     if [[ "$WILOR_MODE" != legacy || ( "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 && "$FINAL_RENDERER" == hybrid ) ]]; then
       INFERENCE_ARGS+=(--save-mano-params)
     fi
