@@ -9,6 +9,10 @@ if [[ "$POSE_BACKEND" == gem ]]; then POSE_LABEL="GEM-X"; fi
 if [[ "$POSE_BACKEND" == fah ]]; then POSE_LABEL="FAH"; fi
 GEM_MODE="${EGO_GEM_MODE:-shared}"
 WILOR_MODE="${EGO_WILOR_MODE:-shared}"
+POSE_POLICY=""
+POSE_SWITCH_MARGIN_PX="${EGO_WILOR_POSE_SWITCH_MARGIN_PX:-1}"
+NATIVE_RECOVERY=1
+POSE_TRANSITION=1
 SHARED_STEPS="${EGO_WILOR_SHARED_STEPS:-100}"
 SHARED_BATCH_SIZE="${EGO_WILOR_SHARED_BATCH_SIZE:-32}"
 MCAP=""
@@ -99,6 +103,9 @@ usage() {
   echo "WiLoR geometry: --wilor-mode legacy|shared|both (default shared). Shared fits one MANO skeleton and mesh per hand across cameras; both also retains the original final video."
   echo "Shared-only mode skips independent fusion, temporal processing and diagnostic videos. Both keeps both branches."
   echo "Shared MANO fitting: --shared-steps N (100), --shared-batch-size N (32). --no-diagnostic-video skips only the diagnostic video."
+  echo "WiLoR --pose-policy native-wrist|shared-fit selects the articulation at the fitted wrist (default native-wrist). FAH uses shared-fit."
+  echo "WiLoR --pose-switch-margin-px N keeps a qualified previous camera within N pixels of the best (default 1, 0 disables). --no-native-recovery disables missing-hand recovery."
+  echo "Use --no-pose-transition to save unblended selected poses for transition_wilor_sources.py."
   echo "With the default hybrid renderer, final_only_Nview.mp4 uses the original skeleton and per-camera WiLoR meshes. Shared mode has its own final_shared_Nview.mp4."
   echo "WiLoR --external-boxes DIR reuses saved detector boxes (DIR/camera*/predictions.jsonl) and does not reload YOLO weights."
   echo "Usage: $0 (--mcap FILE | --session EGO4_DIR) --output DIR [--detector FILE] [--cameras camera0 camera1 ...] [--reference-camera CAMERA] [--max-frames N] [--device cuda] [--conda-env NAME] [--gpu-profile compatible|rtx5090d] [--batch-size N] [--frame-batch-size N] [--preprocess-workers N] [--max-detections-per-class N] [--compile-backbone 0|1] [--fusion-workers N] [--glove-marker-assist 0|1] [--sam3-glove-assist 0|1] [--sam3-conda-env NAME] [--sam3-model FILE] [--sam3-prompt TEXT] [--sam3-text-only 0|1] [--sam3-refine-2d 0|1] [--sam3-max-2d-correction-px N] [--sam3-2d-correction-blend N] [--sam3-max-2d-bone-change-ratio N] [--condition-hard-threshold N] [--anatomy-refinement 0|1] [--marker-value-min 160] [--marker-saturation-max 100] [--marker-min-matches 3] [--marker-global-min-matches 8] [--marker-blend 0.15] [--detector-handedness strict|ignore|adaptive] [--final-renderer hybrid|fused] [--no-video] [--stop-after-inference]"
@@ -112,7 +119,7 @@ usage() {
 
 while (($#)); do
   case "$1" in
-    --no-video|--no-diagnostic-video|--stop-after-inference|--final-video|-h|--help) ;;
+    --no-video|--no-diagnostic-video|--no-native-recovery|--no-pose-transition|--stop-after-inference|--final-video|-h|--help) ;;
     --*)
       if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then
         echo "Missing value for $1" >&2
@@ -184,6 +191,10 @@ while (($#)); do
     --anatomy-refinement) ANATOMY_REFINEMENT="$2"; shift 2 ;;
     --final-renderer) FINAL_RENDERER="$2"; shift 2 ;;
     --wilor-mode) WILOR_MODE="$2"; shift 2 ;;
+    --pose-policy) POSE_POLICY="$2"; shift 2 ;;
+    --pose-switch-margin-px) POSE_SWITCH_MARGIN_PX="$2"; shift 2 ;;
+    --no-native-recovery) NATIVE_RECOVERY=0; shift ;;
+    --no-pose-transition) POSE_TRANSITION=0; shift ;;
     --shared-steps) SHARED_STEPS="$2"; shift 2 ;;
     --shared-batch-size) SHARED_BATCH_SIZE="$2"; shift 2 ;;
     --detector-handedness) DETECTOR_HANDEDNESS="$2"; shift 2 ;;
@@ -198,6 +209,12 @@ while (($#)); do
 done
 
 case "$WILOR_MODE" in legacy|shared|both) ;; *) echo "--wilor-mode must be legacy, shared, or both" >&2; exit 2 ;; esac
+case "$POSE_BACKEND/$POSE_POLICY" in
+  wilor/) POSE_POLICY="native-wrist" ;;
+  fah/) POSE_POLICY="shared-fit" ;;
+  wilor/native-wrist|wilor/shared-fit|fah/shared-fit|gem/) ;;
+  *) echo "Unsupported --pose-policy '$POSE_POLICY' for backend '$POSE_BACKEND'" >&2; exit 2 ;;
+esac
 [[ "$SHARED_STEPS" =~ ^[1-9][0-9]*$ && "$SHARED_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
   echo "Shared steps/batch size must be positive integers" >&2; exit 2;
 }
@@ -953,12 +970,18 @@ if [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" != legacy ]]; then
   SHARED_VIDEO="$SHARED_FUSION/final_shared_${#CAMERAS[@]}view.mp4"
   SHARED_MANO_DIR="$ROOT/models/mano"
   if [[ "$POSE_BACKEND" == fah ]]; then SHARED_MANO_DIR="$EGO_FAH_MANO_DIR"; fi
+  NATIVE_POLICY_ARGS=()
+  if [[ "$POSE_POLICY" == native-wrist ]]; then
+    NATIVE_POLICY_ARGS+=(--pose-switch-margin-px "$POSE_SWITCH_MARGIN_PX")
+    if (( ! NATIVE_RECOVERY )); then NATIVE_POLICY_ARGS+=(--no-native-recovery); fi
+    if (( ! POSE_TRANSITION )); then NATIVE_POLICY_ARGS+=(--no-pose-transition); fi
+  fi
   echo "[multiview] jointly fit shared MANO geometry to calibrated views"
   run_python "$ROOT/scripts/fit_shared_wilor_multiview.py" \
     --dataset "$NORMALIZED" --predictions "$PREDICTIONS" --native-predictions "$RAW_PREDICTIONS" \
     --output "$SHARED_FUSION" --mano-model-dir "$SHARED_MANO_DIR" \
     --cameras "${CAMERAS[@]}" --device "$DEVICE" --max-frames "$MAX_FRAMES" \
-    --steps "$SHARED_STEPS" --batch-size "$SHARED_BATCH_SIZE"
+    --steps "$SHARED_STEPS" --batch-size "$SHARED_BATCH_SIZE" --pose-policy "$POSE_POLICY" "${NATIVE_POLICY_ARGS[@]}"
   if [[ "$NO_VIDEO" == 0 && "$FINAL_VIDEO_ENABLED" == 1 ]]; then
     run_python "$ROOT/scripts/render_shared_wilor_multiview.py" \
       --dataset "$NORMALIZED" --shared "$SHARED_FUSION" --output "$SHARED_VIDEO" \
