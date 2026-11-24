@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 TOOL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd -- "$TOOL_DIR/../.." && pwd)"
+ROOT_DIR="$(cd -- "$TOOL_DIR/../../../.." && pwd)"
 VIEWER_DIR="${1:-$ROOT_DIR/output/native_kb_training_20261111/baseline_mesh_viewer}"
 if [[ ! -f "$VIEWER_DIR/index.html" ]]; then
   echo "查看器尚未生成：$VIEWER_DIR/index.html" >&2

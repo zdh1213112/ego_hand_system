@@ -3,7 +3,7 @@
 import argparse,csv,json,sys,shutil,subprocess
 from pathlib import Path
 import cv2,numpy as np
-ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT.parent/'ego_hand_system/scripts'))
+ROOT=Path(__file__).resolve().parents[4];sys.path.insert(0,str(ROOT / 'scripts'))
 from ego_data.calibration import CameraCalibration
 from camera_models import project_points
 
@@ -53,7 +53,7 @@ def main():
   for f in records:f['holdout_hands']=lookup[(f['camera'],f['sync'])]['hands']
  data=dict(initial_sync=a.initial_sync,dataset=str(a.pilot.resolve()),projection='native_raw / KB; experimental, includes partial views',faces=faces.tolist(),frames=records,max_projection_difference_px=None,label_count=sum(len(f['hands']) for f in records))
  (out/'data.js').write_text('window.LABEL_DATA='+json.dumps(data,separators=(',',':'),allow_nan=False)+';\n')
- html=(ROOT/'tools/marker_placement/label_viewer.html').read_text();html=html.replace('grid-template-columns:1fr 1fr;','grid-template-columns:1fr 1fr 1fr;').replace('<section class="panel"><h2>相同原图 + 导出标签</h2>','<section class="panel"><h2>当前基线</h2><canvas id="baseline"></canvas></section><section class="panel"><h2>24 点附着模型 · 实验结果</h2>');html=html.replace("canvases=[$('raw'),$('overlay')]","canvases=[$('raw'),$('overlay'),$('baseline')]").replace('ci<2','ci<3').replace("const hands=frames[index].hands.filter", "const hands=(ci===2?frames[index].baseline_hands:frames[index].hands).filter")
+ html=(ROOT/'tools/label_pipeline/calibration/marker_placement/label_viewer.html').read_text();html=html.replace('grid-template-columns:1fr 1fr;','grid-template-columns:1fr 1fr 1fr;').replace('<section class="panel"><h2>相同原图 + 导出标签</h2>','<section class="panel"><h2>当前基线</h2><canvas id="baseline"></canvas></section><section class="panel"><h2>24 点附着模型 · 实验结果</h2>');html=html.replace("canvases=[$('raw'),$('overlay')]","canvases=[$('raw'),$('overlay'),$('baseline')]").replace('ci<2','ci<3').replace("const hands=frames[index].hands.filter", "const hands=(ci===2?frames[index].baseline_hands:frames[index].hands).filter")
  html=html.replace('左侧原图，右侧叠加当前导出的 mesh。两侧同步缩放和平移，图片保持原始畸变。','原图 / 基线 / 新方案三栏同步缩放。此页为实验结果，未通过验收；包含未满足完整标签导出条件的局部视图。').replace('href="marker_placement/"','href="../marker_placement/"').replace('已导出标签 ${D.label_count} 份','实验可见手实例 ${D.label_count} 份').replace('当前标签与投影信息','当前实验与投影信息')
  html=html.replace('未导出的帧不会补插或显示为有效标签。','本页是采样实验对照，包含基线未导出的局部视图，不可直接作为训练标签。')
  html=html.replace('<div id="help">','<div class="bar">对照视频：'+''.join(f'<a href="{c}_comparison.mp4">{c}</a>' for c in cals)+'</div><div id="help">')

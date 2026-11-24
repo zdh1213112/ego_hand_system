@@ -16,7 +16,7 @@ HERE = case.stage('nokov_label_training_20261118')
 
 ROOT = case.project
 
-EGO = ROOT / 'ego_hand_system'
+EGO = case.ego
 
 CODE = EGO / 'scripts/joint_refit'
 

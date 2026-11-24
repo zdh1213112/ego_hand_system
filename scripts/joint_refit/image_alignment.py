@@ -13,8 +13,8 @@ from pathlib import Path
 import cv2, numpy as np, torch
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as Rot
-ROOT = Path(__file__).resolve().parents[2].parent / 'wilor_training'
-sys.path[:0] = [str(ROOT / 'tools/full_silhouette'), str(ROOT / 'tools/personal_hand_calibration')]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / 'tools/label_pipeline/calibration/full_silhouette'), str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration')]
 from render_masks import project_native
 from context import load_context
 

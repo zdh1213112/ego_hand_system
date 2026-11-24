@@ -5,7 +5,7 @@
 # 输入可用环境变量覆盖：JOINT_REFIT_CONTEXT、JOINT_REFIT_SELECTION、JOINT_REFIT_SOURCE、JOINT_REFIT_SKELETON、JOINT_REFIT_PREVIOUS（视频对照）；解释器用 EGO_NATIVE_PYTHON。
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"; CODE="$SCRIPT_DIR/joint_refit"
-EXP="${JOINT_REFIT_EXPERIMENT:-$SCRIPT_DIR/../../wilor_training/output/native_kb_training_20261111}"; EXP="$(cd -- "$EXP" && pwd)"
+EXP="${JOINT_REFIT_EXPERIMENT:-$SCRIPT_DIR/../output/native_kb_training_20261111}"; EXP="$(cd -- "$EXP" && pwd)"
 PY="${EGO_NATIVE_PYTHON:-/home/p3/miniforge3/envs/ego-hand/bin/python}"
 CONTEXT="${JOINT_REFIT_CONTEXT:-$EXP/explicit_pipeline_sampled_smoke_v2/context.json}"
 SELECTION="${JOINT_REFIT_SELECTION:-$EXP/keyframe_calibration_v3/selection.json}"

@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation, Slerp
 
-TOOLS = Path(__file__).resolve().parents[3] / 'wilor_training' / 'tools'
+TOOLS = Path(__file__).resolve().parents[2] / 'tools/label_pipeline/calibration'
 sys.path.insert(0, str(TOOLS / 'sdk_direction_fit'))
 from build_mapping import MP_PARENT, MP_CHILD, angular_deg, proper_rotation, unit
 from context import load_context, load_rigid

@@ -3,7 +3,7 @@
 在数据所在电脑的桌面终端运行：
 
 ```bash
-xdg-open /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/index.html
+xdg-open tools/label_pipeline/calibration/marker_placement/index.html
 ```
 
 也可以用浏览器直接打开同目录的 `index.html`，无需安装依赖或联网。
@@ -23,7 +23,7 @@ xdg-open /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/inde
 启动两个工具：
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/start_viewer.sh
+bash tools/label_pipeline/calibration/marker_placement/start_viewer.sh
 ```
 
 浏览器打开 http://127.0.0.1:8766/ 检查 mesh，打开 http://127.0.0.1:8766/marker_placement/ 确认 marker 贴点。远程访问时，在本地电脑执行 `ssh -L 8766:127.0.0.1:8766 p3@服务器地址`，再在本地浏览器打开上述地址。
@@ -41,11 +41,11 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/start_vi
 
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python \
-  /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/build_label_viewer.py \
+  tools/label_pipeline/calibration/marker_placement/build_label_viewer.py \
   --dataset /你的导出目录/merged \
   --output /你的查看器输出目录
 
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/start_viewer.sh /你的查看器输出目录
+bash tools/label_pipeline/calibration/marker_placement/start_viewer.sh /你的查看器输出目录
 ```
 
 ## 可选：真实手套照片与 24 点预填
@@ -63,7 +63,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/start_vi
 
 预填数据与来源：`prefill/suggested_placement.json`、`prefill/report.json`。准备好同级的
 `ego_hand_system`、`nokov_ego_hand_validation`，以及脚本引用的 2026-11-11 录制和对齐结果后，
-在训练环境中运行 `python tools/marker_placement/prepare_marker_prefill.py` 重建本次录制的预填数据。
+在训练环境中运行 `python tools/label_pipeline/calibration/marker_placement/prepare_marker_prefill.py` 重建本次录制的预填数据。
 
 ## 播放、放大与全屏
 

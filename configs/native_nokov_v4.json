@@ -6,9 +6,9 @@
     "marker_placement": "glove_marker_placement.json",
     "observation_weights": {
       "detector": "ego_hand_system/models/wilor/2.0_glove_wilor_3680.pt",
-      "checkpoint": "wilor_training/output/native_kb_training_20261111/coarse_start.ckpt",
-      "adapter": "wilor_training/output/glove_joints_20261120_v2_coarse_start_12000steps/best_trainable.pt",
-      "model_config": "wilor_training/pretrained_models/model_config.yaml"
+      "checkpoint": "ego_hand_system/models/wilor/coarse_start.ckpt",
+      "adapter": "ego_hand_system/models/wilor/observation_v2/best_trainable.pt",
+      "model_config": "ego_hand_system/training/pretrained_models/model_config.yaml"
     },
     "seed_alignment": "native_nokov_mount_seed.json",
     "overrides": {}

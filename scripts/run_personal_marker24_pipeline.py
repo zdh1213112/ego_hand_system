@@ -3,7 +3,7 @@
 import argparse,json,os,subprocess,sys
 from pathlib import Path
 from personal_marker24_config import load_personal_config
-ROOT=Path(__file__).resolve().parents[1];TOOLS=ROOT.parent/'wilor_training/tools';P=TOOLS/'personal_hand_calibration'
+ROOT=Path(__file__).resolve().parents[1];TOOLS=ROOT/'tools/label_pipeline/calibration';P=TOOLS/'personal_hand_calibration'
 def main():
  ap=argparse.ArgumentParser(__doc__)
  for name in ['dataset','alignment','aligned21','baseline','config','output']:ap.add_argument('--'+name,type=Path,required=True)

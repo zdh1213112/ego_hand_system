@@ -23,14 +23,14 @@
 ## 生成命令
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
-/home/p3/miniforge3/envs/ego-hand/bin/python tools/joint_pose_attachment/build_contour_audit.py   --context output/native_kb_training_20261111/explicit_pipeline_sampled_smoke_v2/context.json   --source output/native_kb_training_20261111/explicit_pipeline_sampled_smoke_v2/marker24   --observations output/native_kb_training_20261111/joint_pose_attachment_observations_v1/observations.json   --joint-fit output/native_kb_training_20261111/joint_pose_attachment_all_v1   --output /新的轮廓检查输出目录
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
+/home/p3/miniforge3/envs/ego-hand/bin/python tools/label_pipeline/calibration/joint_pose_attachment/build_contour_audit.py   --context output/native_kb_training_20261111/explicit_pipeline_sampled_smoke_v2/context.json   --source output/native_kb_training_20261111/explicit_pipeline_sampled_smoke_v2/marker24   --observations output/native_kb_training_20261111/joint_pose_attachment_observations_v1/observations.json   --joint-fit output/native_kb_training_20261111/joint_pose_attachment_all_v1   --output /新的轮廓检查输出目录
 ```
 
 当前已生成，无需重新执行。8766 服务未启动时可运行：
 
 ```bash
-bash tools/marker_placement/start_viewer.sh
+bash tools/label_pipeline/calibration/marker_placement/start_viewer.sh
 ```
 
 已验证实际点与原始输入完全一致、分割重放一致、默认632帧、覆盖显示切换、拒绝样本无伪造点、相机切换、播放／暂停及检查记录。

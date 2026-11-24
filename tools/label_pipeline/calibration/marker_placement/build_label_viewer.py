@@ -16,7 +16,7 @@ def main():
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--initial-sync', type=int, help='Open the nearest available synchronized frame')
     ap.add_argument('--standalone', action='store_true', help='Dataset inspector without the separate marker placement tool')
-    ap.add_argument('--project', type=Path, default=Path(__file__).resolve().parents[3] / 'ego_hand_system')
+    ap.add_argument('--project', type=Path, default=Path(__file__).resolve().parents[4])
     args = ap.parse_args()
     dataset, output = args.dataset.resolve(), args.output.resolve()
     if output == dataset or dataset in output.parents and output.name in {'images','labels'}:

@@ -75,7 +75,8 @@ def run(args, profile, resolve_sources):
     weights = cfg["observation_weights"]
     if set(weights) != {"checkpoint", "adapter", "detector", "model_config"}:
         raise ValueError("Expected detector, checkpoint, adapter and model_config")
-    weights = {k: (REPO.parent / v).resolve() for k, v in weights.items()}
+    from label_export_settings import provenance, workspace_path
+    weights = {k: workspace_path(REPO, v).resolve() for k, v in weights.items()}
     if mode == "adaptive_wrist_v4":
         (REPO / "models/mano/MANO_RIGHT.pkl").resolve(strict=True)
         if not obs:
@@ -92,7 +93,6 @@ def run(args, profile, resolve_sources):
         observation_source=str(obs) if obs else None,
         single_hand_config=json.loads(single_config.read_text()),
     )
-    from label_export_settings import provenance
     actual = provenance(REPO,cfg,name,hands,weights,obs,seed,placement,single_config)
     settings.update(actual)
     runtime = actual["runtime_parameters"]

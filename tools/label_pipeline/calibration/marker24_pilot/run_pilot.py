@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation, Slerp
-ROOT=Path(__file__).resolve().parents[2];PROJECT=ROOT.parent/'ego_hand_system'
+ROOT=Path(__file__).resolve().parents[4];PROJECT=ROOT
 sys.path[:0]=[str(PROJECT/'scripts'),str(ROOT.parent/'nokov_ego_hand_validation/integration/pipeline')]
 from fit_mano_sequence import import_mano,run_model
 from fit_surface_attachments_guarded import candidate_regions

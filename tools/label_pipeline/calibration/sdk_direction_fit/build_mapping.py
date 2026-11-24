@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'tools/personal_hand_calibration'))
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration'))
 from context import load_context, load_rigid
 
 MP_PARENT = np.array([k + d for k in [1, 5, 9, 13, 17] for d in range(3)])

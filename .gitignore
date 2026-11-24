@@ -53,3 +53,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+/tools/label_pipeline/calibration/marker_placement/prefill/
+/tools/label_pipeline/calibration/marker_placement/prefill.js

@@ -4,8 +4,8 @@ import argparse, hashlib, json, sys, time
 from pathlib import Path
 import numpy as np
 import torch
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools/marker24_pilot'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/marker24_pilot'))
 from run_pilot import raw24,import_mano,run_model,candidate_regions,discrete,stats,PROJECT,check_dorsal_reference,CameraCalibration
 EXP=ROOT/'output/native_kb_training_20261111'
 from context import load_context,raw24_context

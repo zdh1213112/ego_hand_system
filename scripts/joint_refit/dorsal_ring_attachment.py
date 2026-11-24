@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'wilor_training/tools/personal_hand_calibration'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/label_pipeline/calibration/personal_hand_calibration'))
 from run import PROJECT, import_mano
 
 

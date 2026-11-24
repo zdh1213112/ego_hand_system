@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Glove contours for the calibration sample only, decoded in order and processed in parallel.
 
-Per-view segmentation is the same as wilor_training/tools/personal_hand_calibration/image_constraints.py, but only
+Per-view segmentation is the same as tools/label_pipeline/calibration/personal_hand_calibration/image_constraints.py, but only
 for the syncs keyframe selection can use (the frames in --sample), instead of every baseline frame. Frames are read
 forward instead of seeking for each one, and camera/sync chunks run in separate processes. The output layout
 (data.js, observations.json, images/, masks/) is what select_keyframes.py reads; preview crops are not written.
@@ -10,7 +10,7 @@ import argparse, csv, json, os, sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import cv2, numpy as np
-TOOLS = Path(__file__).resolve().parents[3] / 'wilor_training/tools'
+TOOLS = Path(__file__).resolve().parents[2] / 'tools/label_pipeline/calibration'
 sys.path.insert(0, str(TOOLS / 'personal_hand_calibration'))
 import image_constraints as ic  # noqa: E402  (sets up the calibration tool import paths)
 from context import load_context  # noqa: E402

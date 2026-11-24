@@ -3,12 +3,12 @@
 import argparse,importlib.util,json,sys,time
 from pathlib import Path
 import numpy as np,torch
-ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'tools/personal_hand_calibration'))
+ROOT=Path(__file__).resolve().parents[4];sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/personal_hand_calibration'))
 from run import PROJECT,import_mano,run_model,regions_for,discrete,stats
 from context import load_context
 from refine_contours import project
 from calibration_profile import placement_signature, file_sha256
-spec=importlib.util.spec_from_file_location('joint_helpers',ROOT/'tools/joint_pose_attachment/run.py');joint=importlib.util.module_from_spec(spec);spec.loader.exec_module(joint)
+spec=importlib.util.spec_from_file_location('joint_helpers',ROOT/'tools/label_pipeline/calibration/joint_pose_attachment/run.py');joint=importlib.util.module_from_spec(spec);spec.loader.exec_module(joint)
 
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--context',type=Path,required=True);ap.add_argument('--source',type=Path,required=True);ap.add_argument('--selection',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--steps',type=int,default=180);a=ap.parse_args()

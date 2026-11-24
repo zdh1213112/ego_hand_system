@@ -5,11 +5,11 @@ from pathlib import Path
 
 import cv2,numpy as np,torch
 
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools/full_silhouette'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/full_silhouette'))
 from evaluate import score
 from render_masks import load_hand_mask
-sys.path.insert(0,str(ROOT/'tools/personal_hand_calibration'))
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/personal_hand_calibration'))
 from context import load_context
 from refine_contours import project
 

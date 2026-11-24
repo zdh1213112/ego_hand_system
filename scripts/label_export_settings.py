@@ -8,6 +8,14 @@ from pathlib import Path
 import yaml
 
 
+def workspace_path(repo, value):
+    """Resolve a workspace asset, including a renamed ego_hand_system checkout."""
+    path = Path(value).expanduser()
+    if path.parts[:1] == ("ego_hand_system",):
+        return repo.joinpath(*path.parts[1:])
+    return repo.parent / path
+
+
 def sha(path):
     digest = hashlib.sha256()
     with path.open('rb') as stream:
@@ -81,10 +89,14 @@ def provenance(repo, cfg, name, hands, weights, observation, seed, placement, si
         raise ValueError('Runtime parameters must be positive')
     manifests={}
     roots=[pipe,repo/'scripts',repo/'third_party/MANO']
-    for key in defaults['native_tool_roots'][:4]:
-        roots.append(repo.parent/key)
+    for entry in defaults['native_tool_roots']:
+        base = workspace_path(repo, entry)
+        if base == repo / 'output/dependencies/nvdiffrast_runtime':
+            continue
+        if not any(root == base or root in base.parents for root in roots):
+            roots.append(base)
     for base in roots:
-        for path in sorted(base.rglob('*')):
+        for path in ([base] if base.is_file() else sorted(base.rglob('*'))):
             if path.suffix in ('.py','.cpp','.sh') and path.is_file():
                 manifests[str(path.relative_to(repo.parent))]=sha(path)
     payload=json.dumps(manifests,sort_keys=True,separators=(',',':')).encode()

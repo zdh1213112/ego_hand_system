@@ -3,8 +3,8 @@
 import argparse, json, sys
 from pathlib import Path
 import cv2, numpy as np, torch
-PROJECT = Path(__file__).resolve().parents[2]; ROOT = PROJECT.parent / 'wilor_training'  # shared fitting tools live in wilor_training/tools
-sys.path.insert(0, str(ROOT / 'tools/full_silhouette'))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools/label_pipeline/calibration/full_silhouette'))
 from render_masks import project_native, load_hand_mask
 
 EXP = ROOT / 'output/native_kb_training_20261111'

@@ -10,7 +10,7 @@
 本次完整输出：
 
 ```text
-/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/full_silhouette_v1
+output/native_kb_training_20261111/full_silhouette_v1
 ```
 
 若原 8766 服务未运行：
@@ -18,7 +18,7 @@
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python -m http.server 8773 \
   --bind 127.0.0.1 \
-  --directory /home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/full_silhouette_v1
+  --directory output/native_kb_training_20261111/full_silhouette_v1
 ```
 
 打开 http://127.0.0.1:8773/review/ 或 http://127.0.0.1:8773/closeups/ 。
@@ -26,7 +26,7 @@
 ## 一个命令复现
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/full_silhouette/run.sh
+bash tools/label_pipeline/calibration/full_silhouette/run.sh
 ```
 
 自动创建新目录，不覆盖本次结果。默认输入为当前 `pair_20261111_192916` 已完成的优质样本与上一轮标定；不是从原始录制重新执行整条链路。

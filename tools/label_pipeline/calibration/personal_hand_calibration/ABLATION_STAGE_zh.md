@@ -52,12 +52,12 @@
 当前实验依赖已有 PERSONAL-3 和轮廓候选，不是新录制的通用生产入口。输出目录必须不存在。
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
 PY=/home/p3/miniforge3/envs/ego-hand/bin/python
-$PY tools/personal_hand_calibration/ablate_geometry.py --mode rigid   --output output/native_kb_training_20261111/ablation_rigid_new --steps 100
-$PY tools/personal_hand_calibration/ablate_geometry.py --mode fingers   --output output/native_kb_training_20261111/ablation_fingers_new --steps 100
-$PY tools/personal_hand_calibration/ablate_geometry.py --mode attachments   --output output/native_kb_training_20261111/ablation_attachments_new --steps 100
-$PY tools/personal_hand_calibration/ablate_geometry.py --mode fingers   --source output/native_kb_training_20261111/ablation_attachments_new   --output output/native_kb_training_20261111/ablation_recalibrated_fingers_new --steps 100
+$PY tools/label_pipeline/calibration/personal_hand_calibration/ablate_geometry.py --mode rigid   --output output/native_kb_training_20261111/ablation_rigid_new --steps 100
+$PY tools/label_pipeline/calibration/personal_hand_calibration/ablate_geometry.py --mode fingers   --output output/native_kb_training_20261111/ablation_fingers_new --steps 100
+$PY tools/label_pipeline/calibration/personal_hand_calibration/ablate_geometry.py --mode attachments   --output output/native_kb_training_20261111/ablation_attachments_new --steps 100
+$PY tools/label_pipeline/calibration/personal_hand_calibration/ablate_geometry.py --mode fingers   --source output/native_kb_training_20261111/ablation_attachments_new   --output output/native_kb_training_20261111/ablation_recalibrated_fingers_new --steps 100
 ```
 
 `--observations` 可显式指定候选文件，默认使用统一外轮廓定义的 v2 文件。结果汇总脚本目前固定指向本次 v2 实验目录，避免把新旧结果混在一起。

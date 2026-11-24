@@ -5,7 +5,7 @@
 ## 执行
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_direction_fit/run.sh
+bash tools/label_pipeline/calibration/sdk_direction_fit/run.sh
 ```
 
 默认生成新目录，不覆盖历史输出。可用 `--output /新目录` 指定结果，`--help` 查看 context、source、skeleton、selection 等输入。该入口依赖本机已有标定产物，并非新录制从零导出的通用入口。
@@ -13,7 +13,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_direction_fit/run.sh
 本轮结果：
 
 ```text
-/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/sdk_direction_v1
+output/native_kb_training_20261111/sdk_direction_v1
 ```
 
 - [原图／当前标签／新对照](http://127.0.0.1:8766/sdk_direction/review/)
@@ -26,7 +26,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_direction_fit/run.sh
 
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python -m http.server 8776 --bind 127.0.0.1 \
-  --directory /home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/sdk_direction_v1
+  --directory output/native_kb_training_20261111/sdk_direction_v1
 ```
 
 打开 http://127.0.0.1:8776/review/ 。此独立服务中的“原来的腕根对照”链接需要原有 8766 服务，其他本轮产物使用相对路径。

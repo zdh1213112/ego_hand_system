@@ -7,8 +7,8 @@ from pathlib import Path
 from urllib.parse import urlparse,parse_qs
 import cv2,numpy as np,torch
 from scipy.spatial.transform import Rotation
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools/personal_hand_calibration'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/personal_hand_calibration'))
 from run import EXP,PROJECT,import_mano,run_model,CameraCalibration
 from camera_models import project_points
 METRICS=['palm_width','palm_length','thumb_length','index_length','middle_length','ring_length','pinky_length']

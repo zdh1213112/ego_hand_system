@@ -32,9 +32,9 @@ bash scripts/export_ego_nokov_labels.sh \
 
 ### 换机器后需要的输入
 
-- 仓库旁需有 `nokov_ego_hand_validation`、`wilor_training` 和已安装的原生光栅器。使用 `ego-hand` 环境，或设置 `EGO_NATIVE_PYTHON` 指向该环境的 Python。双手拟合使用 CUDA。拟合和训练读取所用的 MANO 模型必须匹配。[依赖和默认参数](../tools/label_pipeline/defaults.yaml)
+- 在仓库旁检出 `nokov_ego_hand_validation`，在本仓库 `output/dependencies/nvdiffrast_runtime/` 安装原生光栅器。标定工具位于 `tools/label_pipeline/calibration/`，训练读取器位于 `training/`。使用 `ego-hand` 环境，或设置 `EGO_NATIVE_PYTHON` 指向该环境的 Python。双手拟合使用 CUDA。拟合和训练读取所用的 MANO 模型必须匹配。[依赖和默认参数](../tools/label_pipeline/defaults.yaml)
 - 一个录制目录含一个 `EGO*/part0001/` 和一个 `session*/nokov/`。支持四机 MCAP，也支持四路原始 MP4、对应 PTS 及 IMU CSV。保留该次录制的相机标定、NOKOV 刚体、手部骨架、marker 和手套描述。配置自带 11 月 9 日设备安装初值，重新安装设备后在 JSON 的 `label_pipeline.seed_alignment` 指定新的初值。
-- 双手分支默认从当前录制生成同曝光 WiLoR 观测。检测器、WiLoR 基础权重、观测用 adapter 和模型配置的位置在 JSON 的 `observation_weights`，相对两个仓库所在的父目录解析。观测用 adapter 为签收流程使用的 v2 权重。已有本段四机观测可加 `--wilor-observations /你的/native_wilor.npz`，拟合前会核对参考时戳和四路曝光帧号。模型文件与录制数据需要部署到目标机器。
+- 双手分支默认从当前录制生成同曝光 WiLoR 观测。检测器、WiLoR 基础权重、观测用 adapter 和模型配置的位置在 JSON 的 `observation_weights`，其中 `ego_hand_system/` 前缀定位到当前检出目录。检测器与基础权重放在 `models/wilor/`，观测专用的签收版 v2 adapter 放在 `models/wilor/observation_v2/best_trainable.pt`，模型配置位于 `training/pretrained_models/model_config.yaml`。部署推理使用的 v4 adapter 由推理命令单独指定。已有本段四机观测可加 `--wilor-observations /你的/native_wilor.npz`，拟合前会核对参考时戳和四路曝光帧号。模型文件与录制数据需要部署到目标机器。
 
 ### 双手分支执行哪些优化
 
@@ -129,28 +129,14 @@ bash scripts/export_ego_nokov_labels.sh \
 
 ## 汇总旧版 joint_refit 输出并训练
 
-每跑完一段录制，就重新汇总一次。脚本会自动收集 `EGO_glove/work/` 下所有带优化、并且通过数据集检查的录制：
+在仓库根目录执行，汇总带有检查记录的旧版 joint_refit 导出。若额外指定的旧标签位于其他位置，可加 `--extra /path/to/export/merged`。
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove
-/home/p3/miniforge3/envs/ego-hand/bin/python -B wilor_training/assemble_joint_refit_trainset.py \
-  --output wilor_training/output/native_kb_training_20261111/joint_refit_trainset_新名字
+python training/assemble_joint_refit_trainset.py --work-root ../work \
+  --output training/datasets/joint_refit_new
 ```
 
-- 每段录制时间轴上最后 10% 的时刻做验证集，其余做训练集。加入新录制不会打乱已有录制的划分。
-- 图片和标签用硬链接，不额外占磁盘。
-- 输出目录要用新名字，或者先删掉旧目录；内容不同的已有目录会报错。
-- 默认搜索目录以外的旧结果用 `--extra 目录/export/merged` 加进来。例如 192916 的旧优化标签：`--extra wilor_training/output/native_kb_training_20261111/joint_refit_v5_dense/fit/final/export/merged`。用上面的命令重跑 192916 之后，就不用再加 `--extra`。
-
-训练前，先把 `wilor_training/output/native_kb_training_20261111/joint_refit_train.yaml` 里的 `paths.dataset_root` 改成上面的汇总目录，再启动：
-
-```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
-nohup env PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  /home/p3/miniforge3/envs/ego-hand/bin/python train_glove.py --mode joint_lora \
-  --config output/native_kb_training_20261111/joint_refit_train.yaml \
-  > output/native_kb_training_20261111/train_joint_refit.log 2>&1 &
-```
+每段末尾约 10% 时间留给验证。双手 v4 导出已包含本段训练和验证清单。用新数据训练时复制 v4 配方，将 `paths.dataset_root` 指向目标数据集并设置独立的输出目录。[训练命令](../training/README.md)
 
 标签里的 `approved_for_training` 仍然是 `false`。这只是人工确认标记，训练脚本不读它。
 

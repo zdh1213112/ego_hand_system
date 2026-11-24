@@ -9,8 +9,8 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
-ROOT = Path(__file__).resolve().parents[2]
-PROJECT = ROOT.parent / 'ego_hand_system'
+ROOT = Path(__file__).resolve().parents[4]
+PROJECT = ROOT
 sys.path[:0] = [str(PROJECT / 'scripts'), str(ROOT.parent / 'nokov_ego_hand_validation/integration/pipeline')]
 from align_nokov_cam0 import load_rigid, load_markers, interpolate_points
 from ego_data.calibration import CameraCalibration

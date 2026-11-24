@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import cv2
 import numpy as np
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[4]
 EXP=ROOT/'output/native_kb_training_20261111'
 def main():
  src=EXP/'marker24_pilot_pose_locked/review'

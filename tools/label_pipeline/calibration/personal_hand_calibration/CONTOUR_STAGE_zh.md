@@ -40,11 +40,11 @@
 脚本仍针对 pair_20261111_192916 和上一轮 v2 输出，颜色阈值仅适配本批白色手套；不是任意新录制的通用分割器。输出目录必须不存在。
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
 PY=/home/p3/miniforge3/envs/ego-hand/bin/python
-$PY tools/personal_hand_calibration/image_constraints.py   --output output/native_kb_training_20261111/personal_contours_new
-$PY tools/personal_hand_calibration/refine_contours.py   --observations output/native_kb_training_20261111/personal_contours_new/observations.json   --output output/native_kb_training_20261111/personal_calibration_image_new --steps 120
-$PY tools/marker24_pilot/build_review.py   --pilot output/native_kb_training_20261111/personal_calibration_image_new
+$PY tools/label_pipeline/calibration/personal_hand_calibration/image_constraints.py   --output output/native_kb_training_20261111/personal_contours_new
+$PY tools/label_pipeline/calibration/personal_hand_calibration/refine_contours.py   --observations output/native_kb_training_20261111/personal_contours_new/observations.json   --output output/native_kb_training_20261111/personal_calibration_image_new --steps 120
+$PY tools/label_pipeline/calibration/marker24_pilot/build_review.py   --pilot output/native_kb_training_20261111/personal_calibration_image_new
 ```
 
 ## 验证

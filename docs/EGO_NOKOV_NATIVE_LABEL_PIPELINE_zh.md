@@ -752,7 +752,7 @@ bash /home/p3/data_sda1/EGO_glove/ego_hand_system/scripts/run_native_wilor_expor
 
 当前仅生成实验模型与原图／基线／新方案的四路对照，尚未证明标签贴合改善，不替换基线，也未接入默认全量导出。指尖检查仅在本次细化中留出；基线初始化本身曾使用这些点，不能作为严格独立精度评估。
 
-实现、完整限制、实验指标与重跑命令见 [24 点试拟合说明](/home/p3/data_sda1/EGO_glove/wilor_training/tools/marker24_pilot/README.md)。当前查看器：http://127.0.0.1:8766/marker24_pilot/ 。
+实现、完整限制、实验指标与重跑命令见 [24 点试拟合说明](../tools/label_pipeline/calibration/marker24_pilot/README.md)。当前查看器：http://127.0.0.1:8766/marker24_pilot/ 。
 
 ### 24 点实验的手背方向修正
 
@@ -800,7 +800,7 @@ bash /home/p3/data_sda1/EGO_glove/ego_hand_system/scripts/run_native_wilor_expor
 
 已完成四相机 × 12 时刻的原图审核集和交互核对工具。此步骤绕过 MANO，不改标定或基线。自动候选仍需人工核对，不能以候选距离证明标定合格。
 
-详细结果与操作：[原始球心审核说明](/home/p3/data_sda1/EGO_glove/wilor_training/tools/native_marker_audit/README_zh.md)。
+详细结果与操作：[原始球心审核说明](../tools/label_pipeline/calibration/native_marker_audit/README_zh.md)。
 
 入口：http://127.0.0.1:8766/raw_marker_audit/ 。下一步：核对清晰真实 marker 中心并导出审核 JSON，再分析投影误差是否具有系统性，之后决定模型优化方向。
 
@@ -809,28 +809,28 @@ bash /home/p3/data_sda1/EGO_glove/ego_hand_system/scripts/run_native_wilor_expor
 
 已实现显式启用的分阶段标定，输出在 `wilor_training/output/native_kb_training_20261111/personal_calibration_v2`。完成两组时间块稳定性检查和固定手型对照。**当前只使用 marker，尚无独立图像轮廓／指尖约束，不批准为正式真值标签，也没有修改默认导出。**
 
-完整实验结果、限制与命令：[个人手型标定说明](/home/p3/data_sda1/EGO_glove/wilor_training/tools/personal_hand_calibration/README_zh.md)。查看入口：http://127.0.0.1:8766/personal_calibration/ 。
+完整实验结果、限制与命令：[个人手型标定说明](../tools/label_pipeline/calibration/personal_hand_calibration/README_zh.md)。查看入口：http://127.0.0.1:8766/personal_calibration/ 。
 
 
 ## 原图轮廓约束实验（20261112，PERSONAL-3）
 
 已接入四路 KB 原图轮廓候选，完成仅调整共享手型的受控实验。326 份候选中 233 份标定、93 份验证；留出图像轮廓距离改善较小，尚未通过个人手型或正式标签验收。可见指尖身份约束尚未接入。
 
-详细方法、数值和复现命令：[原图轮廓实验](/home/p3/data_sda1/EGO_glove/wilor_training/tools/personal_hand_calibration/CONTOUR_STAGE_zh.md)。入口：http://127.0.0.1:8766/personal_contour_calibration/ 。
+详细方法、数值和复现命令：[原图轮廓实验](../tools/label_pipeline/calibration/personal_hand_calibration/CONTOUR_STAGE_zh.md)。入口：http://127.0.0.1:8766/personal_contour_calibration/ 。
 
 
 ## 固定手型后的参数分项对照（20261112）
 
 完成整手位姿、手指姿态、固定面片内附着参数和“附着重标定后再拟合手指”的四组对照；统一外轮廓定义，并重新渲染留出相机视角评分。改善有限，仍未通过手套贴合验收，不接入生产标签。
 
-[完整结果、限制与命令](/home/p3/data_sda1/EGO_glove/wilor_training/tools/personal_hand_calibration/ABLATION_STAGE_zh.md)。页面：http://127.0.0.1:8766/personal_ablation/ 。
+[完整结果、限制与命令](../tools/label_pipeline/calibration/personal_hand_calibration/ABLATION_STAGE_zh.md)。页面：http://127.0.0.1:8766/personal_ablation/ 。
 
 
 ## 人工调整个人手型与目标 mesh（MANUAL-SHAPE-1）
 
 已提供 PERSONAL-3 起点的参数化调整工具：四路原图同步投影、共享手型尺寸／betas、当前帧整体与手指姿态、可旋转三维预览，以及多视角确认和保存。保存同时计算局部 marker 剩余偏差，作为后续附着标定证据，不自动视为正式真值。
 
-入口：http://127.0.0.1:8767/ 。[操作与参数说明](/home/p3/data_sda1/EGO_glove/wilor_training/tools/manual_shape_tuner/README_zh.md)。保存结果位于 `wilor_training/output/native_kb_training_20261111/manual_shape_tuning/`，`latest.json` 指向最新记录。
+入口：http://127.0.0.1:8767/ 。[操作与参数说明](../tools/label_pipeline/calibration/manual_shape_tuner/README_zh.md)。保存结果位于 `wilor_training/output/native_kb_training_20261111/manual_shape_tuning/`，`latest.json` 指向最新记录。
 
 ## 显式接入完整执行链路（24 marker＋共享手型＋四目轮廓）
 
@@ -849,38 +849,38 @@ bash /home/p3/data_sda1/EGO_glove/ego_hand_system/scripts/run_native_wilor_expor
 
 新增显式 `joint_pose_attachments` 配置，原配置默认关闭。使用 `configs/native_personal_marker24_joint.json` 可在分阶段结果后，固定共享 betas，同时优化逐帧旋转、平移、手指姿态和共享表面／腕点附着。四目轮廓、NOKOV24 和时序项共同约束；额外输出相机留出实验用于检查。本次有 127 个左手、134 个右手采样帧参与，未参与帧保留原动作并标记。
 
-[结果与完整命令](/home/p3/data_sda1/EGO_glove/wilor_training/tools/joint_pose_attachment/README_zh.md)。修正前后：http://127.0.0.1:8766/joint_pose_attachment/ 。实际导出标签：http://127.0.0.1:8771/ 。
+[结果与完整命令](../tools/label_pipeline/calibration/joint_pose_attachment/README_zh.md)。修正前后：http://127.0.0.1:8766/joint_pose_attachment/ 。实际导出标签：http://127.0.0.1:8771/ 。
 
 
 ## 实际轮廓输入核查（CONTOUR-AUDIT-1）
 
 入口：http://127.0.0.1:8766/contour_audit/ 。紫色为实际优化点，绿色为从原始视频精确重放的分割。829 份接受观测逐点核验一致。**已发现 camera0 / sync632 右手连到背景横梁，错误边缘实际参与了求解；此前轮廓指标下降不足以证明真实贴合改善，应先修复观测再评估。**
 
-[操作、来源和重放命令](/home/p3/data_sda1/EGO_glove/wilor_training/tools/joint_pose_attachment/CONTOUR_AUDIT_zh.md)。
+[操作、来源和重放命令](../tools/label_pipeline/calibration/joint_pose_attachment/CONTOUR_AUDIT_zh.md)。
 
 ## 优质关键帧标定后固定手型与附着（KEYFRAME-CAL-3）
 
 完成严格分割质量筛选，左右手各选 16 个至少两目通过的关键时刻，仅用这 80 份视图估计共享手型／附着。其余 178 个采样时刻／手固定共享参数，用 NOKOV24 驱动动作。在 190 份未参与标定图像上，重新渲染的轮廓距离相对原始基线下降左手 19.5%、右手 26.9%；两组独立标定的中性手型顶点差异中位数为 0.33 mm、0.75 mm。指标依赖自动分割，困难接触动作未通过独立真值验收，不替换默认路线或正式训练标签。
 
-[干净复现命令、结果位置、原生 WiLoR 对比限制](/home/p3/data_sda1/EGO_glove/wilor_training/tools/keyframe_calibration/README_zh.md)。样本：http://127.0.0.1:8766/quality_keyframes/ ；mesh：http://127.0.0.1:8766/keyframe_calibration/ 。
+[干净复现命令、结果位置、原生 WiLoR 对比限制](../tools/label_pipeline/calibration/keyframe_calibration/README_zh.md)。样本：http://127.0.0.1:8766/quality_keyframes/ ；mesh：http://127.0.0.1:8766/keyframe_calibration/ 。
 
 ## 完整掩膜驱动共享手型（FULL-MASK-1）
 
 已完成仅共享 betas 和标定帧受限动作两组对照，使用真实 KB 原图投影、完整区域 IoU 和像素距离项。纯手型组在未拟合图像上，IoU 相对上一轮提高左手 2.39、右手 1.28 个百分点，效果有限；固定附着下的 marker 残差有所上升，尚未批准为最终真值。不改变默认导出路线。
 
-[执行命令、验证范围与结果位置](/home/p3/data_sda1/EGO_glove/wilor_training/tools/full_silhouette/README_zh.md)。交互对照：http://127.0.0.1:8766/full_silhouette/review/ ；四路近景：http://127.0.0.1:8766/full_silhouette/closeups/ 。
+[执行命令、验证范围与结果位置](../tools/label_pipeline/calibration/full_silhouette/README_zh.md)。交互对照：http://127.0.0.1:8766/full_silhouette/review/ ；四路近景：http://127.0.0.1:8766/full_silhouette/closeups/ 。
 
 ## NOKOV 手部骨架源数据核查
 
 确认本次数据每手除24个marker外，还保存26段SDK骨架位姿。完成6077帧骨长与旋转链检查和四目8时刻原图核对；SDK骨架具有动作先验价值，但节点原点不应直接当真实内部关节，五个Finger0原点重合、Hand根与WristM相差约21～26mm。尚未改动MANO拟合或标签。
 
-[检查入口、结果与复现命令](/home/p3/data_sda1/EGO_glove/wilor_training/tools/nokov_skeleton_audit/README_zh.md)。查看：http://127.0.0.1:8766/nokov_skeleton/review/ 。
+[检查入口、结果与复现命令](../tools/label_pipeline/calibration/nokov_skeleton_audit/README_zh.md)。查看：http://127.0.0.1:8766/nokov_skeleton/review/ 。
 
 ## SDK 骨架按已补偿内部偏移处理的标签对照
 
 按用户指定假设完成两种腕根映射的固定手型 MANO 动作拟合，未额外减2mm。Hand根输出458张图/916份双手标签，Finger0公共根输出519张图/1038份标签，全部通过格式、MANO重建和KB投影检查。但同组可靠分割上的IoU相对当前标签下降约5个百分点，保留实验状态，不替换正式标签。
 
-[完整方法、假设、结果和命令](/home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_skeleton_fit/README_zh.md)。查看：http://127.0.0.1:8766/sdk_skeleton_labels/review/ 。
+[完整方法、假设、结果和命令](../tools/label_pipeline/calibration/sdk_skeleton_fit/README_zh.md)。查看：http://127.0.0.1:8766/sdk_skeleton_labels/review/ 。
 
 
 ## SDK 方向辅助及 Finger0 参考腕根（SDK-DIRECTION-1）
@@ -889,4 +889,4 @@ bash /home/p3/data_sda1/EGO_glove/ego_hand_system/scripts/run_native_wilor_expor
 
 固定betas、marker附着和逐帧根平移，以相同的小幅动作自由度比较marker-only与marker+SDK方向辅助。后者相对marker-only在未参与标定的190份图像上IoU增加左0.39／右0.07个百分点；相对当前标签为左−0.53／右+0.43个百分点，尚无整体替换依据。没有SDK绝对关节位置／骨长硬目标，也未额外减2mm。每组导出505张原图／1010份双手实验标签，执行原生格式和MANO重建检查；保持未批准训练状态。
 
-[方法、命令、指标和完整产物](/home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_direction_fit/README_zh.md)。原图对照：http://127.0.0.1:8766/sdk_direction/review/ ；视频：http://127.0.0.1:8766/sdk_direction/closeups_direction/ 。
+[方法、命令、指标和完整产物](../tools/label_pipeline/calibration/sdk_direction_fit/README_zh.md)。原图对照：http://127.0.0.1:8766/sdk_direction/review/ ；视频：http://127.0.0.1:8766/sdk_direction/closeups_direction/ 。

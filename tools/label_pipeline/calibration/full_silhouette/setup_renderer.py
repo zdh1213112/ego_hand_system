@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[4]
 REVISION='253ac4fcea7de5f396371124af597e6cc957bfae'
 SOURCE=ROOT/'output/dependencies/nvdiffrast'
 RUNTIME=ROOT/'output/dependencies/nvdiffrast_runtime'

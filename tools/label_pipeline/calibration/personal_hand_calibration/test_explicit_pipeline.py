@@ -1,7 +1,7 @@
 import json,subprocess,sys
 from pathlib import Path
 import pytest
-PROJECT=Path(__file__).resolve().parents[3]/'ego_hand_system'
+PROJECT=Path(__file__).resolve().parents[4]
 sys.path.insert(0,str(PROJECT/'scripts'))
 from personal_marker24_config import load_personal_config
 PAIR=PROJECT.parent/'data/20261111/20261111_nokov_hand/pair_20261111_192916'

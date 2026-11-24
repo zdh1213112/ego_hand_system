@@ -5,8 +5,8 @@ from pathlib import Path
 
 import cv2,numpy as np
 
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT.parent/'ego_hand_system/scripts'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT / 'scripts'))
 from ego_data.calibration import CameraCalibration
 from camera_models import project_points
 

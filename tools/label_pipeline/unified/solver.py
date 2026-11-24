@@ -14,7 +14,7 @@ import yaml
 PACKAGE=Path(__file__).resolve().parents[1]
 EGO=PACKAGE.parents[1]
 PROJECT=EGO.parent
-sys.path[:0]=[str(EGO/'scripts/joint_refit'),str(EGO/'scripts'),str(PROJECT/'wilor_training/tools/personal_hand_calibration'),str(PROJECT/'wilor_training/tools/full_silhouette')]
+sys.path[:0]=[str(EGO/'scripts/joint_refit'),str(EGO/'scripts'),str(EGO/'tools/label_pipeline/calibration/personal_hand_calibration'),str(EGO/'tools/label_pipeline/calibration/full_silhouette')]
 from fit_mano_sequence import import_mano,run_model
 from bounded_articulation import compose,components,rotation_limits
 from finger_prior import rest_axes

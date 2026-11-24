@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation,Slerp
 
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools/personal_hand_calibration'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/personal_hand_calibration'))
 from context import load_context,raw24_context
 from run import CameraCalibration
 sys.path.insert(0,str(ROOT.parent/'nokov_ego_hand_validation/integration/pipeline'))

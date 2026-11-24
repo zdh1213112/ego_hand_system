@@ -13,7 +13,8 @@ import numpy as np
 import yaml
 
 PACKAGE=Path(__file__).resolve().parents[1]
-PROJECT=PACKAGE.parents[2]
+REPO = PACKAGE.parents[1]
+PROJECT = REPO.parent
 
 def archive(run,output):
     with (run/'multiview_frames.csv').open() as stream:frames=list(csv.DictReader(stream))
@@ -40,17 +41,27 @@ def archive(run,output):
     os.replace(pending,output)
     return dict(frames=n,views_per_side=valid.sum((0,1)).tolist())
 
-def command(ego,cfg,root):
-    source=next((PROJECT/'ego_hand_system/output/glove_v2_best_detector3680/full').glob('group_004_*/run_config.json'))
-    options=json.loads(source.read_text())['options']
-    for name in ('checkpoint','adapter','detector'):
-        if Path(options[name]).resolve()!=(PROJECT/cfg[name]).resolve():raise ValueError(name)
-    run=root/'inference'/ego.name.split('_')[-1]
-    options.update(input=str(ego/'part0001'),calibration=str(next(ego.glob('*calibration_camera.yaml'))),output=str(run))
-    runner=PROJECT/'work/wilor_kb_inference_runtime/run_inference.py'
-    argv=[sys.executable,'-u','-B',str(runner)]
-    for k,v in options.items():argv.extend(['--'+k.replace('_','-'),str(v)])
-    return run,argv
+def command(ego, cfg, root):
+    sys.path.insert(0, str(REPO / 'scripts'))
+    from label_export_settings import workspace_path
+
+    run = root / 'inference' / ego.name.split('_')[-1]
+    options = {
+        'input': ego / 'part0001',
+        'calibration': next(ego.glob('*calibration_camera.yaml')),
+        'output': run,
+        'model-config': REPO / 'training/pretrained_models/model_config.yaml',
+        'mano-model-dir': REPO / 'models/mano',
+        'batch-size': 32, 'frame-batch-size': 8, 'preprocess-workers': 8,
+        'shared-steps': 100, 'shared-batch-size': 32,
+    }
+    for name in ('checkpoint', 'adapter', 'detector'):
+        options[name] = workspace_path(REPO, cfg[name])
+    argv = ['bash', str(REPO / 'scripts/run_hand_inference.sh')]
+    for key, value in options.items():
+        argv.extend(['--' + key, str(value)])
+    return run, argv
+
 
 def infer(cfg,ego):
     root=(PROJECT/cfg['output_root']).resolve()
@@ -63,7 +74,9 @@ def infer(cfg,ego):
     def save():note.write_text(json.dumps(payload,indent=2)+'\n')
     save()
     with (dest/'inference.log').open('a') as log:
-        proc=subprocess.run(argv,cwd=PROJECT,stdout=log,stderr=subprocess.STDOUT)
+        env = os.environ.copy()
+        env.setdefault('EGO_HAND_PYTHON', sys.executable)
+        proc=subprocess.run(argv,cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT)
     payload.update(elapsed_seconds=time.time()-start,returncode=proc.returncode);save()
     try:
         proc.check_returncode()

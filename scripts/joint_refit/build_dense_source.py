@@ -3,8 +3,8 @@
 import argparse, sys
 from pathlib import Path
 import numpy as np
-ROOT = Path(__file__).resolve().parents[2].parent / 'wilor_training'
-sys.path.insert(0, str(ROOT / 'tools/personal_hand_calibration'))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration'))
 from context import load_context
 
 

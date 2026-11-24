@@ -13,8 +13,8 @@ import subprocess
 import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(ROOT / 'ego_hand_system/scripts'))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / 'scripts'))
 from ego_hand_inference.ego_data.h264 import H264MatroskaWriter
 from ego_hand_inference.ego_data.calibration import cameras_from_ego_yaml
 from mcap.reader import make_reader

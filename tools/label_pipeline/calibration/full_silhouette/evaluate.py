@@ -14,8 +14,8 @@ import numpy as np
 import torch
 from scipy.spatial import cKDTree
 
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools/personal_hand_calibration'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/personal_hand_calibration'))
 from context import load_context
 from refine_contours import project
 from render_masks import load_hand_mask

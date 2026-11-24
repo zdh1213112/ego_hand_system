@@ -3,8 +3,8 @@
 import argparse,json,sys,time
 from pathlib import Path
 import numpy as np,torch,cv2
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools/personal_hand_calibration'))
+ROOT=Path(__file__).resolve().parents[4]
+sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/personal_hand_calibration'))
 from run import EXP,PROJECT,import_mano,run_model,stats
 from context import load_context
 from ablate_geometry import split_views

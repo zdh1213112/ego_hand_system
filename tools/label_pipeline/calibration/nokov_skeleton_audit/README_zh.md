@@ -9,7 +9,7 @@
 结果目录：
 
 ```text
-/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/nokov_skeleton_audit_v1
+output/native_kb_training_20261111/nokov_skeleton_audit_v1
 ```
 
 完成原始 6077 个 NOKOV 帧的数值检查，并生成 8 个代表时间点 × 4 相机共 32 张原图核查。检查覆盖整段录制的骨架数据；图像核对是代表帧，不代表已逐帧确认所有动作。
@@ -41,7 +41,7 @@ SDK 旋转解释为世界旋转时，父骨骼旋转下的子节点局部偏移�
 ## 一个命令复现
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/nokov_skeleton_audit/run.sh
+bash tools/label_pipeline/calibration/nokov_skeleton_audit/run.sh
 ```
 
 默认使用当前录制的既有 context、原图审核缓存和当前 MANO 对照；创建新目录，不覆盖已有结果。`--output 新目录` 可以指定保存位置。命令不会重新采集、训练或修改默认标签流程。
@@ -51,7 +51,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/nokov_skeleton_audit/run.
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python -m http.server 8774 \
   --bind 127.0.0.1 \
-  --directory /home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/nokov_skeleton_audit_v1
+  --directory output/native_kb_training_20261111/nokov_skeleton_audit_v1
 ```
 
 打开 http://127.0.0.1:8774/review/ 。数值报告为 `report.json`，接入判断为本次目录中的 `decision.json`。

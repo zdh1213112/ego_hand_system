@@ -5,7 +5,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-BUILDER=ROOT.parent/'wilor_training/tools/marker_placement/build_label_viewer.py'
+BUILDER=ROOT/'tools/label_pipeline/calibration/marker_placement/build_label_viewer.py'
 def main():
  ap=argparse.ArgumentParser(__doc__)
  ap.add_argument('--dataset',type=Path,required=True,help='Dataset root containing index.jsonl, images/, labels/')

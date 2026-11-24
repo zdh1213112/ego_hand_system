@@ -201,7 +201,7 @@ def main():
               f'Optimized viewer: {final / "export/viewer/index.html"}\n'
               f'Frame acceptance: {optimized / "dense/fit/summary.json"}\n'
               f'Image check: {final / "export/image_evidence_check.json"}\n'
-              f'Add to the training set: python wilor_training/assemble_joint_refit_trainset.py --output <trainset dir>', flush=True)
+              f'Add to the training set: python training/assemble_joint_refit_trainset.py --output <trainset dir>', flush=True)
         return
     if personal['enabled']:
         run('personal_marker24', SCRIPTS/'run_personal_marker24_pipeline.py', '--dataset', dataset, '--alignment', alignment/'fourview_alignment.json', '--aligned21', alignment/'aligned_nokov21.npz', '--baseline', base, '--config', a.optimization_config.resolve(), '--output', out/'optimized', '--sample-stride', a.sample_stride, '--source-fps', a.source_fps, '--device', a.device)

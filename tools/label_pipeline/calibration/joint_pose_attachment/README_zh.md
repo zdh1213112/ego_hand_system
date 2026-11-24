@@ -40,7 +40,7 @@
 
 ## 输出与参数
 
-目录：`/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/joint_pose_attachment_all_v1`
+目录：`output/native_kb_training_20261111/joint_pose_attachment_all_v1`
 
 - `left_pilot.npz`、`right_pilot.npz`：联合修正后的实际参数、mesh、球心预测及共享附着。
 - `joint_fit_mask`：NPZ 内记录哪些帧参加本轮联合修正。

@@ -9,8 +9,8 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'tools/personal_hand_calibration'))
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration'))
 from run import PROJECT, import_mano, run_model
 from build_mapping import unit, proper_rotation, MP_PARENT, MP_CHILD
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[4]
 ap=argparse.ArgumentParser()
 for name in ['context','selection','source','output']:ap.add_argument('--'+name,type=Path,required=True)
 a=ap.parse_args()

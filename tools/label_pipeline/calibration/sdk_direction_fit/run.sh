@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-TASK_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+TASK_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$TASK_ROOT"
 EXP="$TASK_ROOT/output/native_kb_training_20261111"
 CONTEXT="$EXP/explicit_pipeline_sampled_smoke_v2/context.json"
@@ -24,18 +24,18 @@ while (($#)); do
 done
 [[ ! -e "$RESULT" ]] || { echo "输出目录已存在：$RESULT" >&2; exit 2; }
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
-"$PYTHON_BIN" -B tools/sdk_direction_fit/build_mapping.py --context "$CONTEXT" --source "$SOURCE" --skeleton "$SKELETON" --selection "$SELECTION" --output "$RESULT/profile"
+"$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/build_mapping.py --context "$CONTEXT" --source "$SOURCE" --skeleton "$SKELETON" --selection "$SELECTION" --output "$RESULT/profile"
 for variant in marker_only direction; do
-  "$PYTHON_BIN" -B tools/sdk_direction_fit/fit.py --context "$CONTEXT" --source "$SOURCE" --profile "$RESULT/profile" --variant "$variant" --output "$RESULT/$variant"
-  "$PYTHON_BIN" -B tools/sdk_direction_fit/export_labels.py --context "$CONTEXT" --source "$RESULT/$variant"
+  "$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/fit.py --context "$CONTEXT" --source "$SOURCE" --profile "$RESULT/profile" --variant "$variant" --output "$RESULT/$variant"
+  "$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/export_labels.py --context "$CONTEXT" --source "$RESULT/$variant"
 done
 DATASET="$("$PYTHON_BIN" -c 'import json,sys;print(json.load(open(sys.argv[1]))["dataset"])' "$CONTEXT")"
-"$PYTHON_BIN" -B tools/sdk_direction_fit/build_review.py --previous-review "$PREVIOUS_REVIEW" --result "$RESULT" --dataset "$DATASET" --output "$RESULT/review"
-"$PYTHON_BIN" -B tools/sdk_direction_fit/evaluate_fit.py --context "$CONTEXT" --selection "$SELECTION" --source "$SOURCE" --result "$RESULT"
+"$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/build_review.py --previous-review "$PREVIOUS_REVIEW" --result "$RESULT" --dataset "$DATASET" --output "$RESULT/review"
+"$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/evaluate_fit.py --context "$CONTEXT" --selection "$SELECTION" --source "$SOURCE" --result "$RESULT"
 for variant in direction marker_only; do
-  "$PYTHON_BIN" -B tools/sdk_direction_fit/render_previews.py --review "$RESULT/review" --output "$RESULT/closeups_$variant" --root "$variant"
+  "$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/render_previews.py --review "$RESULT/review" --output "$RESULT/closeups_$variant" --root "$variant"
 done
-"$PYTHON_BIN" -B tools/sdk_direction_fit/verify.py --source "$SOURCE" --result "$RESULT"
+"$PYTHON_BIN" -B tools/label_pipeline/calibration/sdk_direction_fit/verify.py --source "$SOURCE" --result "$RESULT"
 echo "完成：$RESULT"
 echo "本地查看：$PYTHON_BIN -m http.server 8776 --bind 127.0.0.1 --directory $RESULT"
 echo '打开：http://127.0.0.1:8776/review/'

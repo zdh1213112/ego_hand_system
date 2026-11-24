@@ -28,7 +28,7 @@
 结果根目录：
 
 ```text
-/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/sdk_skeleton_assumed_internal_v1
+output/native_kb_training_20261111/sdk_skeleton_assumed_internal_v1
 ```
 
 | 方案 | 原图数 | 双手标签数 | 实际数据集相对路径 |
@@ -65,7 +65,7 @@ Hand 根方案中，左手 52/64、右手 106/126 份图像的 IoU 下降超过2
 ## 复现命令
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_skeleton_fit/run.sh \
+bash tools/label_pipeline/calibration/sdk_skeleton_fit/run.sh \
   --assume-sdk-internal-offsets
 ```
 
@@ -76,7 +76,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/sdk_skeleton_fit/run.sh \
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python -m http.server 8775 \
   --bind 127.0.0.1 \
-  --directory /home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/sdk_skeleton_assumed_internal_v1
+  --directory output/native_kb_training_20261111/sdk_skeleton_assumed_internal_v1
 ```
 
 打开 http://127.0.0.1:8775/review/ ，视频在 `/closeups_hand/` 与 `/closeups_finger0/`。

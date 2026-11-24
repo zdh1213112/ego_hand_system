@@ -25,7 +25,7 @@
 其中 `prefill/` 及 `prefill.js` 属于指定录制的生成数据，已由 Git 忽略，本机已有预填仍可使用；
 重建方法见该目录 README。
 
-多数 Python 标定工具依赖同级检出的 `ego_hand_system`；NOKOV 原始轨迹处理还依赖
+Python 标定工具使用本仓库的相机与 MANO 实现。NOKOV 原始轨迹处理还依赖
 同级 `nokov_ego_hand_validation`。相关 MANO 模型、原始录制、对齐结果及 `output/` 下的拟合产物需单独准备。
 Shell 脚本保留原有本机环境默认值；换机器时按各脚本的 `EGO_NATIVE_PYTHON`、
 `KEYFRAME_PYTHON`、`FULL_MASK_PYTHON`、`SDK_FIT_PYTHON` 或 `SKELETON_PYTHON` 环境变量选择解释器。
@@ -35,9 +35,9 @@ HTML 查看器与轮廓控件是构建页面时读取的源码模板，应随代
 播放、缩放与全屏代码已经内嵌于 `marker_placement/label_viewer.html`，不再需要一次性修补脚本。
 
 三个工具 `test_*.py` 验证标定编辑、联合投影和外部流水线的行为，仍有回归价值，
-其运行条件和命令见 [测试说明](../docs/README.md#测试)。
+其运行条件和命令见 [测试说明](../../../training/docs/README.md#测试)。
 
-## 根目录的配套脚本
+## `training/` 下的配套脚本
 
 - `assemble_joint_refit_trainset.py`：收集已完成标签导出、合并数据，并按时间划分训练／验证集。
 - `compare_marker_projection.py`：将矫正图预测映回原图，与 NOKOV marker 投影比较。

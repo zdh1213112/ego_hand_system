@@ -9,7 +9,7 @@ from types import SimpleNamespace
 HERE=Path(__file__).resolve()
 EGO=HERE.parents[3]
 SOURCE=EGO/'scripts/run_joint_refit_recording.py'
-EXPECTED=EGO.parent/'wilor_training/tools/nokov_skeleton_audit/analyze.py'
+EXPECTED=EGO/'tools/label_pipeline/calibration/nokov_skeleton_audit/analyze.py'
 
 
 def main():

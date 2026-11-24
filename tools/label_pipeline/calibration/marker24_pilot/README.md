@@ -10,12 +10,12 @@
 
 下方 `v1_run2` 数值与目录为保留的旧版历史记录，已因方向错误失效。
 
-已生成的对照：http://127.0.0.1:8766/marker24_pilot/ 。由 `tools/marker_placement/start_viewer.sh` 提供本地服务。
+已生成的对照：http://127.0.0.1:8766/marker24_pilot/ 。由 `tools/label_pipeline/calibration/marker_placement/start_viewer.sh` 提供本地服务。
 
 重新运行本次录制的实验，自动使用新的输出目录：
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker24_pilot/run.sh
+bash tools/label_pipeline/calibration/marker24_pilot/run.sh
 ```
 
 当前脚本针对 `pair_20261111_192916`，使用 `marker24_calibration_input/placement_user_confirmed.json`。不是所有新录制通用入口。基线导出命令及默认行为没有改变。
@@ -32,7 +32,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker24_pilot/run.sh
 
 本轮结果目录：
 
-`/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/marker24_pilot_v1_run2`
+`output/native_kb_training_20261111/marker24_pilot_v1_run2`
 
 - `left_pilot.npz` / `right_pilot.npz`：候选模型、固定附着位置、基线、目标 24 点及划分。
 - `summary.json`：拟合与检查指标，`approved_for_full_export=false`。
@@ -55,7 +55,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker24_pilot/run.sh
 
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python \
-  /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker24_pilot/run_pilot.py \
+  tools/label_pipeline/calibration/marker24_pilot/run_pilot.py \
   --enable-marker24 --fit-all-markers --freeze-finger-pose \
   --output /你的新实验目录
 ```

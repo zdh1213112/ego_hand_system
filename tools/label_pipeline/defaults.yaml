@@ -20,11 +20,11 @@ split_seed: 42                  # build_splits.py:10
 native_tool_roots:
   - nokov_ego_hand_validation/integration/pipeline
   - nokov_ego_hand_validation/tools
-  - wilor_training/tools
-  - wilor_training/wilor
-  - wilor_training/prepare_glove_dataset.py
-  - wilor_training/output/dependencies/nvdiffrast_runtime  # Native silhouette rasterizer, scripts/joint_refit/README_zh.md
-training_mano_directory: wilor_training/mano_data/mano_v1_2  # prepare_glove_dataset.py --mano-path, verified against the fitting model
+  - ego_hand_system/tools/label_pipeline/calibration
+  - ego_hand_system/training/wilor
+  - ego_hand_system/training/prepare_glove_dataset.py
+  - ego_hand_system/output/dependencies/nvdiffrast_runtime  # Native silhouette rasterizer, scripts/joint_refit/README_zh.md
+training_mano_directory: ego_hand_system/models/mano  # prepare_glove_dataset.py --mano-path, verified against the fitting model
 v4:
   fit:
     batch_size: 160

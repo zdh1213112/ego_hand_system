@@ -5,7 +5,7 @@
 本次录制：`pair_20261111_192916`。结果根目录：
 
 ```text
-/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/keyframe_calibration_v3
+output/native_kb_training_20261111/keyframe_calibration_v3
 ```
 
 - 样本和分割复核：http://127.0.0.1:8766/quality_keyframes/
@@ -18,7 +18,7 @@
 ```bash
 /home/p3/miniforge3/envs/ego-hand/bin/python -m http.server 8772 \
   --bind 127.0.0.1 \
-  --directory /home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/keyframe_calibration_v3
+  --directory output/native_kb_training_20261111/keyframe_calibration_v3
 ```
 
 再打开 http://127.0.0.1:8772/selection_review/ 或 http://127.0.0.1:8772/fit/review/ 。
@@ -28,7 +28,7 @@
 默认使用本机上述录制已经完成的基线、marker24 输入和分割审核，不重新训练 WiLoR，不继续之前停止的全量原生推理。
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/keyframe_calibration/run.sh
+bash tools/label_pipeline/calibration/keyframe_calibration/run.sh
 ```
 
 自动创建新结果目录，依次执行筛选、主标定、两组稳定性实验、留出图像验证、样本页面和四路 mesh 视频。需准备对应 GPU 环境，默认 Python 为 `ego-hand`；可通过 `KEYFRAME_PYTHON` 环境变量覆盖。

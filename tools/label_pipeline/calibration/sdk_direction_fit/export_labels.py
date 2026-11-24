@@ -7,9 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-PROJECT = ROOT.parent / 'ego_hand_system'
-sys.path.insert(0, str(ROOT / 'tools/personal_hand_calibration'))
+ROOT = Path(__file__).resolve().parents[4]
+PROJECT = ROOT
+sys.path.insert(0, str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration'))
 from context import load_context
 
 
@@ -34,7 +34,7 @@ def main():
         (output / 'commands.json').write_text(json.dumps(commands, indent=2))
         if result.returncode: raise RuntimeError(f'{name} failed: {output / "logs" / (name + ".log")}')
     fit = a.source / 'mano_fit'
-    run('materialize', ROOT / 'tools/personal_hand_calibration/materialize_fit.py', '--context', a.context, '--source', a.source, '--output', fit)
+    run('materialize', ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration/materialize_fit.py', '--context', a.context, '--source', a.source, '--output', fit)
     metadata = dict(sdk_direction_enabled=s['variant'] == 'direction', sdk_direction_mapping_verified=False,
                     sdk_root_policy='finger0', sdk_root_position_used_as_mano_target=False,
                     sdk_joint_positions_used_as_targets=False, sdk_bone_lengths_used_as_targets=False,
@@ -59,7 +59,7 @@ def main():
     (dataset / 'index.jsonl').write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows))
     run('check', PROJECT / 'scripts/check_wilor_training_dataset.py', dataset,
         '--mano-source', PROJECT / 'third_party/MANO', '--mano-model-dir', PROJECT / 'models/mano', '--device', c['device'])
-    run('viewer', ROOT / 'tools/marker_placement/build_label_viewer.py', '--dataset', dataset, '--output', output / 'viewer', '--standalone', '--initial-sync', 632)
+    run('viewer', ROOT / 'tools/label_pipeline/calibration/marker_placement/build_label_viewer.py', '--dataset', dataset, '--output', output / 'viewer', '--standalone', '--initial-sync', 632)
     print(json.dumps(dict(dataset=str(dataset), images=ds['image_count'], labels=ds['label_count'])), flush=True)
 
 

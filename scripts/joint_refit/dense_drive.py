@@ -10,8 +10,8 @@ require sufficient tracked markers and small marker residuals.
 import argparse, json, pickle, sys
 from pathlib import Path
 import numpy as np, torch
-PROJECT_ROOT = Path(__file__).resolve().parents[2]; ROOT = PROJECT_ROOT.parent / 'wilor_training'
-sys.path[:0] = [str(ROOT / 'tools/personal_hand_calibration'), str(ROOT / 'tools/full_silhouette')]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration'), str(ROOT / 'tools/label_pipeline/calibration/full_silhouette')]
 from run import PROJECT, import_mano, run_model, stats
 from render_masks import FullMaskBatch
 sys.path.insert(0, str(Path(__file__).resolve().parent))

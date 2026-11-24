@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / 'output/dependencies/nvdiffrast_runtime'))
 import nvdiffrast.torch as dr
 

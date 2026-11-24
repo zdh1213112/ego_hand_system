@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 import cv2
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[4]
 def main():
  p=argparse.ArgumentParser();p.add_argument('--sync',type=int,default=632);p.add_argument('--side',type=int,choices=(0,1),default=1);a=p.parse_args();hand=['left','right'][a.side];exp=ROOT/'output/native_kb_training_20261111';pilot=exp/'marker24_pilot_pose_locked';z=np.load(pilot/f'{hand}_pilot.npz');b=np.load(exp/f'fourview_192916/native_labels/mano_fit_full_cam01/track_{a.side}.npz');i=int(np.flatnonzero(z['pair_indices']==a.sync)[0]);j=int(np.flatnonzero(b['pair_indices']==a.sync)[0]);v0=z['baseline_vertices'][i];j0=z['baseline_joints'][i];R0=Rotation.from_rotvec(b['global_orient'][j]).as_matrix();R1=Rotation.from_rotvec(z['global_orient'][i]).as_matrix();rel=R1@R0.T;rotvec=Rotation.from_matrix(rel).as_rotvec();faces=z['faces'];fi=z['attachment_faces'];bw=z['barycentric'];target=z['target24'][i];pred0=np.concatenate([z['wrist_local']@R0.T+j0[0],(v0[faces[fi]]*bw[:,:,None]).sum(1)]);pred1=z['predicted24'][i];err0=np.linalg.norm(pred0-target,axis=1)*1000;err1=np.linalg.norm(pred1-target,axis=1)*1000;weights=np.r_[np.full(3,.2),np.ones(21)];cost0=weights*(np.sqrt(1+(err0/6)**2)-1);cost1=weights*(np.sqrt(1+(err1/6)**2)-1)
  rows=[dict(name=str(n),baseline_same_attachment_mm=float(err0[k]),candidate_mm=float(err1[k]),weighted_loss_reduction=float(cost0[k]-cost1[k])) for k,n in enumerate(z['marker_names'])]

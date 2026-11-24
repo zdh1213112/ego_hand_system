@@ -5,10 +5,10 @@
 ## 启动
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/manual_shape_tuner/start.sh
+bash tools/label_pipeline/calibration/manual_shape_tuner/start.sh
 ```
 
-在其他环境中，从仓库根目录运行 `EGO_NATIVE_PYTHON="$(command -v python)" bash tools/manual_shape_tuner/start.sh` 可选择已激活环境的解释器。
+在其他环境中，从仓库根目录运行 `EGO_NATIVE_PYTHON="$(command -v python)" bash tools/label_pipeline/calibration/manual_shape_tuner/start.sh` 可选择已激活环境的解释器。
 
 保持终端运行，已有服务运行时直接打开入口。该服务独立于 8766 的静态查看器。当前专用于已有 pair_20261111_192916 和 PERSONAL-3 产物，不是任意新录制的通用入口。
 
@@ -33,7 +33,7 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/manual_shape_tuner/start.
 
 输出目录：
 
-`/home/p3/data_sda1/EGO_glove/wilor_training/output/native_kb_training_20261111/manual_shape_tuning/`
+`output/native_kb_training_20261111/manual_shape_tuning/`
 
 每次点击保存创建时间戳目录，包含：
 
@@ -52,8 +52,8 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/manual_shape_tuner/start.
 复查命令：
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/p3/miniforge3/envs/ego-hand/bin/python -m pytest -q tools/manual_shape_tuner/test_engine.py
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/p3/miniforge3/envs/ego-hand/bin/python -m pytest -q tools/label_pipeline/calibration/manual_shape_tuner/test_engine.py
 ```
 
 自动测试验证工具行为，不表示人工确认后的形状已经是独立测量真值。

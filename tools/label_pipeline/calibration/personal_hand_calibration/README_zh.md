@@ -44,10 +44,10 @@
 当前脚本针对 pair_20261111_192916，尚非任意录制的通用生产入口。新输出目录必须不存在。
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
 PY=/home/p3/miniforge3/envs/ego-hand/bin/python
-$PY tools/personal_hand_calibration/run.py --enable-personal-calibration   --output output/native_kb_training_20261111/personal_calibration_new   --steps 120 --frames 48
-$PY tools/marker24_pilot/build_review.py   --pilot output/native_kb_training_20261111/personal_calibration_new
+$PY tools/label_pipeline/calibration/personal_hand_calibration/run.py --enable-personal-calibration   --output output/native_kb_training_20261111/personal_calibration_new   --steps 120 --frames 48
+$PY tools/label_pipeline/calibration/marker24_pilot/build_review.py   --pilot output/native_kb_training_20261111/personal_calibration_new
 ```
 
 对照参数：`--freeze-shape` 固定手型；`--subset even` 或 `--subset odd` 使用不同时间块（建议各 32 个标定样本）。默认基线导出命令不受影响。

@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 REASONS = {
     'background_or_excessive_extent': '疑似连接背景／超出 marker 包络',
     'incomplete_marker_or_fingertip_coverage': '手指或 marker 覆盖不完整',
@@ -51,7 +51,7 @@ def main():
                   selected=sum(r['used_in_joint_fit'] for r in records), reasons=counts)
     data = {'report': report, 'records': records}
     (a.output / 'data.js').write_text('window.CONTOUR_AUDIT=' + json.dumps(data, separators=(',', ':')) + ';\n')
-    html = (ROOT / 'tools/joint_pose_attachment/contour_audit.html').read_text()
+    html = (ROOT / 'tools/label_pipeline/calibration/joint_pose_attachment/contour_audit.html').read_text()
     html = html.replace('实际优化轮廓检查 · CONTOUR-AUDIT-1', '优质关键帧筛选 · KEYFRAME-CAL-3')
     html = html.replace('实际优化轮廓检查', '优质关键帧筛选')
     html = html.replace('参与本轮联合优化', '用于固定手型标定').replace('全部接受的轮廓', '全部通过质量门槛的轮廓')

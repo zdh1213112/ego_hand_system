@@ -3,8 +3,8 @@
 import argparse, csv, json, subprocess, sys
 from pathlib import Path
 import cv2, numpy as np, torch
-PROJECT = Path(__file__).resolve().parents[2]; ROOT = PROJECT.parent / 'wilor_training'  # shared fitting tools live in wilor_training/tools
-sys.path[:0] = [str(ROOT / 'tools/full_silhouette'), str(ROOT / 'tools/personal_hand_calibration')]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / 'tools/label_pipeline/calibration/full_silhouette'), str(ROOT / 'tools/label_pipeline/calibration/personal_hand_calibration')]
 from render_masks import project_native
 from context import load_context
 

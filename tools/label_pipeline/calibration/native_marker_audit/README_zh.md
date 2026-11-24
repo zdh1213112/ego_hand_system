@@ -22,7 +22,7 @@
 打开 http://127.0.0.1:8766/raw_marker_audit/ 。服务未启动时：
 
 ```bash
-bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/start_viewer.sh
+bash tools/label_pipeline/calibration/marker_placement/start_viewer.sh
 ```
 
 1. 默认进入 camera0、sync 632、右手。选择 marker，滚轮放大、拖动平移；支持整图和全屏。
@@ -42,8 +42,8 @@ bash /home/p3/data_sda1/EGO_glove/wilor_training/tools/marker_placement/start_vi
 此脚本目前专用于上述录制，路径与固定帧集写在脚本中，不能直接当作任意新录制的通用入口。新输出目录必须不存在：
 
 ```bash
-cd /home/p3/data_sda1/EGO_glove/wilor_training
-/home/p3/miniforge3/envs/ego-hand/bin/python tools/native_marker_audit/build_audit.py --output output/native_kb_training_20261111/raw_marker_audit_v2
+cd /home/p3/data_sda1/EGO_glove/ego_hand_system
+/home/p3/miniforge3/envs/ego-hand/bin/python tools/label_pipeline/calibration/native_marker_audit/build_audit.py --output output/native_kb_training_20261111/raw_marker_audit_v2
 ```
 
 已通过：合成亮／暗点中心检测、双手一对一匹配与歧义检查、无自动确认检查；无头浏览器核验候选采纳／排除／清除、JSON 导出导入和越界坐标拒绝。界面已截图检查。上述检查验证工具，不代表真实对应点已人工验收。

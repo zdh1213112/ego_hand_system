@@ -112,7 +112,7 @@ def run(args):
     if args.publish and not raw:raise ValueError('冻结重发输出仅作签收对照。')
     print('拟合方法：legacy',flush=True)
     out=(PROJECT/cfg['output_root']).resolve()
-    for protected in (HERE.parents[1],PROJECT/'wilor_training',PROJECT/'work/signed_labels_20261120',PROJECT/'work/glove_trainset_20261120_v2'):
+    for protected in (HERE.parents[1],PROJECT/'work/signed_labels_20261120',PROJECT/'work/glove_trainset_20261120_v2'):
         if out==protected or protected in out.parents or out in protected.parents:raise ValueError(f'输出目录与输入或源码重叠 {out}')
     if args.publish:
         from stages.raw_flow import publish

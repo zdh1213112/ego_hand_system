@@ -4,7 +4,7 @@ import numpy as np,torch
 import pytest
 HERE=Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('joint_runner',HERE/'run.py');joint=importlib.util.module_from_spec(spec);spec.loader.exec_module(joint)
-ROOT=HERE.parents[1];EXP=ROOT/'output/native_kb_training_20261111'
+ROOT=HERE.parents[3];EXP=ROOT/'output/native_kb_training_20261111'
 
 @pytest.mark.parametrize('side',[0,1])
 def test_batched_projection_matches_scalar_kb_with_finite_gradients(side):
@@ -30,5 +30,5 @@ def test_saved_joint_result_has_shared_shape_and_changes_motion_and_attachments(
 
 def test_opt_in_chain_materializes_joint_result(tmp_path):
  import subprocess
- project=ROOT.parent/'ego_hand_system';cfg=json.loads((project/'configs/native_personal_marker24_joint.json').read_text());cfg['personal_marker24_optimization']['placement']=str(ROOT.parent/'glove_marker_placement.json');path=tmp_path/'config.json';path.write_text(json.dumps(cfg));output=tmp_path/'out'
+ project=ROOT;cfg=json.loads((project/'configs/native_personal_marker24_joint.json').read_text());cfg['personal_marker24_optimization']['placement']=str(ROOT.parent/'glove_marker_placement.json');path=tmp_path/'config.json';path.write_text(json.dumps(cfg));output=tmp_path/'out'
  r=subprocess.run([sys.executable,str(project/'scripts/run_personal_marker24_pipeline.py'),'--dataset','/planned/dataset','--alignment','/planned/alignment.json','--aligned21','/planned/aligned.npz','--baseline','/planned/baseline','--config',str(path),'--output',str(output),'--dry-run'],capture_output=True,text=True);assert r.returncode==0,r.stderr;commands=[json.loads(x) for x in r.stdout.splitlines() if x.startswith('{')];by={x['stage']:x['command'] for x in commands};assert 'joint_pose_attachments' in by;assert str(output/'joint_fit') in by['materialize_optimized_fit'];assert not output.exists()

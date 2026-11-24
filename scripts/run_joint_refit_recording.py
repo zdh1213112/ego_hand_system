@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ROOT.parent / 'wilor_training/tools'
+TOOLS = ROOT / 'tools/label_pipeline/calibration'
 CODE = ROOT / 'scripts/joint_refit'
 
 

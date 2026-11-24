@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-TASK_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+TASK_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$TASK_ROOT"
 EXP="$TASK_ROOT/output/native_kb_training_20261111"
 CONTEXT="$EXP/explicit_pipeline_sampled_smoke_v2/context.json"
@@ -28,17 +28,17 @@ done
 [[ ! -e "$RESULT" ]] || { echo "输出目录已存在：$RESULT" >&2; exit 2; }
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 for variant in hand finger0; do
-  "$PYTHON_BIN" tools/sdk_skeleton_fit/fit.py --context "$CONTEXT" --source "$SOURCE" --skeleton "$SKELETON" --output "$RESULT/sdk_$variant" --root "$variant" --assume-sdk-internal-offsets
-  "$PYTHON_BIN" tools/sdk_skeleton_fit/export_labels.py --context "$CONTEXT" --source "$RESULT/sdk_$variant" --skeleton "$SKELETON"
-  "$PYTHON_BIN" tools/marker_placement/build_label_viewer.py --dataset "$RESULT/sdk_$variant/export/merged" --output "$RESULT/sdk_$variant/export/viewer" --standalone --initial-sync 632
+  "$PYTHON_BIN" tools/label_pipeline/calibration/sdk_skeleton_fit/fit.py --context "$CONTEXT" --source "$SOURCE" --skeleton "$SKELETON" --output "$RESULT/sdk_$variant" --root "$variant" --assume-sdk-internal-offsets
+  "$PYTHON_BIN" tools/label_pipeline/calibration/sdk_skeleton_fit/export_labels.py --context "$CONTEXT" --source "$RESULT/sdk_$variant" --skeleton "$SKELETON"
+  "$PYTHON_BIN" tools/label_pipeline/calibration/marker_placement/build_label_viewer.py --dataset "$RESULT/sdk_$variant/export/merged" --output "$RESULT/sdk_$variant/export/viewer" --standalone --initial-sync 632
 done
 DATASET="$("$PYTHON_BIN" -c 'import json,sys;print(json.load(open(sys.argv[1]))["dataset"])' "$CONTEXT")"
-"$PYTHON_BIN" tools/sdk_skeleton_fit/build_review.py --previous-review "$PREVIOUS_REVIEW" --sdk-hand "$RESULT/sdk_hand" --sdk-finger0 "$RESULT/sdk_finger0" --dataset "$DATASET" --output "$RESULT/review"
-"$PYTHON_BIN" tools/sdk_skeleton_fit/evaluate.py --context "$CONTEXT" --selection "$SELECTION" --source "$SOURCE" --sdk-hand "$RESULT/sdk_hand" --sdk-finger0 "$RESULT/sdk_finger0" --output "$RESULT/comparison_metrics.json"
+"$PYTHON_BIN" tools/label_pipeline/calibration/sdk_skeleton_fit/build_review.py --previous-review "$PREVIOUS_REVIEW" --sdk-hand "$RESULT/sdk_hand" --sdk-finger0 "$RESULT/sdk_finger0" --dataset "$DATASET" --output "$RESULT/review"
+"$PYTHON_BIN" tools/label_pipeline/calibration/sdk_skeleton_fit/evaluate.py --context "$CONTEXT" --selection "$SELECTION" --source "$SOURCE" --sdk-hand "$RESULT/sdk_hand" --sdk-finger0 "$RESULT/sdk_finger0" --output "$RESULT/comparison_metrics.json"
 for variant in hand finger0; do
-  "$PYTHON_BIN" tools/sdk_skeleton_fit/render_previews.py --review "$RESULT/review" --output "$RESULT/closeups_$variant" --root "$variant"
+  "$PYTHON_BIN" tools/label_pipeline/calibration/sdk_skeleton_fit/render_previews.py --review "$RESULT/review" --output "$RESULT/closeups_$variant" --root "$variant"
 done
-"$PYTHON_BIN" tools/sdk_skeleton_fit/verify_results.py --source "$SOURCE" --skeleton "$SKELETON" --output "$RESULT"
+"$PYTHON_BIN" tools/label_pipeline/calibration/sdk_skeleton_fit/verify_results.py --source "$SOURCE" --skeleton "$SKELETON" --output "$RESULT"
 echo "完成：$RESULT"
 echo "交互对照：$RESULT/review/index.html"
 echo "实际标签：$RESULT/sdk_{hand,finger0}/export/merged/"

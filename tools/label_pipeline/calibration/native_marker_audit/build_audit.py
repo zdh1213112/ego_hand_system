@@ -4,7 +4,7 @@ import argparse,csv,hashlib,json,sys
 from pathlib import Path
 import cv2,numpy as np
 from scipy.optimize import linear_sum_assignment
-ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'tools/marker24_pilot'))
+ROOT=Path(__file__).resolve().parents[4];sys.path.insert(0,str(ROOT/'tools/label_pipeline/calibration/marker24_pilot'))
 from run_pilot import raw24,CameraCalibration
 from camera_models import project_points
 NAMES=['WristM','WristIn','WristOut','HandOffset']+[f'Finger{f}{i}' for f in ['Thumb','Index','Middle','Ring','Pinky'] for i in range(1,5)]

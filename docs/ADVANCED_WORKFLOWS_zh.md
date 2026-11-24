@@ -60,7 +60,7 @@ bash scripts/export_ego_nokov_labels.sh \
   --optimization-config configs/native_joint_refit.json
 ```
 
-图像对齐和标定轮廓使用 CPU 并行处理，后续联合重拟合保留原有配置和输出。该流程按文档准备同级 `wilor_training` 工具、NOKOV 数据和授权模型；本次相机入口清理没有迁移这些工具。
+图像对齐和标定轮廓使用 CPU 并行处理，后续联合重拟合保留原有配置和输出。标定工具位于本仓库 `tools/label_pipeline/calibration/`。输入数据、NOKOV 解析依赖和 MANO 资产见[导出命令](EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。
 
 ## 四目共享 MANO
 

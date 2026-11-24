@@ -96,13 +96,18 @@ def verify_loaders(root,repo):
     import yaml
     from .fingerprint import digest
     defaults=yaml.safe_load((Path(__file__).resolve().parents[1]/'defaults.yaml').read_text())
-    training_model=(repo.parent/defaults['training_mano_directory']).resolve(strict=True)
-    if digest(training_model/'models/MANO_RIGHT.pkl')!=digest(repo/'models/mano/MANO_RIGHT.pkl'):
+    sys.path.insert(0, str(repo/'scripts'))
+    from label_export_settings import workspace_path
+    sys.path.insert(0, str(repo / 'training'))
+    from wilor.models import resolve_mano_model_path
+    training_model = resolve_mano_model_path(workspace_path(repo, defaults['training_mano_directory']))
+    model_file = training_model / 'MANO_RIGHT.pkl' if training_model.is_dir() else training_model
+    fitting_model = repo / 'models/mano/MANO_RIGHT.pkl'
+    if not model_file.samefile(fitting_model) and digest(model_file) != digest(fitting_model):
         raise ValueError('训练读取器的 MANO_RIGHT.pkl 与标签生成模型不一致')
-    for name,cmd in [('geometry',[repo/'scripts/check_wilor_training_dataset.py',root,'--mano-source',repo/'third_party/MANO','--mano-model-dir',repo/'models/mano','--device','cpu','--batch-size','128']),('profile',[repo.parent/'wilor_training/prepare_glove_dataset.py','--root',root,'--mano-path',training_model,'--validate-only'])]:
+    for name,cmd in [('geometry',[repo/'scripts/check_wilor_training_dataset.py',root,'--mano-source',repo/'third_party/MANO','--mano-model-dir',repo/'models/mano','--device','cpu','--batch-size','128']),('profile',[repo/'training/prepare_glove_dataset.py','--root',root,'--mano-path',training_model,'--validate-only'])]:
         with (root/(name+'_check.log')).open('w') as stream:
-            subprocess.run([sys.executable,'-Bu',*map(str,cmd)],cwd=repo if name=='geometry' else repo.parent/'wilor_training',stdout=stream,stderr=subprocess.STDOUT,check=True)
-    sys.path.insert(0,str(repo.parent/'wilor_training'))
+            subprocess.run([sys.executable,'-Bu',*map(str,cmd)],cwd=repo if name=='geometry' else repo/'training',stdout=stream,stderr=subprocess.STDOUT,check=True)
     from wilor.datasets.glove_dataset import GloveDataset
     import torch
     counts={}

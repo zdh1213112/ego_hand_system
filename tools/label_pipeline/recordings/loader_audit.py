@@ -13,7 +13,7 @@ from stages.signed import write_json
 
 
 def check(out,native_for):
-    sys.path.insert(0,str(PACKAGE.parents[2]/'wilor_training'))
+    sys.path.insert(0,str(PACKAGE.parents[1]/'training'))
     import wilor.datasets.glove_dataset as glove
     from unittest.mock import patch
     GloveDataset=glove.GloveDataset

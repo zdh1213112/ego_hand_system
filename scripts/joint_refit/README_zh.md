@@ -24,7 +24,7 @@ bash scripts/export_ego_nokov_labels.sh \
 
 入口（在 `ego_hand_system` 下）：`bash scripts/run_joint_refit_labels.sh [输出目录]`。本轮结果：`wilor_training/output/native_kb_training_20261111/joint_refit_v4`（`v3` 无对齐修正，`v2` 只有腕根锚点，`v1` 三者都没有），标签在其 `final/export/merged`。
 
-代码位置：本目录 `ego_hand_system/scripts/joint_refit/`（`fit.py` 拟合、`export.py` 导出与检查、`render_video.py` 对照视频、`viz.py` 单帧诊断）。与 `run_personal_marker24_pipeline.py` 相同，仍复用 `wilor_training/tools/` 下的 `personal_hand_calibration`、`full_silhouette`、`marker_placement` 及 nvdiffrast 运行时；旧入口 `wilor_training/tools/joint_refit/run.sh` 只做转发。
+代码位置：本目录 `ego_hand_system/scripts/joint_refit/`（`fit.py` 拟合、`export.py` 导出与检查、`render_video.py` 对照视频、`viz.py` 单帧诊断）。与 `run_personal_marker24_pipeline.py` 相同，仍复用 `tools/label_pipeline/calibration/` 下的 `personal_hand_calibration`、`full_silhouette`、`marker_placement` 及 nvdiffrast 运行时；旧入口 `tools/label_pipeline/calibration/joint_refit/run.sh` 只做转发。
 
 ## 整段录制与自动验收（v5_dense）
 - 入口脚本在采样时刻标定之后，继续执行：`build_dense_source.py`（全部1612个时刻的输入）→ `image_alignment.py`（逐帧对齐修正）→ `dense_drive.py`（冻结共享参数，全时刻拟合＋验收）→ `export.py` → `verify_export.py` → `render_video.py`。输出在 `<结果>/dense/`，标签在 `<结果>/dense/fit/final/export/merged`。

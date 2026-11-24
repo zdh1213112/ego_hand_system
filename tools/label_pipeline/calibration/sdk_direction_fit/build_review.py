@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT.parent / 'ego_hand_system/scripts'))
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT / 'scripts'))
 from ego_data.calibration import CameraCalibration
 from camera_models import project_points
 
@@ -67,7 +67,7 @@ def main():
                 faces=previous['faces'], frames=records, label_count=sum(len(r['hands']) for r in records),
                 max_projection_difference_px=None, approved_for_training=False)
     (a.output / 'data.js').write_text('window.LABEL_DATA=' + json.dumps(data, separators=(',', ':'), allow_nan=False) + ';\n')
-    html = (ROOT / 'tools/marker_placement/label_viewer.html').read_text()
+    html = (ROOT / 'tools/label_pipeline/calibration/marker_placement/label_viewer.html').read_text()
     html = html.replace('grid-template-columns:1fr 1fr;', 'grid-template-columns:1fr 1fr 1fr;')
     html = html.replace('<section class="panel"><h2>相同原图 + 导出标签</h2>', '<section class="panel"><h2>当前：共享手型＋marker动作</h2><canvas id="baseline"></canvas></section><section class="panel"><h2><span id="trialTitle">marker重拟合＋SDK方向辅助</span></h2>')
     html = html.replace("canvases=[$('raw'),$('overlay')]", "canvases=[$('raw'),$('overlay'),$('baseline')]").replace('ci<2', 'ci<3')
