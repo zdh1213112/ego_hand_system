@@ -3,11 +3,23 @@
 [![CI](https://github.com/zdh1213112/ego_hand_system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zdh1213112/ego_hand_system/actions/workflows/ci.yml)
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-3776AB)
 
-面向 **Orbbec EGO4 / EGO-4B 头戴相机**的手部三维重建系统，提供离线推理、实时跟踪、MANO 拟合、VIO 联动及训练标签生成。
+面向 **Orbbec EGO4 / EGO-4B 头戴相机**的手部三维重建系统，支持 NOKOV 标签导出、手部模型训练和四目推理，并保留实时跟踪与 VIO 工作流。
 
 四目共享推理支持 **MP4 + PTS 和 H264 MCAP**：每个同步时刻、每只手拟合一份 MANO 模型，并用原始标定回投到四路鱼眼画面。
 
 [快速开始](#快速开始) · [输入与输出](#输入与输出) · [其他工作流](#其他工作流) · [验证记录](docs/INTEGRATION_VALIDATION_20261113.md)
+
+## 三个主要入口
+
+在仓库根目录执行。每个入口只运行所选模块。
+
+| 模块 | 启动命令 | 输入 → 输出 |
+| --- | --- | --- |
+| [导出标签](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) | `bash scripts/export_ego_nokov_labels.sh --recording /path/to/pair --optimization-config configs/native_nokov_v4.json` | EGO 原片、标定和 NOKOV 观测 → MANO 标签、验收视频与数据清单 |
+| [训练](training/README.md) | `bash scripts/train_glove.sh wilor` | 已划分的标签、原图与初始化权重 → 验证指标、最佳权重与续训文件 |
+| [推理](docs/SHARED_HAND_INFERENCE_zh.md) | `bash scripts/run_hand_inference.sh --input /path/to/part0001 --output output/shared_hand` | 相机录像、标定与模型权重 → 四机视频、21 点骨架和 MANO 网格 |
+
+标签算法在 `scripts/joint_refit/` 和 `tools/label_pipeline/`，训练代码及配方在 `training/`，WiLoR 四机推理在 `scripts/ego_hand_inference/`。训练与推理还支持 `fah`、`gem-x`，例如 `bash scripts/train_glove.sh fah --help` 或 `bash scripts/run_hand_inference.sh gem-x --help`。WiLoR 推理使用微调权重时需显式传入 `--adapter`。
 
 ## 真实结果
 

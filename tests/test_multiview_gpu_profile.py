@@ -24,6 +24,8 @@ class MultiviewGpuProfileTests(unittest.TestCase):
             session.mkdir()
             mcap = root / "recording.mcap"
             mcap.touch()
+            # The MCAP runner resolves the sidecar before reusing completed stages.
+            (root / "recording_calibration_camera.yaml").write_text("{}\n")
             # Run the real configuration/resume logic in the current test
             # interpreter, without requiring a locally named Conda environment.
             bin_dir = root / "bin"
