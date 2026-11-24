@@ -1,0 +1,11 @@
+fit_method: legacy
+wrist_policy: adaptive_measured
+mode: recording_batch
+source: data/data_20261120
+output_root: work/labels_20261120
+initial_alignment: work/20261109/alignment_172920/cam0_marker_calibrated_right/alignment.json
+marker_placement: ego_hand_system/configs/glove_marker_placement.json
+mano_directory: ego_hand_system/models/mano
+checkpoint: wilor_training/output/native_kb_training_20261111/coarse_start.ckpt
+adapter: wilor_training/output/glove_joints_20261120_v2_coarse_start_12000steps/best_trainable.pt
+detector: ego_hand_system/models/wilor/2.0_glove_wilor_3680.pt

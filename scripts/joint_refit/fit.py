@@ -17,6 +17,9 @@ sys.path[:0] = [str(ROOT / 'tools/personal_hand_calibration'), str(ROOT / 'tools
 from context import load_context
 from run import PROJECT, import_mano, run_model, stats
 from render_masks import FullMaskBatch
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import finger_prior
+import finger_centre
 
 F = torch.nn.functional
 
@@ -27,7 +30,7 @@ def main():
     ap.add_argument('--steps', type=int, default=700); ap.add_argument('--drive-steps', type=int, default=400)
     ap.add_argument('--resolution', type=int, default=256); ap.add_argument('--val-every', type=int, default=4)
     ap.add_argument('--beta-limit', type=float, default=3.0); ap.add_argument('--marker-weight', type=float, default=1.0)
-    ap.add_argument('--normal-min', type=float, default=.0015); ap.add_argument('--adaptive-sigma', action='store_true'); ap.add_argument('--sigma-scale', type=float, default=1.)
+    ap.add_argument('--normal-min', type=float, default=.0015); ap.add_argument('--normal-max', type=float, default=.008, help='m; upper bound of the marker centre height above the MANO skin'); ap.add_argument('--adaptive-sigma', action='store_true'); ap.add_argument('--sigma-scale', type=float, default=1.)
     ap.add_argument('--debug-warm', action='store_true'); ap.add_argument('--final-silhouette', action='store_true', help='also write stage C (markers + accepted silhouettes on all frames)')
     ap.add_argument('--anat-weight', type=float, default=.03); ap.add_argument('--pose-floor', type=float, default=.1)
     ap.add_argument('--hands', nargs='+', default=['left', 'right'])
@@ -35,6 +38,10 @@ def main():
     ap.add_argument('--skeleton', type=Path, default=None, help='aligned_skeleton.npz; enables the Finger0 root anchor')
     ap.add_argument('--root-offset', choices=['free', 'zero'], default='free', help='free: calibrate one shared palm-local offset Finger0-MANO wrist; zero: MANO wrist joint = Finger0')
     ap.add_argument('--root-weight', type=float, default=3.); ap.add_argument('--wrist-marker-weight', type=float, default=.2)
+    finger_prior.add_arguments(ap)
+    finger_centre.add_arguments(ap)
+    ap.add_argument('--mcp-spacing-weight', type=float, default=0., help='0=off. Pull the rest-pose MANO MCP spacing (index-middle, middle-ring, ring-pinky) toward the median spacing of the Finger*1 knuckle markers; only betas move it')
+    ap.add_argument('--offset-tangent-scale', type=float, default=.02, help='m; sideways slide of a marker over the surface. Smaller keeps markers over the bone instead of letting the offset absorb a too-wide hand')
     a = ap.parse_args()
     if (a.output / 'summary.json').exists() or (a.output / 'final').exists(): raise FileExistsError(a.output)
     c = load_context(a.context); selection = json.loads(a.selection.read_text())
@@ -63,6 +70,11 @@ def main():
         train_rec = [r for r in train_rec if not any(r is h for h in held_rec)]
         mk = lambda rs: FullMaskBatch(rs, lookup, z['joints'], z['vertices'], z['faces'], side, a.resolution)
         bt, bv, bh, ball = mk(train_rec), mk(val_rec), mk(held_rec), mk(records)
+        ct_train = ct_check = None
+        if a.centre_weight:
+            ct_train = finger_centre.CentreTargets(train_rec, lookup, z['joints'], side, dev)
+            ct_check = finger_centre.CentreTargets(val_rec + held_rec, lookup, z['joints'], side, dev)
+            print(hand, 'centre samples train', ct_train.count, 'check', ct_check.count, flush=True)
         beta0, o0, p0, t0 = [to(z[k]) for k in ['betas', 'global_orient', 'hand_pose_pca', 'translation']]
         goal = to(z['target24']); attach = torch.as_tensor(z['attachment_faces'], device=dev).long(); bary = to(z['barycentric'])
         off0 = torch.zeros(21, 3, device=dev); off0[:, 2] = to(z['normal_offsets_m']).clamp_min(.002)
@@ -105,16 +117,31 @@ def main():
         # Pose prior: dorsal markers leave each phalanx free to roll about the marker line, which shifts the finger
         # sideways under the markers. Resolve it with the Mahalanobis distance to the MANO scan pose distribution
         # (hinge-like PIP/DIP, little twist) instead of anchoring to the previous, anatomically implausible fit.
+        jl = finger_prior.config(a); jl_axes = finger_prior.rest_axes(model, beta0, dev)
+
         def motion_prior(dp, do, dt, anchor=True):
             t = 0 if not len(prev) else ((dp[nxt] - dp[prev]) / .15).square().mean() + ((do[nxt] - do[prev]) / .15).square().mean()
             pose = p0 + dp
-            return a.anat_weight * torch.einsum('fi,ij,fj->f', pose, pose_precision, pose).mean() / 45 + .02 * t
+            return a.anat_weight * torch.einsum('fi,ij,fj->f', pose, pose_precision, pose).mean() / 45 + .02 * t + finger_prior.penalty(pose, model, jl_axes, jl)
 
         def evaluate(v, batch):
             with torch.no_grad():
                 pred = batch.render(v).clamp(0, 1); inter = (pred * batch.target * batch.domain).sum((1, 2))
                 union = ((pred + batch.target - pred * batch.target) * batch.domain).sum((1, 2)).clamp_min(1)
                 return cpu(inter / union)
+
+        mcp_marker = [4 + 4 * f for f in range(1, 5)]  # FingerIndex1, FingerMiddle1, FingerRing1, FingerPinky1 in target24
+        km = cpu(goal)[:, mcp_marker]; km = km[np.isfinite(km).all((1, 2))]
+        mcp_goal = to(np.median(np.linalg.norm(np.diff(km, axis=1), axis=-1), 0)) if len(km) else None
+        zpose = torch.zeros(1, 45, device=dev); z3 = torch.zeros(1, 3, device=dev)
+
+        def mcp_spacing(db):
+            _, jr, _ = run_model(model, (beta0 + db)[None], z3, zpose, z3); m4 = jr[0, [5, 9, 13, 17]]
+            return (m4[1:] - m4[:-1]).norm(dim=-1)
+
+        def mcp_term(db):
+            if a.mcp_spacing_weight <= 0 or mcp_goal is None: return 0.
+            return a.mcp_spacing_weight * ((mcp_spacing(db) - mcp_goal) / .001).square().mean()
 
         zero = lambda x: torch.nn.Parameter(torch.zeros_like(x))
         # ---------------- stage A: joint calibration on training frames
@@ -131,9 +158,11 @@ def main():
             opt.zero_grad(); v, j, pred, err = forward(db, doff, dw, dc, dp, do, dt)
             if a.adaptive_sigma and step >= a.steps // 4 and step % 25 == 0: update_sigma(err)
             li, ld, iou = bt.terms(v); lm = marker_term(err, tf); o = off0 + doff
-            shared = .002 * ((beta0 + db) / 2).square().mean() + 2 * (o[:, :2] / .02).square().mean() \
-                + 50 * (F.relu(a.normal_min - o[:, 2]) / .002).square().mean() + 5 * (F.relu(o[:, 2] - .008) / .002).square().mean() + .5 * (dw / .02).square().mean()
-            loss = 4 * li + ld + a.marker_weight * lm + root_term(tf) + motion_prior(dp, do, dt) + shared
+            shared = .002 * ((beta0 + db) / 2).square().mean() + 2 * (o[:, :2] / a.offset_tangent_scale).square().mean() \
+                + 50 * (F.relu(a.normal_min - o[:, 2]) / .002).square().mean() + (5 if a.normal_max >= .008 else 50) * (F.relu(o[:, 2] - a.normal_max) / .002).square().mean() + .5 * (dw / .02).square().mean()
+            loss = 4 * li + ld + a.marker_weight * lm + root_term(tf) + motion_prior(dp, do, dt) + shared + mcp_term(db)
+            if ct_train is not None:
+                loss = loss + ct_train.penalty(j, a.centre_weight, a.centre_sigma_px)
             if not torch.isfinite(loss): raise ValueError('nonfinite')
             loss.backward(); opt.step(); sched.step()
             with torch.no_grad(): (beta0 + db).clamp_(-a.beta_limit, a.beta_limit); db.copy_((beta0 + db).clamp(-a.beta_limit, a.beta_limit) - beta0)
@@ -185,6 +214,12 @@ def main():
             (a.output / name).mkdir(exist_ok=True); np.savez_compressed(a.output / name / f'{hand}_pilot.npz', **values)
             print(hand, name, 'IoU train %.4f -> %.4f | heldview(%d) %.4f -> %.4f | valframes(%d) %.4f -> %.4f | marker med %.2f p95 %.2f' % (base['iou_train'].mean(), it.mean(), len(ih), base['iou_held'].mean(), ih.mean(), len(iv), base['iou_val'].mean(), iv.mean(),
                   summary[name]['marker_mm']['median'], summary[name]['marker_mm']['p95']), flush=True)
+        with torch.no_grad():
+            if ct_check is not None:
+                summary['finger_centre_px'] = dict(start_train=ct_train.report(to(z['joints'])), start_check=ct_check.report(to(z['joints'])),
+                                                   **{f'{nm}_check': ct_check.report(to(x[1][1])) for nm, x in results.items() if x[1][1] is not None})
+            summary['mcp_spacing_mm'] = dict(marker=None if mcp_goal is None else (cpu(mcp_goal) * 1000).round(2).tolist(),
+                                             before=(cpu(mcp_spacing(torch.zeros_like(db))) * 1000).round(2).tolist(), after=(cpu(mcp_spacing(db)) * 1000).round(2).tolist())
         summary['elapsed_seconds'] = time.monotonic() - start; report['hands'][hand] = summary
         (a.output / 'summary.json').write_text(json.dumps(report, indent=1))
     print(a.output)

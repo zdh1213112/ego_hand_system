@@ -34,7 +34,11 @@ def write_frame_index(path, rows):
         frame = frames.setdefault(row["image"], {
             key: row[key] for key in ("image", "camera", "sync_index", "source_frame_index",
                 "reference_timestamp_ns", "source_dataset_id", "source_group", "calibration_group") if key in row})
-        frame.setdefault("hands", []).append({key: row[key] for key in ("side", "label", "index")})
+        hand = {key: row[key] for key in ("side", "label", "index")}
+        for key in ("pass_surface", "tip_relaxed", "cuff_points_observed", "isolated_pose"):
+            if key in row:
+                hand[key] = row[key]
+        frame.setdefault("hands", []).append(hand)
     for frame in frames.values():
         frame["hands"].sort(key=lambda hand: hand["side"])
         sides = [h["side"] for h in frame["hands"]]

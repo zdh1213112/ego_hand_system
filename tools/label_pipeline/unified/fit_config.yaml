@@ -1,0 +1,13 @@
+calibration_count: 240
+calibration_steps: 180
+pose_steps: 115
+window: 96
+overlap: 16
+marker_scale_mm: 2.5
+pixel_scale_px: 3.0
+cuff_scale_mm: 7.0
+pixel_weight: 0.45
+prior_weight: 0.08
+sdk_direction_weight: 0.06
+temporal_weight: 0.10
+height_prior_mm: 3.5

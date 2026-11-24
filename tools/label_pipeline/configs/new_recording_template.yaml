@@ -1,0 +1,16 @@
+mode: from_raw
+fit_method: legacy
+wrist_policy: adaptive_measured
+id: new_recording
+output_root: work/labels_new_recording
+raw_group: null
+initial_alignment: null
+camera_calibration: null
+native_wilor: null
+marker_placement: ego_hand_system/configs/glove_marker_placement.json
+mano_directory: ego_hand_system/models/mano
+# native_wilor must contain the same reference clocks and four native camera frame numbers.
+# If the original observations are stored in several archives, provide their exact paths here.
+wilor_observations: {}
+# The recorded three-ball and four-camera evidence selects the reference per hand.
+wrist_sync: {}

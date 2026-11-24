@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "joint_refit": {
+    "enabled": true,
+    "placement": "glove_marker_placement.json",
+    "sample_stride": 8,
+    "joint_limit_weight": 0.05,
+    "min_markers_per_finger": 3,
+    "sdk_marker_gaps": true,
+    "dorsal_ring_attachment": true,
+    "bounded_articulation": true,
+    "preserve_visible_contours": true
+  }
+}

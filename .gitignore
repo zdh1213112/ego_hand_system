@@ -39,6 +39,7 @@ __pycache__/
 !/models/wilor/README.md
 #*.pkl
 *.npz
+!/tools/label_pipeline/assets/wilor_pose2906.npz
 
 # Editors and operating systems
 .DS_Store

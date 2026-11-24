@@ -48,3 +48,23 @@ def test_merge_rejects_native_and_rectified_mixture(tmp_path, monkeypatch):
     with pytest.raises(ValueError,match="image_space"):
         main()
     assert not dest.exists()
+
+
+def test_merged_summary_preserves_recording_specific_finger_constraints(tmp_path, monkeypatch):
+    inputs = [source(tmp_path, name, 300) for name in ("bounded", "contours")]
+    for dataset in inputs:
+        path = dataset / "summary.json"
+        meta = json.loads(path.read_text())
+        meta.update(label_fit_strategy=dataset.name, finger_rotation_limits_applied=True)
+        if dataset.name == "contours":
+            meta["bounded_pose_visible_contour_refinement"] = True
+        path.write_text(json.dumps(meta))
+    dest = tmp_path / "merged"
+    monkeypatch.setattr(sys, "argv", ["merge", "--inputs", *map(str, inputs), "--output", str(dest)])
+    assert main() == 0
+    report = json.loads((dest / "summary.json").read_text())
+    assert report["finger_rotation_limits_applied"] is True
+    assert "label_fit_strategy" not in report
+    assert "bounded_pose_visible_contour_refinement" not in report
+    assert report["label_generation_by_source"]["0"]["label_fit_strategy"] == "bounded"
+    assert report["label_generation_by_source"]["1"]["bounded_pose_visible_contour_refinement"] is True
