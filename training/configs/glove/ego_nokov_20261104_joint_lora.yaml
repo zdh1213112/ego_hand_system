@@ -2,7 +2,7 @@ schema_version: 3
 experiment:
   name: ego_nokov_20261104_joint_lora
 paths:
-  dataset_root: ../work/20261104/wilor_training_195844_195732_cam01
+  dataset_root: ../../work/20261104/wilor_training_195844_195732_cam01
   checkpoint: pretrained_models/wilor_final.ckpt
   model_config: pretrained_models/model_config.yaml
   mano_path: mano_data/mano_v1_2

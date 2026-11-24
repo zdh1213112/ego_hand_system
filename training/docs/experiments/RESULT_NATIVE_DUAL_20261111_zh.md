@@ -1,6 +1,6 @@
 # 2026-11-11 原图双手标签与 WiLoR 对照验收
 
-本文记录 cam0/cam1 阶段的实验。后续新增的四目空间优化与四路原图导出见 [四目操作说明](../../../ego_hand_system/docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)；本文训练指标仍属于两目数据对照。
+本文记录 cam0/cam1 阶段的实验。后续新增的四目空间优化与四路原图导出见 [四目操作说明](../../../docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)；本文训练指标仍属于两目数据对照。
 
 原图链路已用一段真实双手录制完成同步、对齐、双手 MANO 全序列拟合、标签导出、检查、训练与独立姿态评测。当前使用 cam0/cam1，**没有完成四目联合优化**。短程训练可以改善原图位置误差，但三维姿态仍有退化，当前权重应作为实验结果，不能认定为最终更优模型。
 
@@ -95,7 +95,7 @@ evaluations/real_dual_video/real_dual_original_vs_native_v3.mp4
 
 ## 复现入口
 
-完整标签操作流程与每步参数见 [EGO + NOKOV 双手原图标签流程](../../../ego_hand_system/docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)。本次标签子命令保存在 `real_dual/pair_20261111_192916_native_labels/commands.json`，各评测命令保存在 `evaluation_commands.json`。
+完整标签操作流程与每步参数见 [EGO + NOKOV 双手原图标签流程](../../../docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)。本次标签子命令保存在 `real_dual/pair_20261111_192916_native_labels/commands.json`，各评测命令保存在 `evaluation_commands.json`。
 
 训练配置为 `native_train_v3.yaml` 和 `rectified_train_v3.yaml`；重跑时先复制配置并将 `paths.output` 改为新目录：
 

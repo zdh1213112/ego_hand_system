@@ -1,10 +1,10 @@
 # 文档索引
 
-从仓库根目录运行文档中的命令。训练数据、权重和实验产物均需单独准备；历史记录中的本机路径和指标描述当时的运行环境。
+历史训练命令从本模块目录 `training/` 运行。当前仓库入口及 v4 配方见[训练首页](../README.md)。训练数据、权重和实验产物均需单独准备；历史记录中的本机路径和指标描述当时的运行环境。
 
 ## 训练说明
 
-- [最新汇总标签 trainset_v1：训练命令与已有结果](training/START_TRAINSET_V1_zh.md)
+- [历史汇总标签 trainset_v1：训练命令与已有结果](training/START_TRAINSET_V1_zh.md)
 - [训练协议与 checkpoint 约定](../GLOVE_TRAINING.md)
 - [训练结构与模块职责](../PROJECT_STRUCTURE.md)
 - [冻结 ViT 的 NOKOV 基线](training/START_NOKOV_TRAINING_zh.md)
@@ -20,10 +20,7 @@
 
 ## 标签与标定工具
 
-本仓库中的工具说明见 [辅助工具索引](../tools/README.md)。下列文档属于同级外部仓库，需单独检出相应项目：
-
-- `ego_hand_system`：[四目原图空间优化与双手标签导出](../../ego_hand_system/docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md)
-- `nokov_ego_hand_validation`：[Orbbec / NOKOV 操作说明](../../nokov_ego_hand_validation/docs/orbbec_ego4_nokov24_training_zh.md)
+标定工具随本仓库提供。[标定工具索引](../../tools/label_pipeline/calibration/README.md) · [四目原图标签导出](../../docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。原始 NOKOV 轨迹处理使用工作区中的 `nokov_ego_hand_validation`。
 
 ## 测试
 
@@ -49,12 +46,12 @@ python -m pytest -q tests/test_glove_gpu.py
 其中 `test_unified_domain_engine_one_step` 使用临时合成 OpenTouch 样本，验证真实模型的一步训练、验证及 checkpoint 保存；
 另外两项需要测试文件指定的真实 glove / OpenTouch 数据，缺失时会跳过。
 
-`tools/` 中三个 `test_*.py` 是独立运行的工具集成检查，不在默认测试发现范围内。
-它们依赖同级的 `ego_hand_system`、MANO 及对应日期的本地实验产物，不能作为纯代码检出的验收条件。
+`../tools/label_pipeline/calibration/` 中三个 `test_*.py` 是独立运行的工具集成检查，不在默认测试发现范围内。
+它们依赖 MANO 及对应日期的本地实验产物，不能作为纯代码检出的验收条件。
 准备好各工具 README 中的输入后，可分别显式运行：
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tools/manual_shape_tuner/test_engine.py
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tools/joint_pose_attachment/test_joint.py
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tools/personal_hand_calibration/test_explicit_pipeline.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q ../tools/label_pipeline/calibration/manual_shape_tuner/test_engine.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q ../tools/label_pipeline/calibration/joint_pose_attachment/test_joint.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q ../tools/label_pipeline/calibration/personal_hand_calibration/test_explicit_pipeline.py
 ```

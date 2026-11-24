@@ -41,7 +41,7 @@ python train_glove.py --mode joint_lora --config configs/glove/ego_nokov_2026110
 NOKOV 21 点要生成本项目严格的完整标签时，先在 `ego_hand_system` 使用
 `prepare_nokov21_mano_input.py`、`fit_mano_sequence.py` 和
 `export_multiview_wilor_training_dataset.py`。完整步骤见
-[`nokov_ego_hand_validation` 的 Orbbec/NOKOV 操作说明](../nokov_ego_hand_validation/docs/orbbec_ego4_nokov24_training_zh.md)。
+[`nokov_ego_hand_validation` 的 Orbbec/NOKOV 操作说明](../docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)。
 至少两段独立录制合并后，运行 `prepare_glove_dataset.py --root datasets/ego_nokov
 --split-by-source-group`，使验证集与训练集按录制场次隔离。
 

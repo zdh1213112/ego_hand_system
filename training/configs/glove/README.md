@@ -1,12 +1,13 @@
 # 训练配置
 
-所有相对路径均以仓库根目录解析。训练参数及数据协议见 [训练说明](../../GLOVE_TRAINING.md)。
+配置内相对路径以本模块的 `training/` 目录解析。仓库训练入口 `bash scripts/train_glove.sh wilor` 默认选用九段 v4 配方。训练参数及数据协议见 [训练说明](../../GLOVE_TRAINING.md)。
 数据、预训练模型、MANO 授权文件和已有适配器不随 Git 分发。
 
 ## 通用入口
 
 | 配置 | 用途 |
 | --- | --- |
+| `nokov_v4_joint_lora.yaml` | 九段原图标签、physical KB 和联合 LoRA，batch size 64，30,000 步 |
 | `refiner_finetune.yaml` | 冻结 ViT，训练 coarse heads 和 RefineNet 的基线 |
 | `joint_lora_finetune.yaml` | 联合训练 ViT LoRA、coarse heads 和 RefineNet |
 | `domain_adapt.yaml` | OpenTouch 掌心局部 3D 监督，训练 ViT LoRA |
@@ -18,7 +19,7 @@ Stage 2 的 LoRA 两阶段入口需要 Stage 1 权重或续训检查点，基线
 
 ## 指定录制的实验配置
 
-`trainset_v1_joint_lora.yaml` 对应本机最新汇总的 2026-11-14 原图 KB 标签，
+`trainset_v1_joint_lora.yaml` 对应历史汇总的 2026-11-14 原图 KB 标签，
 使用 `datasets/trainset_v1`、`physical_kb`、4000 步训练；
 初始化仍使用 `output/native_kb_training_20261111/coarse_start.ckpt`，
 重跑输出到新的 `output/trainset_v1_joint_lora/`，与已有训练结果分开。
@@ -26,7 +27,7 @@ Stage 2 的 LoRA 两阶段入口需要 Stage 1 权重或续训检查点，基线
 
 `ego_nokov_20261104_*.yaml` 保留 2026-11-04 录制的完整复现参数：基线、联合 LoRA、
 后训练、物理相机、marker camera / offset，以及短程 smoke 配置。
-数据路径位于同级 `../work/`，输出位于 `output/` 或该工作目录；路径已改为相对写法，实际指向保持一致。
+数据路径位于工作区 `../../work/`，输出位于 `output/` 或该工作目录；路径已改为相对写法，实际指向保持一致。
 不要把 `smoke` 配置当作完整训练：它们用于少步集成检查。
 
 `python train_glove.py --mode joint_lora` 为兼容本机已有命令，仍默认选择

@@ -2,7 +2,7 @@ schema_version: 3
 experiment:
   name: ego_nokov_20261104_marker_offset_v2
 paths:
-  dataset_root: ../work/20261104/wilor_training_195844_195732_cam01
+  dataset_root: ../../work/20261104/wilor_training_195844_195732_cam01
   checkpoint: pretrained_models/wilor_final.ckpt
   model_config: pretrained_models/model_config.yaml
   mano_path: mano_data/mano_v1_2
@@ -17,8 +17,8 @@ data:
   rescale_factor: 2.0
   npz_cache_size: 8
   marker_inputs:
-    training_labels_195844_195852: ../work/20261104/training_labels_195844_195852/mano_input_cam01_v2.npz
-    training_labels_195732_195743: ../work/20261104/training_labels_195732_195743/mano_input_cam01.npz
+    training_labels_195844_195852: ../../work/20261104/training_labels_195844_195852/mano_input_cam01_v2.npz
+    training_labels_195732_195743: ../../work/20261104/training_labels_195732_195743/mano_input_cam01.npz
 recipe:
   type: marker_offset_finetune
   camera_model: physical_perspective
