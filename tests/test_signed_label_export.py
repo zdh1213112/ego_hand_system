@@ -55,7 +55,7 @@ def test_single_hand_dispatches_to_native_temporal(tmp_path, monkeypatch, side):
     assert Path(convert.args[0][2]).name == "convert.py"
     command = fit.args[0]
     assert command[command.index("--optimization-config") + 1] == str(
-        REPO / "configs/native_nokov_temporal.json"
+        REPO / "label_export/configs/native_nokov_temporal.json"
     )
     assert json.loads((out / "settings.json").read_text())["mode"] == "single_hand_temporal"
 
@@ -72,7 +72,7 @@ def test_dual_hand_respects_cached_observations_and_output(tmp_path, monkeypatch
         public_cli(monkeypatch, root, out, "--wilor-observations", existing)
         fit, materialize = launch.call_args_list
         assert Path(fit.args[0][2]).name == "export_glove_labels.py"
-        assert Path(materialize.args[0][2]) == REPO / "tools/label_pipeline/v4/export.py"
+        assert Path(materialize.args[0][2]) == REPO / "label_export/pipeline/v4/export.py"
         assert Path(materialize.args[0][-1]) == out / "optimized"
         cfg = yaml.safe_load((out / "recording.yaml").read_text())
         assert cfg["native_wilor"] == str(existing) and cfg["wrist_policy"] == "adaptive_measured"

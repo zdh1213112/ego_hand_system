@@ -39,7 +39,7 @@ __pycache__/
 !/models/wilor/README.md
 #*.pkl
 *.npz
-!/tools/label_pipeline/assets/wilor_pose2906.npz
+!/label_export/pipeline/assets/wilor_pose2906.npz
 
 # Editors and operating systems
 .DS_Store
@@ -54,5 +54,5 @@ __pycache__/
 .env.*
 !.env.example
 
-/tools/label_pipeline/calibration/marker_placement/prefill/
-/tools/label_pipeline/calibration/marker_placement/prefill.js
+/label_export/pipeline/calibration/marker_placement/prefill/
+/label_export/pipeline/calibration/marker_placement/prefill.js

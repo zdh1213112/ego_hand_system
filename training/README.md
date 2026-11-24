@@ -1,6 +1,6 @@
 # 手部模型训练
 
-在 `ego_hand_system` 根目录用 `bash scripts/train_glove.sh` 选择 WiLoR、FAH-S 或 GEM-X。三种后端共用原图和手部标签，各自负责数据预处理、参数更新、验证和模型保存。NOKOV 标定和标签验收见[标签导出说明](../docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md)，视频生成见[推理说明](../docs/SHARED_HAND_INFERENCE_zh.md)。
+在 `ego_hand_system` 根目录用 `bash training/train.sh` 选择 WiLoR、FAH-S 或 GEM-X。三种后端共用原图和手部标签，各自负责数据预处理、参数更新、验证和模型保存。NOKOV 标定和标签验收见[标签导出说明](../label_export/README.md)，视频生成见[推理说明](../inference/README.md)。
 
 ## WiLoR 九段 v4 配方
 
@@ -9,13 +9,13 @@
 3. 启动训练。默认配方联合训练 ViT LoRA、coarse heads、RefineNet 和 physical KB 相机头，batch size 64，总计 30,000 步，每 700 步验证。模型配置随源码提供。[完整配方](configs/glove/nokov_v4_joint_lora.yaml)
 
 ```bash
-bash scripts/train_glove.sh wilor
+bash training/train.sh wilor
 ```
 
 默认输出在 `training/output/glove_v4_joint_lora/`。新实验可复制 YAML，设置独立的 `paths.output`，再指定配置文件。命令行的配置文件路径相对当前目录，YAML 中的相对资源路径以 `training/` 为起点。
 
 ```bash
-bash scripts/train_glove.sh wilor --config training/configs/glove/nokov_v4_joint_lora.yaml
+bash training/train.sh wilor --config training/configs/glove/nokov_v4_joint_lora.yaml
 ```
 
 | 文件 | 用途 |
@@ -29,9 +29,9 @@ bash scripts/train_glove.sh wilor --config training/configs/glove/nokov_v4_joint
 两种后端通过同一个训练入口接收自己的算法环境、数据目录和输出目录。环境安装、基础权重和附加资产见 [FAH-S / GEM-X 使用说明](docs/training/FAH_GEM_X_zh.md)。
 
 ```bash
-EGO_TRAIN_PYTHON=/path/to/fah/bin/python bash scripts/train_glove.sh fah \
+EGO_TRAIN_PYTHON=/path/to/fah/bin/python bash training/train.sh fah \
   --dataset /path/to/dataset --output /path/to/runs/fah --epochs 1
-EGO_TRAIN_PYTHON=/path/to/gem-x/bin/python bash scripts/train_glove.sh gem-x \
+EGO_TRAIN_PYTHON=/path/to/gem-x/bin/python bash training/train.sh gem-x \
   --dataset /path/to/dataset --output /path/to/runs/gem-x --epochs 1
 ```
 

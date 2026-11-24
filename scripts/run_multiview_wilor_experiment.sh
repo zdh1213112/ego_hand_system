@@ -829,9 +829,9 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
     INFERENCE_ARGS+=(--gem-root "$EGO_GEM_ROOT" --checkpoint "$EGO_GEM_CHECKPOINT" --soma-assets "$EGO_GEM_SOMA_ASSETS")
     if [[ -n "${EGO_GEM_PYTHON:-}" ]]; then
       env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/python_deps/wilor_runtime:$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" \
-        "$EGO_GEM_PYTHON" "$ROOT/scripts/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+        "$EGO_GEM_PYTHON" "$ROOT/inference/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     else
-      run_python "$ROOT/scripts/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+      run_python "$ROOT/inference/gem_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     fi
   elif [[ "$POSE_BACKEND" == fah ]]; then
     INFERENCE_ARGS+=(--fah-root "$EGO_FAH_ROOT" --model "$EGO_FAH_MODEL"
@@ -841,9 +841,9 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
       env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" MPLCONFIGDIR="/tmp/ego-hand-matplotlib" \
         YOLO_CONFIG_DIR="/tmp/ego-hand-ultralytics" TORCH_HOME="/tmp/ego-hand-torch" \
         TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE" \
-        "$EGO_FAH_PYTHON" "$ROOT/scripts/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+        "$EGO_FAH_PYTHON" "$ROOT/inference/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     else
-      run_python "$ROOT/scripts/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
+      run_python "$ROOT/inference/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     fi
   else
     if [[ -n "$WILOR_CHECKPOINT" ]]; then INFERENCE_ARGS+=(--checkpoint "$WILOR_CHECKPOINT"); fi

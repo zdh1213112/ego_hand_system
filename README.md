@@ -5,21 +5,19 @@
 
 面向 **Orbbec EGO4 / EGO-4B 头戴相机**的手部三维重建系统，支持 NOKOV 标签导出、手部模型训练和四目推理，并保留实时跟踪与 VIO 工作流。
 
-四目共享推理支持 **MP4 + PTS 和 H264 MCAP**：每个同步时刻、每只手拟合一份 MANO 模型，并用原始标定回投到四路鱼眼画面。
+## 从这里开始
 
-[快速开始](#快速开始) · [输入与输出](#输入与输出) · [其他工作流](#其他工作流) · [验证记录](docs/INTEGRATION_VALIDATION_20261113.md)
+仓库根目录有三个并列模块。从根目录执行对应命令即可。
 
-## 三个主要入口
-
-在仓库根目录执行。每个入口只运行所选模块。
-
-| 模块 | 启动命令 | 输入 → 输出 |
+| 我要做什么 | 模块 | 启动命令 |
 | --- | --- | --- |
-| [导出标签](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) | `bash scripts/export_ego_nokov_labels.sh --recording /path/to/pair --optimization-config configs/native_nokov_v4.json` | EGO 原片、标定和 NOKOV 观测 → MANO 标签、验收视频与数据清单 |
-| [训练](training/README.md) | `bash scripts/train_glove.sh wilor` | 已划分的标签、原图与初始化权重 → 验证指标、最佳权重与续训文件 |
-| [推理](docs/SHARED_HAND_INFERENCE_zh.md) | `bash scripts/run_hand_inference.sh --input /path/to/part0001 --output output/shared_hand` | 相机录像、标定与模型权重 → 四机视频、21 点骨架和 MANO 网格 |
+| 把 EGO + NOKOV 配对录制导出为训练标签 | [`label_export/`](label_export/README.md) | `bash label_export/export.sh --recording /path/to/pair --optimization-config label_export/configs/native_nokov_v4.json` |
+| 用签收标签微调模型、验证或续训 | [`training/`](training/README.md) | `bash training/train.sh wilor` |
+| 用模型生成四机视频、21 点骨架和网格 | [`inference/`](inference/README.md) | `bash inference/run.sh --input /path/to/part0001 --output output/shared_hand` |
 
-标签算法在 `scripts/joint_refit/` 和 `tools/label_pipeline/`，训练代码及配方在 `training/`，WiLoR 四机推理在 `scripts/ego_hand_inference/`。训练与推理还支持 `fah`、`gem-x`，例如 `bash scripts/train_glove.sh fah --help` 或 `bash scripts/run_hand_inference.sh gem-x --help`。WiLoR 推理使用微调权重时需显式传入 `--adapter`。
+训练和推理均可选择 `wilor`、`fah`、`gem-x`。WiLoR 推理使用微调权重时显式传入 `--adapter` 和配套基础模型。已有 `scripts/` 启动命令仍可使用。
+
+[环境安装](#快速开始) · [输入与输出](#输入与输出) · [其他工作流](#其他工作流)
 
 ## 真实结果
 
@@ -37,11 +35,11 @@
 
 | 工作流 | 输入与能力 | 入口 / 文档 |
 | --- | --- | --- |
-| 四目共享 MANO 推理 | Orbbec 四路原图，跨视角关联、共享三维模型、四目视频与结果导出 | `scripts/run_hand_inference.sh` · [说明](docs/SHARED_HAND_INFERENCE_zh.md) |
+| 四目共享 MANO 推理 | Orbbec 四路原图，跨视角关联、共享三维模型、四目视频与结果导出 | `inference/run.sh` · [说明](inference/README.md) |
 | 双目离线重建 | Orbbec，MediaPipe、WiLoR、三角化、稳定化及 MANO 拟合 | `scripts/run_offline.sh` · [完整操作](docs/ADVANCED_WORKFLOWS_zh.md#离线启动) |
 | Orbbec 四目融合 | KB 射线、多视角 WiLoR、RANSAC 与时序处理 | `scripts/run_multiview_wilor_experiment.sh` · [说明](docs/ADVANCED_WORKFLOWS_zh.md#四目多视角融合) |
 | GEM-X / FAH 多视角推理 | Orbbec 四目共享拟合、逐机位推理及视频 | [GEM-X 实验](docs/multiview_gem_experiment.md) · [FAH 实验](docs/multiview_fah_experiment.md) |
-| EGO + NOKOV 标签 | 原图对齐、双手 MANO 拟合、标签导出与验收 | `scripts/export_ego_nokov_labels.sh` · [命令清单](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) |
+| EGO + NOKOV 标签 | 原图对齐、双手 MANO 拟合、标签导出与验收 | `label_export/export.sh` · [命令清单](label_export/README.md) |
 | 实时跟踪与 VIO | Orbbec 实时手部、Basalt 轨迹及多模态联动 | [实时使用](docs/EGO_REALTIME.md) · [世界轨迹](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md) |
 | 标签检查与查看 | 数据集检查、投影验证与可视化 | [标签查看器](docs/WILOR_LABEL_VIEWER_zh.md) · [数据交接约定](docs/MANO_GLOVE_LABEL_HANDOFF_zh.md) |
 
@@ -106,7 +104,7 @@ python scripts/check_third_party.py --require-mano --require-wilor
 MP4 录制或分段目录：
 
 ```bash
-bash scripts/run_hand_inference.sh \
+bash inference/run.sh \
   --input /path/to/recording/part0001 \
   --output output/shared_mp4
 ```
@@ -114,7 +112,7 @@ bash scripts/run_hand_inference.sh \
 MCAP 文件或单分段录制目录：
 
 ```bash
-bash scripts/run_hand_inference.sh \
+bash inference/run.sh \
   --input /path/to/recording/part0001/recording_part0001.mcap \
   --output output/shared_mcap
 ```
@@ -124,7 +122,7 @@ bash scripts/run_hand_inference.sh \
 默认 `--max-frames 0` 处理完整录制。先检查短片可加 `--max-frames 60`；本机验收使用的 FP16 批处理参数为：
 
 ```bash
-bash scripts/run_hand_inference.sh \
+bash inference/run.sh \
   --input /path/to/recording/part0001 \
   --detector /path/to/hand_detector.pt \
   --gpu-profile rtx5090d --batch-size 16 --frame-batch-size 8 \
@@ -135,12 +133,12 @@ bash scripts/run_hand_inference.sh \
 `compatible` 为默认 FP32 路径；`rtx5090d` 启用现有 FP16 路径。批大小按显存调整。可通过 `--conda-env NAME` 或 `EGO_HAND_PYTHON=/path/to/python` 选择已有环境，所有参数见：
 
 ```bash
-bash scripts/run_hand_inference.sh --help
+bash inference/run.sh --help
 ```
 
 ## 输入与输出
 
-MP4 输入需要四路视频、各自的 PTS CSV 和匹配标定。支持录制根目录与单个 `part0001` 等分段；多分段分别运行。MCAP 需要四路 H264 相机 topic 和配套标定，详细目录与相机对应关系见[输入说明](docs/SHARED_HAND_INFERENCE_zh.md#安装与输入)。
+MP4 输入需要四路视频、各自的 PTS CSV 和匹配标定。支持录制根目录与单个 `part0001` 等分段；多分段分别运行。MCAP 需要四路 H264 相机 topic 和配套标定，详细目录与相机对应关系见[输入说明](inference/README.md#安装与输入)。
 
 四路帧默认以 camera0 时间戳同步，容差 1500 微秒，每路帧不复用。原始鱼眼图像保持原始像素空间，三维模型按各相机标定投影。
 
@@ -170,7 +168,7 @@ OUTPUT/
 | 需求 | 使用文档 |
 | --- | --- |
 | 双目完整运行、分阶段执行、断点恢复、环境变量、C++ 构建 | [Orbbec 双目、四目与进阶工作流](docs/ADVANCED_WORKFLOWS_zh.md) |
-| 原始数据生成 NOKOV/MANO 标签 | [流程说明](docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md) · [命令清单](docs/EGO_NOKOV_NATIVE_LABEL_COMMANDS_zh.md) |
+| 原始数据生成 NOKOV/MANO 标签 | [流程说明](docs/EGO_NOKOV_NATIVE_LABEL_PIPELINE_zh.md) · [命令清单](label_export/README.md) |
 | 多目训练标签导出 | [Orbbec 多目操作](docs/ADVANCED_WORKFLOWS_zh.md#训练标签导出) · [NOKOV 标签](docs/NOKOV_OPTICAL_MOCAP_TO_WILOR_LABELS.md) |
 | Orbbec 实时与多模态联动 | [实时使用](docs/EGO_REALTIME.md) |
 | Basalt 世界坐标轨迹 | [VIO 使用](docs/BASALT_STEREO_INERTIAL_WORLD_TRAJECTORY.md) |

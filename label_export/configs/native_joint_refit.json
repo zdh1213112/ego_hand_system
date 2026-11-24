@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "joint_refit": {
+    "enabled": true,
+    "placement": "glove_marker_placement.json",
+    "sample_stride": 8
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "mano_source": "/home/p3/data_sda1/EGO_glove/ego_hand_system/third_party/MANO",
+  "mano_model_dir": "/home/p3/data_sda1/EGO_glove/ego_hand_system/models/mano",
+  "recordings": [
+    {
+      "name": "left_195844",
+      "fusion": "/home/p3/data_sda1/EGO_glove/work/20261104/training_labels_195844_195852/nokov_observations_cam01",
+      "mano_fit": "/home/p3/data_sda1/EGO_glove/work/20261104/training_labels_195844_195852/mano_fit_full_cam01",
+      "dataset": "/home/p3/data_sda1/EGO_glove/work/20261104/pipeline_repro_195844/ego/normalized_multiview",
+      "cameras": [
+        "camera0",
+        "camera1"
+      ],
+      "reference_camera": "camera0"
+    },
+    {
+      "name": "right_172920",
+      "fusion": "/home/p3/data_sda1/EGO_glove/work/20261109/training_labels_right_172920/nokov_observations_cam01",
+      "mano_fit": "/home/p3/data_sda1/EGO_glove/work/20261109/training_labels_right_172920/mano_fit_full_cam01",
+      "dataset": "/home/p3/data_sda1/EGO_glove/work/20261109/ego_172920/normalized_multiview",
+      "cameras": [
+        "camera0",
+        "camera1"
+      ],
+      "reference_camera": "camera0"
+    }
+  ]
+}

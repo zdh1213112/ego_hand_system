@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "label_pipeline": {
+    "dual_hand": "adaptive_wrist_v4",
+    "single_hand_config": "native_nokov_temporal.json",
+    "marker_placement": "glove_marker_placement.json",
+    "observation_weights": {
+      "detector": "ego_hand_system/models/wilor/2.0_glove_wilor_3680.pt",
+      "checkpoint": "ego_hand_system/models/wilor/coarse_start.ckpt",
+      "adapter": "ego_hand_system/models/wilor/observation_v2/best_trainable.pt",
+      "model_config": "ego_hand_system/training/pretrained_models/model_config.yaml"
+    },
+    "seed_alignment": "native_nokov_mount_seed.json",
+    "overrides": {}
+  }
+}
