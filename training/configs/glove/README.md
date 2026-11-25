@@ -1,6 +1,6 @@
 # 训练配置
 
-配置内相对路径以本模块的 `training/` 目录解析。仓库训练入口 `bash scripts/train_glove.sh wilor` 默认选用九段 v4 配方。训练参数及数据协议见 [训练说明](../../GLOVE_TRAINING.md)。
+配置内相对路径以本模块的 `training/` 目录解析。仓库训练入口 `bash training/train.sh wilor` 默认选用九段 v4 原图手框配方。[两条训练路线](../../README.md#wilor-训练) · [训练参数及数据协议](../../GLOVE_TRAINING.md)
 数据、预训练模型、MANO 授权文件和已有适配器不随 Git 分发。
 
 ## 通用入口
@@ -8,6 +8,7 @@
 | 配置 | 用途 |
 | --- | --- |
 | `nokov_v4_joint_lora.yaml` | 九段原图标签、physical KB 和联合 LoRA，batch size 64，30,000 步 |
+| `nokov_v4_bbox_pinhole.yaml` | 原图手框按 KB4 去畸变，从 v4 第 48,300 步 adapter 初始化，batch size 64，新增 15,000 步 |
 | `refiner_finetune.yaml` | 冻结 ViT，训练 coarse heads 和 RefineNet 的基线 |
 | `joint_lora_finetune.yaml` | 联合训练 ViT LoRA、coarse heads 和 RefineNet |
 | `domain_adapt.yaml` | OpenTouch 掌心局部 3D 监督，训练 ViT LoRA |

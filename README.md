@@ -15,7 +15,7 @@
 | 用签收标签微调模型、验证或续训 | [`training/`](training/README.md) | `bash training/train.sh wilor` |
 | 用模型生成四机视频、21 点骨架和网格 | [`inference/`](inference/README.md) | `bash inference/run.sh --input /path/to/part0001 --output output/shared_hand` |
 
-训练和推理均可选择 `wilor`、`fah`、`gem-x`。WiLoR 推理使用微调权重时显式传入 `--adapter` 和配套基础模型。已有 `scripts/` 启动命令仍可使用。
+训练和推理均可选择 `wilor`、`fah`、`gem-x`。WiLoR 手套模型支持原图手框和手框去畸变两条路线，训练按配置选择，推理按 `--adapter` 自动匹配。已有 `scripts/` 启动命令仍可使用。[训练命令](training/README.md#wilor-训练) · [推理命令](inference/README.md#wilor-手套权重推理)
 
 [环境安装](#快速开始) · [输入与输出](#输入与输出) · [其他工作流](#其他工作流)
 

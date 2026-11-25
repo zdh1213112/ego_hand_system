@@ -135,6 +135,8 @@ def main():
     if not model.physical_camera_enabled or model.physical_camera_head.camera_model not in ('physical_kb', 'kb_bbox_pinhole'):
         raise ValueError('The adapter must include the trained physical-KB camera head')
     args.rectified = model.physical_camera_head.camera_model == 'kb_bbox_pinhole'
+    crop_mode = 'KB4-rectified hand boxes' if args.rectified else 'raw hand boxes'
+    print(f'[WiLoR] {args.adapter.name}: {crop_mode}', flush=True)
     args.rescale = 2.
     if args.rectified:
         metadata = torch.load(args.adapter, weights_only=False, map_location='cpu')['training_metadata']

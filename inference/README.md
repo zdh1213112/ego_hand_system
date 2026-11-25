@@ -19,16 +19,13 @@ MP4 必须同时具有四路视频和对应的 PTS CSV；多分段录制须分�
 | camera2 | right_side | /camera/right_side | cam_2 |
 | camera3 | left_side | /camera/left_side | cam_3 |
 
-## 运行
+## WiLoR 手套权重推理
 
-```bash
-bash inference/run.sh \
-  --input /path/to/recording/part0001 \
-  --detector /path/to/hand_detector.pt \
-  --output output/shared_hand
-```
+从仓库根目录选择一条命令。两条路线都用 `2.0_glove_wilor_3680.pt` 在原图上检测手框，`--adapter` 决定手框的处理方式。2D 关节使用原图像素坐标，四机视频将骨架画回原图。[模型准备](../models/README.md)
 
-使用训练模块导出的 WiLoR 权重时，显式提供基础模型、检测器和 adapter。例如，将已签收的第 48,300 步权重部署为 `models/wilor/v4_step48300.pt` 后运行：
+### 路线 A · 原图手框（现用 v4）
+
+直接裁剪原图手框。下面使用现用的第 48,300 步 adapter。
 
 ```bash
 bash inference/run.sh wilor \
@@ -39,9 +36,22 @@ bash inference/run.sh wilor \
   --mano-model-dir models/mano --adapter models/wilor/v4_step48300.pt
 ```
 
-要试用手框去畸变权重，将上面的 `--adapter` 换为 `training/output/glove_v4_bbox_pinhole_15000/best_trainable.pt`，并指定独立的 `--output`。入口从权重识别预处理方式。检测器在原始鱼眼图上找框，WiLoR 在框对应的透视图上预测，程序再将关节和 MANO 位姿变回原相机坐标。四机视频和二维坐标都对应原图。[训练配方](../training/configs/glove/nokov_v4_bbox_pinhole.yaml)
+### 路线 B · 原图手框去畸变
 
-替换 `--adapter` 可评估新训练输出的 `best_trainable.pt`。省略后端名沿用 WiLoR。选用其他后端可运行 `bash inference/run.sh fah --help` 或 `bash inference/run.sh gem-x --help`，这两个入口接受 `--session` 或 `--mcap`，分别使用其原有多视角流程。[FAH 参数](../docs/multiview_fah_experiment.md) · [GEM-X 参数](../docs/multiview_gem_experiment.md)
+在原图上检测后，按 KB4 标定将手框转为透视图，预测关节和 MANO 姿态，再映回原相机。下面使用去畸变训练得到的第 15,000 步 adapter。
+
+```bash
+bash inference/run.sh wilor \
+  --input /path/to/recording/part0001 --output output/shared_v4_bbox_pinhole \
+  --detector models/wilor/2.0_glove_wilor_3680.pt \
+  --checkpoint models/wilor/coarse_start.ckpt \
+  --model-config training/pretrained_models/model_config.yaml \
+  --mano-model-dir models/mano --adapter models/wilor/v4_bbox_pinhole_15000.pt
+```
+
+自行训练时，可直接把上面命令的 `--adapter` 换成对应输出目录的 `best_trainable.pt`。例如路线 B 使用 `training/output/glove_v4_bbox_pinhole_15000/best_trainable.pt`。[两条训练路线](../training/README.md#wilor-训练)
+
+### WiLoR 通用选项
 
 MCAP 使用同一命令，将 `--input` 指向 MCAP 文件或单分段目录。
 `--session` 和 `--mcap` 也可分别显式指定输入类型。完整参数见 `--help`。
@@ -51,6 +61,17 @@ MCAP 使用同一命令，将 `--input` 指向 MCAP 文件或单分段目录。
 默认处理完整录制，使用 FP32、检测批大小 4、共享拟合 100 步、拟合批大小 32。
 `--max-frames 60` 可检查短片，`--gpu-profile rtx5090d` 可启用既有 FP16 路径。
 默认同步容差 1500 微秒，每路帧不复用，只处理四路均匹配的时刻。
+
+## 原生 WiLoR 和其他后端
+
+省略 `--adapter` 可运行原生 WiLoR，默认后端也是 WiLoR。
+
+```bash
+bash inference/run.sh --input /path/to/recording/part0001 \
+  --detector /path/to/hand_detector.pt --output output/shared_hand
+```
+
+FAH 和 GEM-X 接受 `--session` 或 `--mcap`，完整选项见 `bash inference/run.sh fah --help` 或 `bash inference/run.sh gem-x --help`。[FAH 参数](../docs/multiview_fah_experiment.md) · [GEM-X 参数](../docs/multiview_gem_experiment.md)
 
 ## 输出与重跑
 

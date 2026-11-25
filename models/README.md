@@ -11,7 +11,16 @@
 | `mano/MANO_LEFT.pkl` | [MANO 项目页](https://mano.is.tue.mpg.de/) | 完整资产安装、依赖检查及原有流程的模型准备 |
 | `hand_landmarker.task` | [MediaPipe 模型文件](https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task) | 双目 MediaPipe 路线 |
 
-WiLoR 文件也可从[模型目录](https://huggingface.co/spaces/rolpotamias/WiLoR/tree/main/pretrained_models)获取，保存到 `models/wilor/`。此目录的权重无需加入代码提交。
+上表中的公开 WiLoR 权重保存在 `models/wilor/`，也可从上游下载。[公开模型目录](https://huggingface.co/spaces/rolpotamias/WiLoR/tree/main/pretrained_models)
+
+使用项目的 v4 手套模型时，将下列项目权重单独部署到 `models/wilor/`。两条路线都使用仓库自带的 `training/pretrained_models/model_config.yaml`。[训练命令](../training/README.md#wilor-训练) · [推理命令](../inference/README.md#wilor-手套权重推理)
+
+| 文件 | 用途 |
+| --- | --- |
+| `coarse_start.ckpt` | 两条路线共用的 WiLoR 基础权重 |
+| `2.0_glove_wilor_3680.pt` | 两条路线共用的原图手部检测器 |
+| `v4_step48300.pt` | 路线 A 的已训 adapter，也是路线 B 的训练起点 |
+| `v4_bbox_pinhole_15000.pt` | 路线 B 的已训 adapter，对应去畸变训练输出的 `glove_v4_bbox_pinhole_15000/best_trainable.pt` |
 
 MANO 需要在项目网站注册并按其许可获取，安装方法见 [mano/README.md](mano/README.md)。本项目手部流程使用 MANO 手模型，无需 SMPL-H 全身资产。
 

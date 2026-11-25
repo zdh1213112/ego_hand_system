@@ -6,7 +6,8 @@ usage() {
   cat <<'EOF'
 Usage: bash training/train.sh {wilor|fah|gem-x} [options]
 
-  wilor   Train with the v4 joint LoRA recipe by default. Use --config for another YAML.
+  wilor   Train with v4 raw-image hand crops by default. For KB4-rectified hand crops,
+          use --config training/configs/glove/nokov_v4_bbox_pinhole.yaml.
   fah     Fine-tune or evaluate FAH-S. See fah --help for V0–V5 and continuation.
   gem-x   Fine-tune or evaluate GEM-X EgoHand. See gem-x --help for required assets.
 

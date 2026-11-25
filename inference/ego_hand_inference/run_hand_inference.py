@@ -44,7 +44,7 @@ def parse_args(argv=None):
     p.add_argument("--device", default="cuda")
     p.add_argument("--detector", type=Path, default=ROOT / "models/wilor/detector.pt")
     p.add_argument("--checkpoint", type=Path, help="WiLoR checkpoint")
-    p.add_argument("--adapter", type=Path, help="trained native-KB WiLoR adapter")
+    p.add_argument("--adapter", type=Path, help="trained glove WiLoR adapter; its camera model selects raw or KB4-rectified hand crops")
     p.add_argument("--detector-crop-calibration", type=Path, help="recording-trained detector-to-mesh crop calibration")
     p.add_argument(
         "--model-config", type=Path
