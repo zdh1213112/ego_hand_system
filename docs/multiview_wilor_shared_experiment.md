@@ -15,9 +15,24 @@
 缓存。共享视频按 `--final-video` 生成，`--no-video` 只保留所需三维处理。
 `both` 保留两个分支；切换模式复用已有预测，共享缓存不会替代原流程结果。
 
-共享模式直接处理原始图像，原图入口不做去畸变。三维拟合与显示使用标定中的相机外参和原始 KB、GEN-DS 或针孔模型。检测框直接读取各相机原始检测结果，与共享拟合是否采用该路观测无关；未参与融合的检测和没有有效共享三维模型时的检测也会显示。
+共享模式在原始图像上检测手部，并将最终结果投回原始图像。局部针孔权重只在每个检测框内构造网络输入。三维拟合与显示使用标定中的相机外参和原始 KB、GEN-DS 或针孔模型。检测框直接读取各相机原始检测结果，与共享拟合是否采用该路观测无关；未参与融合的检测和没有有效共享三维模型时的检测也会显示。
 
 框的坐标、左右手类别及置信度保持检测器输出；画面文字恢复为之前的 `FINAL L / FINAL R`，不显示置信度，以统一对比视频的标注风格。这里的 `FINAL` 仅沿用共享结果的显示标签，不表示该检测参与了融合；框始终来自检测器。原始置信度仍完整保存在投影审计文件中。同一检测框的 WiLoR 左右手两种姿态假设只画一次；不按共享手的数量筛框，不平滑或扩展框，也不从三维骨架重新生成框。共享渲染器使用 `--detector-predictions RAW_WILOR_PREDICTIONS`，主脚本自动传入原始预测目录，原始检测来源文件的 SHA256 写入渲染元数据。
+
+### 逐框局部针孔 WiLoR 权重
+
+将完整训练导出传给 `--checkpoint`。在原始 KB 鱼眼图上，`--wilor-input-view auto` 会为 `physical_perspective` 相机头选择逐框针孔输入。也可以显式指定 `local-pinhole`。脚本优先使用 `--wilor-root` 或 `EGO_WILOR_ROOT` 指定的训练仓库，完整导出的默认训练仓库位于本项目同级的 `wilor_training`。
+
+```bash
+bash scripts/run_multiview_wilor_experiment.sh \
+  --mcap /mnt/LFF/xense_project/dataset/wilor_test_dataset_261117/test_data/group_004_20261116_195542 \
+  --checkpoint models/wilor/wilor_pinhole_40k_best_mpjpe_full_261125.pt \
+  --detector models/wilor/2.0_glove_wilor_3680_261118.pt \
+  --wilor-input-view local-pinhole --wilor-mode shared --pose-policy shared-fit \
+  --max-frames 0 --final-video --output output/group004_pinhole_mpjpe
+```
+
+检测器读取整张原始视频帧。每个框调用训练仓库的 `local_camera`，生成 256×256 针孔图及专属内参。左手翻转、图像标准化、单位裁剪变换与训练一致。训练用标签选择可监督的框，推理对保留的框分别尝试左右手假设。推理使用 FP32，将二维关节、手腕位置和 MANO 根朝向变回原鱼眼相机坐标。局部输入记录在 `wilor_multiview/summary.json` 的 `model.input_view` 中。使用 `--external-boxes DIR` 可复用原图检测框。对于四路原始鱼眼视频，`fusion_multiview_shared_wilor/final_shared_4view.mp4` 保留每路完整视野，并在原图上叠加共享关节和网格。
 
 ## 本次输入的完整命令
 

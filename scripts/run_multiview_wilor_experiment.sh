@@ -9,6 +9,7 @@ if [[ "$POSE_BACKEND" == gem ]]; then POSE_LABEL="GEM-X"; fi
 if [[ "$POSE_BACKEND" == fah ]]; then POSE_LABEL="FAH"; fi
 GEM_MODE="${EGO_GEM_MODE:-shared}"
 WILOR_MODE="${EGO_WILOR_MODE:-shared}"
+WILOR_INPUT_VIEW="${EGO_WILOR_INPUT_VIEW:-auto}"
 POSE_POLICY=""
 POSE_SWITCH_MARGIN_PX="${EGO_WILOR_POSE_SWITCH_MARGIN_PX:-1}"
 NATIVE_RECOVERY=1
@@ -103,6 +104,7 @@ TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}
 
 usage() {
   echo "WiLoR weights: --checkpoint FILE selects the base model; --adapter FILE applies trainable/LoRA weights; --wilor-root DIR selects the matching training checkout."
+  echo "WiLoR --wilor-input-view auto|native|local-pinhole. Auto uses the training per-box 256px pinhole view for a physical_perspective head on native KB images. Full training exports use --checkpoint; --final-video renders the complete source views."
   echo "--mcap FILE_OR_DIR detects GEN and Orbbec camera topics. An EGO4 recording directory must contain one MCAP; select a part for multi-part recordings."
   echo "EGO4 optional: --calibration-json FILE uses an explicit camera_calibrations JSON when the source YAML is unavailable."
   echo "Optional: --evaluation-dataset LABELED_DIR scores final shared MANO/SOMA results; --evaluation-output DIR overrides OUTPUT/evaluation_shared."
@@ -146,6 +148,7 @@ while (($#)); do
     --device) DEVICE="$2"; shift 2 ;;
     --detector) DETECTOR="$2"; shift 2 ;;
     --checkpoint) WILOR_CHECKPOINT="$2"; shift 2 ;;
+    --wilor-input-view) WILOR_INPUT_VIEW="$2"; shift 2 ;;
     --adapter) WILOR_ADAPTER="$2"; shift 2 ;;
     --wilor-root) export EGO_WILOR_ROOT="$2"; shift 2 ;;
     --external-boxes) EXTERNAL_BOXES="$2"; shift 2 ;;
@@ -252,6 +255,9 @@ run_python() {
 if [[ -d "$MCAP" ]]; then
   shopt -s nullglob globstar
   mcap_files=("$MCAP"/*.mcap "$MCAP"/part[0-9]*/*.mcap)
+  if [[ "$INPUT_KIND" == mcap && -f "$MCAP/match_info.json" && ${#mcap_files[@]} == 0 ]]; then
+    mcap_files=("$MCAP"/EGO-*/part[0-9]*/*.mcap)
+  fi
   camera_exports=("$MCAP"/*_camera_*.mp4 "$MCAP"/part[0-9]*/**/*_camera_*.mp4)
   shopt -u nullglob globstar
   if [[ "$INPUT_KIND" == mcap ]] || (( ${#mcap_files[@]} && ! ${#camera_exports[@]} )); then
@@ -361,6 +367,21 @@ if [[ -n "$WILOR_CHECKPOINT" || -n "$WILOR_ADAPTER" ]]; then
     [[ -z "$WEIGHT" || -f "$WEIGHT" ]] || { echo "WiLoR weights do not exist: $WEIGHT" >&2; exit 2; }
   done
 fi
+case "$WILOR_INPUT_VIEW" in auto|native|local-pinhole) ;; *) echo "Invalid WiLoR input view: $WILOR_INPUT_VIEW" >&2; exit 2 ;; esac
+if [[ "$WILOR_INPUT_VIEW" != auto && "$POSE_BACKEND" != wilor ]]; then
+  echo "--wilor-input-view requires the WiLoR backend" >&2; exit 2
+fi
+if [[ "$WILOR_INPUT_VIEW" == local-pinhole && -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
+  echo "Local-pinhole inputs require original KB frames. Use the native multiview entry point." >&2; exit 2
+fi
+if [[ -n "$WILOR_CHECKPOINT" && -z "${EGO_WILOR_ROOT:-}" ]]; then
+  if [[ "$(run_python -c 'import sys; from wilor_checkpoint_metadata import full_inference_checkpoint; print(int(full_inference_checkpoint(sys.argv[1]) is not None))' "$WILOR_CHECKPOINT")" == 1 ]]; then
+    EGO_WILOR_ROOT="$ROOT/../wilor_training"
+    [[ -f "$EGO_WILOR_ROOT/wilor/models/adapter.py" ]] || { echo "Supply --wilor-root DIR for this full training export" >&2; exit 2; }
+    export EGO_WILOR_ROOT
+  fi
+fi
+export EGO_WILOR_INPUT_VIEW="$WILOR_INPUT_VIEW"
 declare -A CAMERA_SEEN=()
 for CAMERA in "${CAMERAS[@]}"; do
   [[ "$CAMERA" =~ ^camera[0-9]+$ ]] || {
@@ -679,11 +700,17 @@ if calibration_json or calibration_yaml:
     import hashlib
     calibration = Path(calibration_json or calibration_yaml).resolve()
     config["calibration_override" if calibration_json else "calibration_yaml"] = {"path": str(calibration), "sha256": hashlib.sha256(calibration.read_bytes()).hexdigest()}
-if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "wilor" and any(
-    os.environ.get(key) for key in ("EGO_WILOR_CHECKPOINT", "EGO_WILOR_ADAPTER", "EGO_WILOR_ROOT")
+if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "wilor" and (
+    any(os.environ.get(key) for key in ("EGO_WILOR_CHECKPOINT", "EGO_WILOR_ADAPTER", "EGO_WILOR_ROOT"))
+    or os.environ.get("EGO_WILOR_INPUT_VIEW", "auto") != "auto"
 ):
-    from wilor_checkpoint_metadata import checkpoint_metadata
+    from wilor_checkpoint_metadata import checkpoint_metadata, full_inference_checkpoint
     config["pose_backend"] = checkpoint_metadata()
+    if os.environ.get("EGO_WILOR_INPUT_VIEW", "auto") != "auto" or (
+        os.environ.get("EGO_WILOR_CHECKPOINT") and
+        full_inference_checkpoint(os.environ["EGO_WILOR_CHECKPOINT"]) is not None
+    ):
+        config["pose_backend"]["input_view_selection"] = os.environ["EGO_WILOR_INPUT_VIEW"]
 if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "gem":
     checkpoint = Path(os.environ["EGO_GEM_CHECKPOINT"]).resolve()
     assets = Path(os.environ["EGO_GEM_SOMA_ASSETS"]).resolve()
@@ -878,6 +905,7 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
       run_python "$ROOT/scripts/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     fi
   else
+    INFERENCE_ARGS+=(--wilor-input-view "$WILOR_INPUT_VIEW")
     if [[ -n "$WILOR_CHECKPOINT" ]]; then INFERENCE_ARGS+=(--checkpoint "$WILOR_CHECKPOINT"); fi
     if [[ -n "$WILOR_ADAPTER" ]]; then INFERENCE_ARGS+=(--adapter "$WILOR_ADAPTER"); fi
     if ((NEED_WILOR_MANO)); then

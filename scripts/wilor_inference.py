@@ -60,7 +60,15 @@ def load_detector(checkpoint_path: Path, device: torch.device):
 
 def load_wilor_model(checkpoint: Path, config: Path, mano_model_dir: Path,
                      adapter: Path | None = None):
-    model_cfg = get_config(str(config), update_cachedir=True)
+    from wilor_checkpoint_metadata import full_inference_checkpoint
+    full = full_inference_checkpoint(checkpoint)
+    if full is None:
+        model_cfg = get_config(str(config), update_cachedir=True)
+    else:
+        from yacs.config import CfgNode
+        from wilor.configs import default_config
+        model_cfg = default_config()
+        model_cfg.merge_from_other_cfg(CfgNode.load_cfg(full["hyper_parameters"]["cfg"]))
     model_cfg.defrost()
     if "vit" in model_cfg.MODEL.BACKBONE.TYPE and "BBOX_SHAPE" not in model_cfg.MODEL:
         model_cfg.MODEL.BBOX_SHAPE = [192, 256]
@@ -72,9 +80,21 @@ def load_wilor_model(checkpoint: Path, config: Path, mano_model_dir: Path,
         (WILOR_ROOT / "mano_data" / "mano_mean_params.npz").resolve()
     )
     model_cfg.freeze()
-    model = WiLoR.load_from_checkpoint(
-        str(checkpoint), strict=False, cfg=model_cfg, map_location="cpu"
-    )
+    if full is None:
+        model = WiLoR.load_from_checkpoint(
+            str(checkpoint), strict=False, cfg=model_cfg, map_location="cpu"
+        )
+    else:
+        try:
+            from wilor.models.adapter import restore_checkpoint_modifications
+        except ImportError as exc:
+            raise RuntimeError("Full WiLoR exports require --wilor-root pointing to the training checkout") from exc
+        model = WiLoR(model_cfg, init_renderer=False)
+        restore_checkpoint_modifications(model, full, checkpoint)
+        # Some inference exports exclude the training-only discriminator.
+        if hasattr(model, "discriminator") and not any(k.startswith("discriminator.") for k in full["state_dict"]):
+            del model.discriminator
+        model.load_state_dict(full["state_dict"], strict=True)
     if adapter is not None:
         try:
             from wilor.models.adapter import load_adapter_weights
