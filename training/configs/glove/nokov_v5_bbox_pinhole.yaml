@@ -1,0 +1,79 @@
+schema_version: 3
+experiment:
+  name: glove_v5_bbox_pinhole_15000
+paths:
+  # Relative paths use the training/ directory as their base.
+  dataset_root: datasets/glove_trainset_20261123_v4
+  checkpoint: ../models/wilor/coarse_start.ckpt
+  model_config: pretrained_models/model_config.yaml
+  mano_path: ../models/mano
+  output: output/glove_v5_bbox_pinhole_15000
+  resume: null
+  init_weights: ../models/wilor/v4_step48300.pt
+data:
+  type: glove_camera
+  image_size: 256
+  rescale_factor: 2.0
+  npz_cache_size: 8
+  marker_inputs: {}
+  crop_jitter: 0.10
+  color_jitter: 0.15
+  blur_prob: 0.15
+  erasing_prob: 0.15
+  group_by_sync_frame: true
+recipe:
+  type: joint_lora_finetune
+  vit_tuning: lora
+  camera_model: kb_bbox_pinhole
+  lora:
+    blocks: all
+    targets:
+    - attn.qkv
+    - attn.proj
+    rank: 4
+    alpha: 8.0
+    dropout: 0.05
+training:
+  max_steps: 15000
+  batch_size: 64
+  num_workers: 8
+  seed: 42
+  device: cuda:0
+  amp: true
+  max_train_samples: null
+  gradient_accumulation_steps: 1
+optimization:
+  vit_lr: 1.0e-05
+  pose_head_lr: 0.0
+  coarse_lr: 1.0e-05
+  refiner_lr: 1.0e-05
+  camera_lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  lr_schedule: cosine
+  warmup_steps: 500
+  min_lr_ratio: 0.05
+checkpointing:
+  save_steps: 500
+validation:
+  val_steps: 1000
+  max_batches: null
+  batch_size: 64
+  max_samples: null
+  final_visualization: false
+losses:
+  local_keypoints_3d: 0.0
+  keypoints_2d: 0.01
+  keypoints_3d: 0.05
+  coarse_keypoints_2d: 0.005
+  coarse_keypoints_3d: 0.025
+  global_orient: 0.001
+  hand_pose: 0.001
+  betas: 0.0005
+  physical_root_3d: 0.5
+  coarse_physical_root_3d: 0.25
+  fingertips_3d: 0.05
+  fingertips_2d: 0.01
+  bone_direction_3d: 0.02
+  anatomy_bend: 0.02
+  multiview_pose_consistency: 0.05

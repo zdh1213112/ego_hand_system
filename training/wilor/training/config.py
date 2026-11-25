@@ -110,8 +110,46 @@ class TrainingConfig:
     losses: dict[str, float]
     camera_lr: float | None = None
     crop_jitter: float = 0.
+    color_jitter: float = 0.0
+    blur_prob: float = 0.0
+    erasing_prob: float = 0.0
+    detector_cache: Path | None = None
+    offset_samples: Path | None = None
+    detector_probability: float = 0.0
+    group_by_sync_frame: bool = False
+    lr_schedule: str = "constant"
+    warmup_steps: int = 0
+    min_lr_ratio: float = 0.05
+
+    def augmentation_options(self) -> dict[str, Any]:
+        return {key: getattr(self, key) for key in (
+            "color_jitter", "blur_prob", "erasing_prob", "detector_cache", "offset_samples",
+            "detector_probability", "group_by_sync_frame",
+        ) if getattr(self, key)}
+
+    def schedule_options(self) -> dict[str, Any]:
+        return {key: getattr(self, key) for key in (
+            "lr_schedule", "warmup_steps", "min_lr_ratio",
+        ) if getattr(self, key) != self.__dataclass_fields__[key].default}
 
     def validate(self) -> None:
+        for name in ("color_jitter", "blur_prob", "erasing_prob"):
+            if not 0 <= getattr(self, name) < 1:
+                raise ValueError(f"data.{name} must be in [0, 1)")
+        if not 0 <= self.detector_probability <= 1:
+            raise ValueError("data.detector_probability must be in [0, 1]")
+        if self.detector_probability and self.detector_cache is None and self.offset_samples is None:
+            raise ValueError("detector_probability requires detector_cache or offset_samples")
+        if self.augmentation_options() and self.data_type != "glove_camera":
+            raise ValueError("Glove image augmentation and sync grouping require glove_camera")
+        if self.lr_schedule not in ("constant", "cosine") or not 0 <= self.min_lr_ratio <= 1:
+            raise ValueError("Expected a constant/cosine schedule and min_lr_ratio in [0, 1]")
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be non-negative")
+        if self.losses.get("coarse_physical_root_3d", 0) and self.camera_model not in ("physical_kb", "kb_bbox_pinhole"):
+            raise ValueError("coarse_physical_root_3d requires a calibrated KB camera model")
+        if self.losses.get("multiview_pose_consistency", 0) and self.data_type != "glove_camera":
+            raise ValueError("multiview_pose_consistency requires glove_camera")
         if not 0 <= self.crop_jitter < 1:
             raise ValueError('data.crop_jitter must be in [0, 1)')
         if self.losses.get('surface_markers_3d',0) and (self.data_type!='glove_camera' or self.camera_model!='physical_kb'):
@@ -253,6 +291,8 @@ def load_training_config(path: str | Path) -> TrainingConfig:
     })
     data = _section(raw, "data", {
         "type", "image_size", "rescale_factor", "npz_cache_size", "marker_inputs", "crop_jitter",
+        "color_jitter", "blur_prob", "erasing_prob", "detector_cache", "offset_samples",
+        "detector_probability", "group_by_sync_frame",
     })
     recipe = _section(raw, "recipe", {"type", "vit_tuning", "lora", "camera_model"})
     training = _section(raw, "training", {
@@ -261,7 +301,7 @@ def load_training_config(path: str | Path) -> TrainingConfig:
     })
     optimization = _section(raw, "optimization", {
         "vit_lr", "pose_head_lr", "coarse_lr", "refiner_lr", "weight_decay", "camera_lr",
-        "grad_clip",
+        "grad_clip", "lr_schedule", "warmup_steps", "min_lr_ratio",
     })
     checkpointing = _section(raw, "checkpointing", {"save_steps"})
     validation = _section(raw, "validation", {
@@ -304,6 +344,16 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         npz_cache_size=_value(data, "npz_cache_size", int, 8),
         marker_inputs=marker_inputs,
         crop_jitter=_value(data, "crop_jitter", float, 0.),
+        color_jitter=_value(data, "color_jitter", float, 0.0),
+        blur_prob=_value(data, "blur_prob", float, 0.0),
+        erasing_prob=_value(data, "erasing_prob", float, 0.0),
+        detector_cache=_path(data, "detector_cache", None, nullable=True),
+        offset_samples=_path(data, "offset_samples", None, nullable=True),
+        detector_probability=_value(data, "detector_probability", float, 0.0),
+        group_by_sync_frame=_value(data, "group_by_sync_frame", bool, False),
+        lr_schedule=_value(optimization, "lr_schedule", str, "constant"),
+        warmup_steps=_value(optimization, "warmup_steps", int, 0),
+        min_lr_ratio=_value(optimization, "min_lr_ratio", float, 0.05),
         recipe_type=recipe_type,
         camera_model=_value(recipe, "camera_model", str, "virtual"),
         vit_tuning=_value(
@@ -369,6 +419,7 @@ def resolved_training_config(config: TrainingConfig) -> dict[str, Any]:
             "rescale_factor": config.rescale_factor,
             "npz_cache_size": config.npz_cache_size,
             "marker_inputs": {name: str(path) for name, path in config.marker_inputs.items()},
+            **{k: str(v) if isinstance(v, Path) else v for k, v in config.augmentation_options().items()},
             **({"crop_jitter":config.crop_jitter} if config.crop_jitter else {}),
         },
         "recipe": {
@@ -393,6 +444,7 @@ def resolved_training_config(config: TrainingConfig) -> dict[str, Any]:
             "coarse_lr": config.coarse_lr,
             "refiner_lr": config.refiner_lr,
             "camera_lr": config.camera_lr,
+            **config.schedule_options(),
             "weight_decay": config.weight_decay,
             "grad_clip": config.grad_clip,
         },

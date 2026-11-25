@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import time
 from contextlib import nullcontext
@@ -14,7 +15,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from wilor.datasets.glove_dataset import GloveDataset, validate_manifest
+from wilor.datasets.glove_dataset import GloveDataset, SyncFrameBatchSampler, validate_manifest
 from wilor.datasets.glove_validation import sha256_file
 from wilor.datasets.opentouch_dataset import OpenTouchDataset
 from wilor.models import WiLoR, load_wilor_config, resolve_mano_model_path
@@ -27,7 +28,7 @@ from wilor.models.adapter import (
 
 from .config import TrainingConfig, resolved_training_config
 from .evaluation import evaluate_glove_set
-from .losses import UnifiedLossComputer, unified_loss_config_from_mapping
+from .losses import FINGERTIPS, V5_LOSS_SOURCES, UnifiedLossComputer, unified_loss_config_from_mapping
 from .recipes import TrainingRecipe, build_recipe
 from .reporting import write_json, write_training_curves, write_yaml
 
@@ -121,6 +122,12 @@ def build_datasets(
             marker_inputs=config.marker_inputs,
             use_surface_markers=config.losses.get('surface_markers_3d',0)>0,
             crop_jitter=config.crop_jitter,
+            color_jitter=config.color_jitter,
+            blur_prob=config.blur_prob,
+            erasing_prob=config.erasing_prob,
+            detector_cache=config.detector_cache,
+            offset_samples=config.offset_samples,
+            detector_probability=config.detector_probability,
             camera_model=config.camera_model,
         )
         val = GloveDataset(
@@ -191,7 +198,8 @@ def _training_metadata(
             "camera_model": config.camera_model,
             "lora": None if config.lora is None else config.lora.to_dict(),
         },
-        "losses": {k:v for k,v in effective_losses.items() if k!='surface_markers_3d' or k in config.losses},
+        "losses": {key: value for key, value in effective_losses.items()
+                   if key in config.losses or (key != "surface_markers_3d" and key not in V5_LOSS_SOURCES)},
         "optimization": {
             "vit_lr": config.vit_lr,
             "coarse_lr": config.coarse_lr,
@@ -213,6 +221,11 @@ def _training_metadata(
     }
     if config.camera_lr is not None:
         semantic['optimization']['camera_lr'] = config.camera_lr
+    semantic["data"].update({
+        key: _artifact(value) if isinstance(value, Path) else value
+        for key, value in config.augmentation_options().items()
+    })
+    semantic["optimization"].update(config.schedule_options())
     canonical = json.dumps(
         semantic, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -220,6 +233,40 @@ def _training_metadata(
         "signature": hashlib.sha256(canonical).hexdigest(),
         "config": semantic,
     }
+
+
+def lr_multiplier(step, max_steps, lr_schedule, warmup_steps, min_lr_ratio):
+    """Use the absolute optimizer step, including after a checkpoint resume."""
+    if warmup_steps and step <= warmup_steps:
+        return max(0, step) / warmup_steps
+    if lr_schedule == "constant":
+        return 1.0
+    start = max(1, warmup_steps)
+    progress = min(1.0, max(0.0, (step - start) / max(1, max_steps - start)))
+    return min_lr_ratio + (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress)) / 2
+
+
+def _validation_errors(output, batch):
+    """Accumulate numerators and visible-point counts across unequal batches."""
+    if "pred_keypoints_3d" not in output or "keypoints_3d" not in batch:
+        return {}
+    truth = batch["keypoints_3d"]
+    pred = output["pred_keypoints_3d"].float()
+    offset = pred - truth[..., :3]
+    distances = (offset - offset[:, :1]).norm(dim=-1) * 1000
+    valid = (truth[..., 3] > 0) & (truth[:, :1, 3] > 0)
+    def totals(error, mask):
+        return torch.stack((error.masked_fill(~mask, 0.).sum(), mask.sum()))
+    values = {
+        "val_fingertip_mpjpe_mm": totals(distances[:, FINGERTIPS], valid[:, FINGERTIPS]),
+        "val_pinky_tip_mm": totals(distances[:, 20], valid[:, 20]),
+    }
+    if "pred_keypoints_2d" in output and "keypoints_2d" in batch:
+        truth2d = batch["keypoints_2d"]
+        size = truth2d.new_tensor([batch["img"].shape[-1], batch["img"].shape[-2]])
+        error = ((output["pred_keypoints_2d"].float() - truth2d[..., :2]) * size).norm(dim=-1)
+        values["val_reproj_crop_px"] = totals(error, truth2d[..., 2] > 0)
+    return values
 
 
 class GenericTrainer:
@@ -242,6 +289,7 @@ class GenericTrainer:
         self.device = device
         self.use_amp = bool(use_amp and device.type == "cuda")
         self.grad_clip = float(grad_clip)
+        self.validation_metrics: dict[str, float] = {}
 
     def _amp_context(self):
         return (
@@ -253,6 +301,7 @@ class GenericTrainer:
         self,
         batch: dict[str, Any],
         training: bool,
+        validation_totals: dict | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor, int]:
         device_batch = _move(batch, self.device)
         with torch.set_grad_enabled(training), self._amp_context():
@@ -261,6 +310,9 @@ class GenericTrainer:
             )
             loss, components = self.loss_computer(device_batch, output)
             _, metric = self.recipe.metric(device_batch, output)
+        if validation_totals is not None:
+            for key, stats in _validation_errors(output, device_batch).items():
+                validation_totals[key] = validation_totals.get(key, 0) + stats.double()
         return loss, components, metric, int(batch["img"].shape[0])
 
     def train_step(
@@ -310,10 +362,11 @@ class GenericTrainer:
         total_samples = 0
         component_totals: dict[str, float] = {}
         batch_count = 0
+        validation_totals = {}
         for index, batch in enumerate(loader):
             if max_batches is not None and index >= max_batches:
                 break
-            loss, components, metric, count = self._forward_batch(batch, False)
+            loss, components, metric, count = self._forward_batch(batch, False, validation_totals)
             total_loss += float(loss.cpu()) * count
             total_metric += float(metric.cpu()) * count
             total_samples += count
@@ -322,6 +375,8 @@ class GenericTrainer:
                 component_totals[name] = (
                     component_totals.get(name, 0.0) + float(value.cpu()) * count
                 )
+        self.validation_metrics = {key: float(sums[0] / sums[1]) for key, sums in validation_totals.items()
+                                   if sums[1].item() > 0}
         if total_samples == 0:
             raise RuntimeError("Validation loader produced no batches")
         return (
@@ -330,6 +385,22 @@ class GenericTrainer:
             batch_count,
             {name: value / total_samples for name, value in component_totals.items()},
         )
+
+
+def _preload_weights(config, model):
+    """Restore imported modules before the recipe constructs optimizer groups."""
+    if config.init_weights is None:
+        if config.resume is not None:
+            load_trainable_weights(config.resume, model)
+        return None
+
+    payload = load_trainable_weights(config.init_weights, model)
+    previous_mode = payload.get("model_modifications", {}).get("physical_camera_model")
+    if previous_mode is not None and previous_mode != config.camera_model:
+        last = model.physical_camera_head.net[-1]
+        torch.nn.init.zeros_(last.weight)
+        torch.nn.init.zeros_(last.bias)
+    return _artifact(config.init_weights)
 
 
 def run_training(config: TrainingConfig) -> dict[str, Any]:
@@ -360,23 +431,18 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     use_amp = config.use_amp and device.type == "cuda"
     recipe = build_recipe(config)
     model = _load_base_model(config)
-    initialized_from = None
-    # Model modifications such as LoRA must be reconstructed before the recipe
-    # freezes parameters and builds optimizer groups.
-    preload = config.init_weights or config.resume
-    if preload is not None:
-        load_trainable_weights(preload, model)
-        if config.init_weights is not None:
-            initialized_from = _artifact(config.init_weights)
+    initialized_from = _preload_weights(config, model)
     if config.camera_model in {"physical_perspective", "physical_kb", "kb_bbox_pinhole"}:
         model.physical_camera_enabled = True
         model.physical_camera_head.camera_model = config.camera_model
     if config.recipe_type in {"marker_camera_finetune", "marker_offset_finetune"}:
         model.marker_head_enabled = True
+    model.crop_rescale_factor = config.rescale_factor
     recipe.configure_model(model)
     model = model.to(device)
     recipe.set_mode(model, training=True)
     optimizer = recipe.build_optimizer(model)
+    base_lrs = [group["lr"] for group in optimizer.param_groups]
     trainer = GenericTrainer(
         model,
         recipe,
@@ -426,9 +492,11 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "num_workers": config.num_workers,
         "pin_memory": device.type == "cuda",
     }
-    train_loader = DataLoader(
-        train_set, batch_size=config.batch_size, shuffle=True, **loader_options
-    )
+    if config.group_by_sync_frame:
+        sampler = SyncFrameBatchSampler(train_set.rows, config.batch_size, config.seed)
+        train_loader = DataLoader(train_set, batch_sampler=sampler, **loader_options)
+    else:
+        train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, **loader_options)
     val_loader = DataLoader(
         val_set,
         batch_size=config.evaluation_batch_size,
@@ -488,6 +556,11 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         }
 
     for step in range(start_step + 1, config.max_steps + 1):
+        lr_scale = lr_multiplier(step, config.max_steps, config.lr_schedule,
+                                 config.warmup_steps, config.min_lr_ratio)
+        if config.warmup_steps or config.lr_schedule != "constant":
+            for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                group["lr"] = base_lr * lr_scale
         batches = [
             next_batch() for _ in range(config.gradient_accumulation_steps)
         ]
@@ -497,6 +570,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             "metric_name": metric_name,
             "train_loss": train_loss,
             "train_metric": train_metric,
+            "lr_scale": lr_scale,
             "train_loss_components": train_components,
         }
         should_validate = (
@@ -513,6 +587,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 "val_metric": val_metric,
                 "val_batches": val_batches,
                 "val_loss_components": val_components,
+                **trainer.validation_metrics,
             })
             best_val_loss = min(best_val_loss, val_loss)
             selection_score = val_metric if selection_metric == "val_metric" else val_loss

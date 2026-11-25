@@ -8,7 +8,7 @@ from ..utils import SkeletonRenderer, MeshRenderer
 from ..utils.geometry import aa_to_rotmat, perspective_projection
 from ..utils.pylogger import get_pylogger
 from .backbones import create_backbone
-from .adapter import FULL_FORMAT, restore_checkpoint_modifications
+from .adapter import FULL_FORMAT, checkpoint_rescale_factor, restore_checkpoint_modifications
 from .heads import RefineNet
 from .discriminator import Discriminator
 from .losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
@@ -76,6 +76,7 @@ class WiLoR(pl.LightningModule):
         self.automatic_optimization = False
 
     def on_load_checkpoint(self, checkpoint):
+        self.crop_rescale_factor = checkpoint_rescale_factor(checkpoint)
         if checkpoint.get("format") == FULL_FORMAT:
             restore_checkpoint_modifications(self, checkpoint, FULL_FORMAT)
 

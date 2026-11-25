@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 from wilor.datasets.glove_dataset import GloveDataset
 from wilor.datasets.glove_validation import sha256_file, validate_manifest, manifest_camera_model
-from wilor.models.adapter import load_adapter_weights
+from wilor.models.adapter import checkpoint_rescale_factor, load_adapter_weights
 from wilor.training.evaluation import evaluate_glove_set
 from wilor.training.glove import (
     GloveTrainingConfig,
@@ -129,8 +129,9 @@ def main() -> int:
         output=output,
     )
     model = load_glove_model(config, device)
+    rescale_factor = getattr(model, "crop_rescale_factor", 2.0)
     if adapter is not None:
-        load_adapter_weights(adapter, model)
+        rescale_factor = checkpoint_rescale_factor(load_adapter_weights(adapter, model))
     camera_mode = manifest_camera_model(manifest) if args.camera_model == 'auto' else args.camera_model
     if model.physical_camera_enabled and model.physical_camera_head.camera_model == 'kb_bbox_pinhole':
         if manifest_camera_model(manifest) != 'physical_kb' or args.camera_model not in ('auto', 'kb_bbox_pinhole'):
@@ -138,7 +139,7 @@ def main() -> int:
         camera_mode = 'kb_bbox_pinhole'
     dataset = GloveDataset(
         manifest, max_samples=args.max_samples, marker_inputs=marker_inputs,
-        camera_model=camera_mode,
+        camera_model=camera_mode, rescale_factor=rescale_factor,
     )
     loader = DataLoader(
         dataset,

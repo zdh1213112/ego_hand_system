@@ -25,6 +25,12 @@ bash training/train.sh wilor
 bash training/train.sh wilor --config training/configs/glove/nokov_v4_bbox_pinhole.yaml
 ```
 
+**路线 B 的 v5 配方**在训练时加入手框扰动、颜色微扰、模糊和局部遮挡。同一帧同一只手的多路视角进入同一批次，损失函数额外约束指尖位置、骨段方向、指节反折、腕根粗估位置和多视角手姿一致性。它也从 v4 第 48,300 步初始化，切换相机模式时将相机头末层归零，以 500 步预热和余弦学习率训练 15,000 步。输出目录为 `training/output/glove_v5_bbox_pinhole_15000/`。[v5 配方](configs/glove/nokov_v5_bbox_pinhole.yaml)
+
+```bash
+bash training/train.sh wilor --config training/configs/glove/nokov_v5_bbox_pinhole.yaml
+```
+
 ### 训练输出
 
 两条路线都可将 `best_trainable.pt` 直接传给推理的 `--adapter`。续训时将 `last_trainable.pt` 填入 `paths.resume`，并把 `training.max_steps` 设为目标总步数。`best_full.ckpt` 和 `last_full.ckpt` 含完整模型，可用于 `training/evaluate_glove.py`。

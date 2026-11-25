@@ -179,7 +179,8 @@ def evaluate_glove_set(
                 from tools.hand_finetune.crop_geometry import PerspectiveCrop
                 rotation = batch["view_rotation"][index].numpy()
                 view = PerspectiveCrop(rotation, batch["camera_K"][index].numpy(),
-                                       batch["raw_K"][index].numpy(), batch["camera_distortion"][index].numpy(),
+                                       batch["raw_K"][index].numpy(),
+                                       batch.get("raw_distortion", batch["camera_distortion"])[index].numpy(),
                                        int(batch["img"].shape[-1]))
                 pred_image, gt_image = view.native_pixels(pred_image), view.native_pixels(gt_image)
                 bboxes[index] = batch["raw_bbox"][index].numpy()

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,11 +23,23 @@ LOSS_NAMES = (
     "hand_pose",
     "betas",
 )
+FINGERTIPS = (4, 8, 12, 16, 20)
+BONE_EDGES = tuple((0 if joint % 4 == 1 else joint - 1, joint) for joint in range(1, 21))
+V5_LOSS_SOURCES = {
+    "coarse_physical_root_3d": "keypoints_3d",
+    "fingertips_3d": "keypoints_3d",
+    "fingertips_2d": "keypoints_2d",
+    "bone_direction_3d": "keypoints_3d",
+    "anatomy_bend": "keypoints_3d",
+    "multiview_pose_consistency": "keypoints_3d",
+}
 OPTIONAL_UNIFIED_LOSS_NAMES = (
-    "physical_root_3d", "marker_keypoints_2d", "marker_keypoints_3d", "marker_root_3d", "surface_markers_3d"
+    "physical_root_3d", "marker_keypoints_2d", "marker_keypoints_3d", "marker_root_3d", "surface_markers_3d",
+    *V5_LOSS_SOURCES,
 )
 UNIFIED_LOSS_NAMES = ("local_keypoints_3d",) + LOSS_NAMES + OPTIONAL_UNIFIED_LOSS_NAMES
 AVAILABILITY_SOURCE = {
+    **V5_LOSS_SOURCES,
     "local_keypoints_3d": "local_keypoints_3d",
     "keypoints_2d": "keypoints_2d",
     "keypoints_3d": "keypoints_3d",
@@ -137,6 +151,8 @@ def unified_loss_config_from_mapping(
         )
     requested: dict[str, float] = {}
     for name in UNIFIED_LOSS_NAMES:
+        if name in V5_LOSS_SOURCES and name not in losses:
+            continue
         value = losses.get(name, 0.0)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{source_path}: loss {name} must be numeric")
@@ -150,7 +166,7 @@ def unified_loss_config_from_mapping(
         raise ValueError("dataset_profile.json has no supervision map")
     effective: dict[str, float] = {}
     disabled_reasons: dict[str, str] = {}
-    for name in UNIFIED_LOSS_NAMES:
+    for name in requested:
         availability = supervision.get(AVAILABILITY_SOURCE[name], {})
         available = bool(
             isinstance(availability, Mapping) and availability.get("available", False)
@@ -224,6 +240,78 @@ def measured_surface_loss(output, batch):
         return ((local*mask).sum((1,2))/count[:,0]).mean() + .5*absolute
 
 
+def _weighted_mean(values, weights):
+    weights = weights.to(values)
+    return (torch.where(weights > 0, values, 0.) * weights).sum() / weights.sum().clamp_min(1e-8)
+
+
+def _root_loss(prediction, batch):
+    errors = F.smooth_l1_loss(prediction, batch["camera_root_m"], beta=0.02, reduction="none")
+    mask = batch.get("geometry_supervised")
+    if mask is None:
+        return errors.mean()
+    return (errors.mean(1) * mask).sum() / mask.sum().clamp_min(1)
+
+
+def _fingertip_loss(prediction, target, wrist_relative):
+    points, confidence = target[..., :-1], target[..., -1]
+    if wrist_relative:
+        prediction = prediction - prediction[:, :1]
+        points = points - points[:, :1]
+        confidence = torch.minimum(confidence, confidence[:, :1])
+    difference = (prediction[:, FINGERTIPS].float() - points[:, FINGERTIPS]).abs().mean(-1)
+    return _weighted_mean(difference, confidence[:, FINGERTIPS])
+
+
+def _bone_direction_loss(prediction, target):
+    starts, ends = zip(*BONE_EDGES)
+    predicted = prediction[:, ends].float() - prediction[:, starts].float()
+    actual = target[:, ends, :3] - target[:, starts, :3]
+    cosine = (F.normalize(predicted, dim=-1, eps=1e-6) *
+              F.normalize(actual, dim=-1, eps=1e-6)).sum(-1)
+    confidence = torch.minimum(target[:, starts, 3], target[:, ends, 3])
+    confidence = confidence * (actual.norm(dim=-1) > 1e-6)
+    return _weighted_mean(1 - cosine.clamp(-1, 1), confidence)
+
+
+def anatomy_bend(joints):
+    """Mean PIP/DIP hyperextension and opposing flexion in canonical right-hand space."""
+    joints = joints.float()
+    palm_normal = F.normalize(torch.cross(joints[:, 5] - joints[:, 0],
+                                          joints[:, 17] - joints[:, 0], dim=-1), dim=-1, eps=1e-6)
+    palm_axis = F.normalize(joints[:, 9] - joints[:, 0], dim=-1, eps=1e-6)
+    axis = F.normalize(torch.cross(palm_axis, palm_normal, dim=-1), dim=-1, eps=1e-6)
+    fingers = joints[:, 5:].reshape(-1, 4, 4, 3)
+    bones = F.normalize(fingers.diff(dim=2), dim=-1, eps=1e-6)
+    first, second = bones[:, :, :-1], bones[:, :, 1:]
+    sin = (torch.cross(first, second, dim=-1) * axis[:, None, None]).sum(-1)
+    cos = (first * second).sum(-1)
+    # atan2(0, 0) has an undefined backward on a collapsed/orthogonal bone.
+    valid = sin.square() + cos.square() > 1e-12
+    flex = torch.atan2(torch.where(valid, sin, 0.), torch.where(valid, cos, 1.))
+    pip, dip = flex.unbind(-1)
+    hyperextension = F.relu(-flex - math.radians(5.)).square().sum(-1)
+    return (hyperextension + F.relu(-pip * dip - 0.02)).mean()
+
+
+def _multiview_pose_consistency(params, batch):
+    poses, shapes = params["hand_pose"].float(), params["betas"].float()
+    groups = defaultdict(list)
+    for index, (source, sync, side) in enumerate(zip(batch["source_group"], batch["sync_index"].tolist(),
+                                                    batch["side"].tolist())):
+        if sync >= 0:
+            groups[source, sync, side].append(index)
+    penalties = []
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        if "camera" in batch and len({batch["camera"][i] for i in indices}) < 2:
+            continue
+        pose, shape = poses[indices], shapes[indices]
+        penalties.append((pose - pose.mean(0)).square().mean() + (shape - shape.mean(0)).square().mean())
+    return torch.stack(penalties).mean() if penalties else (poses.sum() + shapes.sum()) * 0.
+
+
 class UnifiedLossComputer:
     """Loss dispatcher shared by domain adaptation and RefineNet fine-tuning."""
 
@@ -247,7 +335,7 @@ class UnifiedLossComputer:
         )
         zero = anchor.sum() * 0.0
         raw: dict[str, torch.Tensor] = {
-            name: zero for name in UNIFIED_LOSS_NAMES
+            name: zero for name in self.config.effective
         }
         if self.config.effective["local_keypoints_3d"] > 0:
             raw["local_keypoints_3d"] = local_keypoint_3d_loss(
@@ -258,12 +346,20 @@ class UnifiedLossComputer:
         if self.config.effective["physical_root_3d"] > 0:
             if "pred_root_camera_m" not in output or "camera_root_m" not in batch:
                 raise KeyError("physical root supervision requires calibrated camera output and labels")
-            root_loss = F.smooth_l1_loss(output["pred_root_camera_m"], batch["camera_root_m"], beta=0.02,reduction='none')
-            if 'geometry_supervised' in batch:
-                trusted = batch['geometry_supervised']
-                raw["physical_root_3d"] = (root_loss.mean(1)*trusted).sum()/trusted.sum().clamp_min(1)
-            else:
-                raw["physical_root_3d"] = root_loss.mean()
+            raw["physical_root_3d"] = _root_loss(output["pred_root_camera_m"], batch)
+        active = self.config.effective
+        if active.get("coarse_physical_root_3d"):
+            raw["coarse_physical_root_3d"] = _root_loss(output["coarse_root_camera_m"], batch)
+        for dim in ("2d", "3d"):
+            key = f"fingertips_{dim}"
+            if active.get(key):
+                raw[key] = _fingertip_loss(output[f"pred_keypoints_{dim}"], batch[f"keypoints_{dim}"], dim == "3d")
+        if active.get("bone_direction_3d"):
+            raw["bone_direction_3d"] = _bone_direction_loss(output["pred_keypoints_3d"], batch["keypoints_3d"])
+        if active.get("anatomy_bend"):
+            raw["anatomy_bend"] = anatomy_bend(output["pred_keypoints_3d"])
+        if active.get("multiview_pose_consistency"):
+            raw["multiview_pose_consistency"] = _multiview_pose_consistency(output["pred_mano_params"], batch)
         if self.config.effective.get("surface_markers_3d",0) > 0:
             raw["surface_markers_3d"] = measured_surface_loss(output,batch)
         if self.config.effective["marker_keypoints_2d"] > 0:
@@ -315,13 +411,13 @@ class UnifiedLossComputer:
                 )
         weighted = {
             name: raw[name] * self.config.effective[name]
-            for name in UNIFIED_LOSS_NAMES
+            for name in self.config.effective
         }
         total = sum(weighted.values(), zero)
         if not torch.isfinite(total):
             raise ValueError("Loss is NaN or Inf")
         detached = {"loss": total.detach()}
-        for name in UNIFIED_LOSS_NAMES:
+        for name in self.config.effective:
             detached[f"loss_{name}"] = raw[name].detach()
             detached[f"weighted_{name}"] = weighted[name].detach()
         output["losses"] = detached

@@ -97,8 +97,15 @@ def save_adapter_checkpoint(
     )
 
 
+def checkpoint_rescale_factor(payload: Mapping[str, Any]) -> float:
+    data = payload.get("training_metadata", {}).get("config", {}).get("data", {})
+    return float(data.get("rescale_factor", payload.get("model_modifications", {}).get("rescale_factor", 2.0)))
+
+
 def _model_modifications(model: torch.nn.Module) -> dict[str, Any]:
     modifications: dict[str, Any] = {}
+    if getattr(model, "crop_rescale_factor", 2.0) != 2.0:
+        modifications["rescale_factor"] = model.crop_rescale_factor
     lora_config = getattr(getattr(model, "backbone", None), "_wilor_lora_config", None)
     if lora_config is not None:
         modifications["lora"] = lora_config.to_dict()

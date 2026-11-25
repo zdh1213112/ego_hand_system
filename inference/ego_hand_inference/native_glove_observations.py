@@ -51,7 +51,9 @@ def crop_hand(image, box, side, calibration, config, *, rectified=False, rescale
     return sample
 
 
-def run_frames(images, detector, model, config, calibration, threshold, args, device, pool):
+def run_frames(images, detector, model, config, calibration, threshold, args, device, pool, counts=None):
+    if counts is None:
+        counts = Counter()
     result = detector.predict(images, conf=threshold, iou=.5, verbose=False, device=str(device))
     proposals=[]
     for frame,detections in enumerate(result):
@@ -59,7 +61,9 @@ def run_frames(images, detector, model, config, calibration, threshold, args, de
         scores=boxes.conf.cpu().numpy();sides=boxes.cls.cpu().numpy().astype(int);bounds=boxes.xyxy.cpu().numpy()
         for idx in _top_detections_per_class(scores,sides,args.max_detections_per_class):
             box=bounds[idx]
-            if np.min(box[2:]-box[:2])<=1:continue
+            if not np.isfinite(box).all() or np.min(box[2:] - box[:2]) <= 1:
+                counts["skipped_invalid_proposals"] += 2  # Both handedness hypotheses.
+                continue
             crop_box = box
             if args.crop_coefficients is not None:
                 crop_box = calibrated_box(args.crop_coefficients, box, calibration["id"], int(sides[idx]),
@@ -74,11 +78,19 @@ def run_frames(images, detector, model, config, calibration, threshold, args, de
     hands=[[] for _ in images]
     def prepare(record):
         frame,box,info=record
-        return crop_hand(images[frame],box,info['is_right'],calibration,config,
-                         rectified=args.rectified, rescale=args.rescale)
+        try:
+            sample = crop_hand(images[frame], box, info['is_right'], calibration, config,
+                               rectified=args.rectified, rescale=args.rescale)
+        except ValueError:
+            return None
+        return record, sample
     for start in range(0,len(proposals),args.batch_size):
         rows=proposals[start:start+args.batch_size]
-        samples=list(pool.map(prepare,rows))
+        prepared = [item for item in pool.map(prepare, rows) if item is not None]
+        counts["skipped_invalid_proposals"] += len(rows) - len(prepared)
+        if not prepared:
+            continue
+        rows, samples = zip(*prepared)
         views = [sample.pop('perspective_view', None) for sample in samples]
         batch=recursive_to(default_collate(samples),device)
         amp=device.type=='cuda' and torch.cuda.is_bf16_supported()
@@ -104,7 +116,8 @@ def run_frames(images, detector, model, config, calibration, threshold, args, de
                 info['input_camera_model'] = 'kb_bbox_pinhole'
             trans=root-relative[0]
             if not np.isfinite(uv).all() or not np.isfinite(relative).all() or not np.isfinite(trans).all():
-                raise ValueError('Non-finite native camera prediction')
+                counts["skipped_invalid_proposals"] += 1
+                continue
             info.update(joints_2d=uv.tolist(),joints_3d_camera_relative=relative.tolist(),camera_translation=trans.tolist(),
                         physical_root_camera_m=root.tolist(),mano={k:v.tolist() for k,v in params.items()})
             hands[frame].append(info)
@@ -160,18 +173,18 @@ def main():
                      size=np.asarray(spec['image_size'],np.float32))
             folder=args.output/cam;folder.mkdir()
             reader=SequentialVideoReader(args.dataset/'cameras'/cam/manifest['storage']['video_filename'],tuple(spec['image_size']))
-            counts=Counter()
+            counts = Counter(skipped_invalid_proposals=0)
             try:
                 with (folder/'predictions.jsonl').open('w') as f:
                     for start in range(0,len(rows),args.frame_batch_size):
                         group=rows[start:start+args.frame_batch_size]
                         images=[reader.read(int(r[cam+'_frame_index'])) for r in group]
-                        hands=run_frames(images,detector,model,config,cal,limits.get(cam,.3),args,device,pool)
+                        hands=run_frames(images,detector,model,config,cal,limits.get(cam,.3),args,device,pool,counts)
                         for r,hypotheses in zip(group,hands):
                             rec=dict(sync_index=int(r['sync_index']),source_frame_index=int(r[cam+'_frame_index']),
                                      timestamp_ns=int(r[cam+'_timestamp_ns']),hands=hypotheses)
                             f.write(json.dumps(rec,separators=(',',':'))+'\n')
-                            counts.update(frame_count=1,hypotheses=len(hypotheses),physical_box_count=len(hypotheses)//2)
+                            counts.update(frame_count=1,hypotheses=len(hypotheses),physical_box_count=len({h["detection_index"] for h in hypotheses}))
             finally:
                 reader.close()
             camera_stats[cam]=dict(counts)

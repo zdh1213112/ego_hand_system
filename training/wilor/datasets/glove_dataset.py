@@ -15,14 +15,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from .utils import expand_to_aspect_ratio, generate_image_patch_cv2
 
@@ -245,6 +245,71 @@ def make_splits(
     return metadata
 
 
+class SyncFrameBatchSampler(Sampler):
+    """Shuffle groups of synchronized views, then pack without splitting a hand."""
+    def __init__(self, rows, batch_size, seed=0):
+        groups = defaultdict(list)
+        for index, row in enumerate(rows):
+            sync = int(row.get("sync_index", -1))
+            key = (source_group_key(row), sync, int(row["side"])) if sync >= 0 else (index,)
+            groups[key].append(index)
+        if batch_size < 1 or any(len(group) > batch_size for group in groups.values()):
+            raise ValueError("batch_size must fit every same-hand sync group")
+        self.groups = list(groups.values())
+        self.batch_size = batch_size
+        self.generator = np.random.default_rng(seed)
+        self.batches = self._pack()
+
+    def _pack(self):
+        batches, batch = [], []
+        for index in self.generator.permutation(len(self.groups)):
+            group = self.groups[index]
+            if len(batch) + len(group) > self.batch_size:
+                batches.append(batch)
+                batch = []
+            batch.extend(group)
+        if batch:
+            batches.append(batch)
+        return batches
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __iter__(self):
+        yield from self.batches
+        self.batches = self._pack()
+
+
+def _augment_appearance(crop, color_jitter, blur_prob, erasing_prob):
+    if color_jitter:
+        gains = np.random.uniform(1 - color_jitter, 1 + color_jitter, 6).astype(np.float32)
+        pixels = crop.astype(np.float32)
+        gray = cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY)[:, :, None]
+        pixels = gray + gains[0] * (pixels - gray)
+        mean = pixels.mean(axis=(0, 1))
+        pixels = (mean + gains[1] * (pixels - mean)) * gains[2] * gains[3:]
+        crop = np.clip(pixels, 0, 255).astype(np.uint8)
+    if blur_prob and np.random.random() < blur_prob:
+        size = int(np.random.choice([3, 5]))
+        if np.random.randint(2):
+            crop = cv2.GaussianBlur(crop, (size, size), 0)
+        else:
+            # Sample motion blur along a horizontal, vertical or diagonal line.
+            line = np.zeros((size, size), np.float32)
+            line[size // 2] = 1 / size
+            diagonal = np.eye(size, dtype=np.float32) / size
+            kernels = (line, line.T, diagonal, np.fliplr(diagonal))
+            crop = cv2.filter2D(crop, -1, kernels[np.random.randint(len(kernels))])
+    if erasing_prob and np.random.random() < erasing_prob:
+        h, w = crop.shape[:2]
+        area = h * w * np.random.uniform(0.02, 0.15)
+        erase_h = int(np.clip(round(np.sqrt(area * np.random.uniform(0.5, 2))), 1, h))
+        erase_w = int(np.clip(round(area / erase_h), 1, w))
+        y, x = np.random.randint(0, h - erase_h + 1), np.random.randint(0, w - erase_w + 1)
+        crop[y:y + erase_h, x:x + erase_w] = np.random.randint(0, 256)
+    return crop
+
+
 class GloveDataset(Dataset):
     """Read one monocular hand sample per JSONL row.
 
@@ -269,6 +334,12 @@ class GloveDataset(Dataset):
         camera_model: str = "physical_perspective",
         use_surface_markers: bool = False,
         crop_jitter: float = 0.,
+        color_jitter: float = 0.0,
+        blur_prob: float = 0.0,
+        erasing_prob: float = 0.0,
+        detector_cache: Path | None = None,
+        offset_samples: Path | None = None,
+        detector_probability: float = 0.0,
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.camera_model = camera_model
@@ -353,6 +424,55 @@ class GloveDataset(Dataset):
             if not self.rows:
                 raise ValueError("No samples have complete marker targets")
 
+        self.color_jitter = color_jitter
+        self.blur_prob = blur_prob
+        self.erasing_prob = erasing_prob
+        self.detector_probability = detector_probability
+        self.matched_boxes = {}
+        self.offset_pool = []
+        if detector_probability:
+            from tools.hand_finetune.boxes import BoxAugmentation
+            self._prepare_boxes(BoxAugmentation(detector_cache, offset_samples, detector_probability))
+
+    def _prepare_boxes(self, augmentation):
+        from tools.hand_finetune.boxes import FrameKey, load_proposal_cache, match_boxes, measure_offset
+        measured = []
+        if augmentation.cache is not None:
+            frames = defaultdict(list)
+            for index, row in enumerate(self.rows):
+                fields = dict(row, recording_id=row.get("recording_id") or source_group_key(row))
+                frames[FrameKey.from_row(fields)].append(index)
+            cache = load_proposal_cache(augmentation.cache, frames)
+            for key, indices in frames.items():
+                detections = [proposal.bbox for proposal in cache[key]]
+                if not detections:
+                    continue
+                boxes = []
+                for index in indices:
+                    row = self.rows[index]
+                    box = row.get("input_bbox_xyxy")
+                    if box is None:
+                        box = self._load_label(self._resolve(row["label"]), allow_native=True)["bbox"]
+                    boxes.append(np.asarray(box).reshape(4))
+                for gt, det, _ in match_boxes(boxes, detections, augmentation.min_iou):
+                    self.matched_boxes[indices[gt]] = detections[det]
+                    measured.append(measure_offset(boxes[gt], detections[det]))
+        if augmentation.offset_samples is not None or measured:
+            self.offset_pool = augmentation.offsets(measured)
+
+    def _detector_box(self, index, original, width, height):
+        from tools.hand_finetune.boxes import apply_offset
+        box = self.matched_boxes.get(index)
+        if box is None:
+            if not len(self.offset_pool):
+                return original
+            try:
+                box = apply_offset(original, self.offset_pool[np.random.randint(len(self.offset_pool))])
+            except ValueError:
+                return original
+        box = np.clip(box, 0, [width - 1, height - 1, width - 1, height - 1])
+        return box.astype(np.float32) if np.all(box[2:] - box[:2] >= 2) else original
+
     def __len__(self) -> int:
         return len(self.rows)
 
@@ -429,6 +549,11 @@ class GloveDataset(Dataset):
         box_wh = bbox[2:] - bbox[:2]
         if not np.isfinite(bbox).all() or np.any(box_wh <= 0):
             raise ValueError(f"Invalid bbox in {label_path}: {bbox.tolist()}")
+        original_box = bbox
+        if self.detector_probability and np.random.random() < self.detector_probability:
+            bbox = self._detector_box(index, original_box, width, height)
+            center = (bbox[:2] + bbox[2:]) * 0.5
+            box_wh = bbox[2:] - bbox[:2]
         if self.crop_jitter:
             shift = np.random.uniform(-self.crop_jitter, self.crop_jitter, size=2)
             scale = np.exp(np.random.uniform(-self.crop_jitter, self.crop_jitter))
@@ -442,11 +567,29 @@ class GloveDataset(Dataset):
             box_wh = bbox[2:] - bbox[:2]
         is_left = side == 0
         view = None
+        if native:
+            points = (joints_3d + trans).astype(np.float64)
+            if not np.isfinite(points).all() or (points[:, 2] <= 0).any():
+                raise ValueError('Invalid native-camera geometry')
         if rectify:
             from .bbox_pinhole import rectify_hand, view_mano_orientation
+
+            def sample_box(box):
+                view, crop = rectify_hand(image, box, K, distortion, self.image_size,
+                                          self.rescale_factor, is_left)
+                points_view = view.view_points(points, False)
+                if np.any(points_view[:, 2] <= 0):
+                    raise ValueError(f'Hand crosses the perspective crop horizon in {label_path}')
+                return view, crop, points_view
+
             raw_box = bbox
-            view, crop = rectify_hand(image, raw_box, K, distortion, self.image_size,
-                                      self.rescale_factor, is_left)
+            try:
+                view, crop, points_view = sample_box(raw_box)
+            except ValueError:
+                if np.array_equal(raw_box, original_box):
+                    raise
+                raw_box = original_box
+                view, crop, points_view = sample_box(raw_box)
             transform = np.eye(2, 3, dtype=np.float32)
             box_size = float(self.image_size)
         else:
@@ -461,9 +604,6 @@ class GloveDataset(Dataset):
         # The label's 778x2 ``joints_2d`` field is actually vertex projection.
         # Derive the required 21 joint pixels from the 3D joints instead.
         if native:
-            points = (joints_3d + trans).astype(np.float64)
-            if not np.isfinite(points).all() or (points[:, 2] <= 0).any():
-                raise ValueError('Invalid native-camera geometry')
             joints_2d = cv2.fisheye.projectPoints(points[:, None], np.zeros(3), np.zeros(3),
                 K.astype(np.float64), distortion)[0][:, 0].astype(np.float32)
         else:
@@ -480,9 +620,6 @@ class GloveDataset(Dataset):
             # Rotate around the MANO wrist for pose targets; physical roots rotate about the camera.
             joints_3d = (view.view_points(joints_3d - joints_3d[0], False) + joints_3d[0]).astype(np.float32)
             camera_root = view.view_points(camera_root, False).astype(np.float32)
-            points_view = view.view_points(points, False)
-            if np.any(points_view[:, 2] <= 0):
-                raise ValueError(f'Hand crosses the perspective crop horizon in {label_path}')
             K = view.K.astype(np.float32)
             joints_2d = (points_view[:, :2] / points_view[:, 2:] * K.diagonal()[:2] + K[:2, 2]).astype(np.float32)
             bbox = view.bounds.astype(np.float32)
@@ -514,6 +651,7 @@ class GloveDataset(Dataset):
             [joints_3d,
              np.full((21, 1), self.confidence, dtype=np.float32)], axis=1)
 
+        crop = _augment_appearance(crop, self.color_jitter, self.blur_prob, self.erasing_prob)
         rgb = crop[:, :, ::-1].astype(np.float32) / 255.0
         rgb = (rgb - self.mean[None, None, :]) / self.std[None, None, :]
         image_tensor = torch.from_numpy(rgb.transpose(2, 0, 1).copy()).float()
@@ -568,6 +706,7 @@ class GloveDataset(Dataset):
         }
         if view is not None:
             sample.update(raw_bbox=torch.from_numpy(raw_box), raw_K=torch.from_numpy(view.source_K.copy()),
+                          raw_distortion=torch.from_numpy(distortion.copy()),
                           view_rotation=torch.from_numpy(view.rotation.copy()))
         source_experiment = str(row.get("source_experiment", ""))
         if self.surface_targets is not None:
