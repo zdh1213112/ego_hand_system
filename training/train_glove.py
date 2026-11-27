@@ -20,7 +20,7 @@ from wilor.training import (
 
 REPO_ROOT = Path(__file__).resolve().parent
 MODE_CONFIGS = {
-    "joint_lora": "configs/glove/ego_nokov_20261104_joint_lora.yaml",
+    "joint_lora": "configs/glove/nokov_v5_bbox_pinhole.yaml",
     "lora_stage1": "configs/glove/lora_stage1.yaml",
     "lora_stage2": "configs/glove/lora_stage2.yaml",
 }
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        help="config for a single mode; required when --mode is omitted",
+        help="config for a single training run (default: V5 local pinhole for joint LoRA)",
     )
     parser.add_argument("--stage1-config", type=Path)
     parser.add_argument("--stage2-config", type=Path)
@@ -53,8 +53,8 @@ def parse_args() -> argparse.Namespace:
     boxes.add_argument("--detector-cache", type=Path, help="Use cached native-frame proposals for the export")
     local.add_argument("--prepare-only", action="store_true", help="Prepare or verify local views and exit")
     args = parser.parse_args()
-    if (args.detector or args.detector_cache or args.prepare_only) and (args.mode or not args.config):
-        parser.error("Local export options require --config with a local_export section")
+    if (args.detector or args.detector_cache or args.prepare_only) and args.mode not in (None, "joint_lora"):
+        parser.error("Local export options require a single local pinhole training config")
     return args
 
 
@@ -103,20 +103,14 @@ def main() -> int:
 
     if args.stage1_config is not None or args.stage2_config is not None:
         raise ValueError("--stage1-config/--stage2-config require --mode two_stage")
-    if args.mode is not None:
-        path = args.config or REPO_ROOT / MODE_CONFIGS[args.mode]
-        report = run_training(_mode_config(path, args.mode))
-        print(json.dumps(report, indent=2))
-        return 0
-    if args.config is None:
-        raise ValueError("Provide --mode or --config")
-    raw = yaml.safe_load(args.config.expanduser().read_text(encoding="utf-8"))
+    path = args.config or REPO_ROOT / MODE_CONFIGS[args.mode or "joint_lora"]
+    raw = yaml.safe_load(path.expanduser().read_text(encoding="utf-8"))
     schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
     if args.detector or args.detector_cache or args.prepare_only:
         if schema_version != 3 or "local_export" not in raw:
             raise ValueError("Local export options require a schema-v3 config with a local_export section")
     if schema_version == 3:
-        config = load_training_config(args.config)
+        config = _mode_config(path, args.mode) if args.mode else load_training_config(path)
         if args.detector or args.detector_cache:
             config.local_export = replace(
                 config.local_export,
@@ -129,10 +123,12 @@ def main() -> int:
         else:
             report = run_training(config)
     elif schema_version == 2:
-        report = run_glove_training(load_glove_training_config(args.config))
+        if args.mode:
+            raise ValueError(f"{path}: --mode {args.mode} requires a schema-v3 config")
+        report = run_glove_training(load_glove_training_config(path))
     else:
         raise ValueError(
-            f"{args.config}: expected schema_version 2 or 3, got {schema_version!r}"
+            f"{path}: expected schema_version 2 or 3, got {schema_version!r}"
         )
     print(json.dumps(report, indent=2))
     return 0
