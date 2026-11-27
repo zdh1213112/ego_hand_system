@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import csv
 import gc
 import json
@@ -20,15 +21,6 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-import wilor_inference as base  # noqa: E402
-from ego_data.dataset import SequentialVideoReader  # noqa: E402
-from ego_hand_inference.ego_data.calibration import CameraCalibration  # noqa: E402
-from wilor_physical_inference import prepare_physical_batch, physical_camera_outputs  # noqa: E402
-from wilor.datasets.utils import (  # noqa: E402
-    convert_cvimg_to_tensor,
-    expand_to_aspect_ratio,
-    generate_image_patch_cv2,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--checkpoint", type=Path, default=PROJECT_ROOT / "models/wilor/wilor_final.ckpt")
+    parser.add_argument("--wilor-input-view", choices=("auto", "native", "local-pinhole"), default="auto")
     parser.add_argument("--adapter", type=Path, help="trainable/LoRA weights applied after --checkpoint")
     parser.add_argument("--model-config", type=Path, default=PROJECT_ROOT / "models/wilor/model_config.yaml")
     parser.add_argument("--detector", type=Path, default=PROJECT_ROOT / "models/wilor/detector.pt")
@@ -83,6 +76,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rescale-factor", type=float, default=2.0)
     parser.add_argument("--max-frames", type=int, default=0)
     return parser.parse_args()
+
+
+# The full export carries a trained camera head and LoRA layers from the bundled
+# training package. Select it before importing WiLoR's dataset and model classes.
+if __name__ == "__main__":
+    import os
+    from wilor_checkpoint_metadata import full_inference_checkpoint
+    cli_args = parse_args()
+    if "EGO_WILOR_ROOT" not in os.environ and full_inference_checkpoint(cli_args.checkpoint):
+        os.environ["EGO_WILOR_ROOT"] = str(PROJECT_ROOT / "training")
+
+import wilor_inference as base  # noqa: E402
+from ego_data.dataset import SequentialVideoReader  # noqa: E402
+from ego_hand_inference.ego_data.calibration import CameraCalibration  # noqa: E402
+from wilor_physical_inference import prepare_physical_batch, physical_camera_outputs  # noqa: E402
+from wilor_local_pinhole import infer_boxes, uses_local_pinhole  # noqa: E402
+from wilor.datasets.utils import (  # noqa: E402
+    convert_cvimg_to_tensor,
+    expand_to_aspect_ratio,
+    generate_image_patch_cv2,
+)
 
 
 def _external_detection(row: dict[str, Any] | None):
@@ -191,9 +205,17 @@ def infer_dual(
     external_boxes: dict[str, Any] | None = None,
     save_mano_params: bool = False,
     calibration=None,
+    input_view: str = "auto",
 ) -> list[dict[str, Any]]:
     import torch
 
+    if uses_local_pinhole(input_view, model, calibration):
+        return infer_dual_batched(
+            [frame], detector, model, model_cfg, device, confidence, iou, rescale_factor,
+            batch_size, 1, 0, external_boxes=[external_boxes] if external_boxes is not None else None,
+            save_mano_params=save_mano_params, calibration=calibration,
+            input_view=input_view, fp16_detector=False,
+        )[0]
     detection = (
         _external_detection(external_boxes)
         if external_boxes is not None
@@ -648,8 +670,28 @@ def infer_dual_batched(
     external_boxes: list[dict[str, Any]] | None = None,
     save_mano_params: bool = False,
     calibration=None,
+    input_view: str = "auto",
+    fp16_detector: bool = True,
 ) -> list[list[dict[str, Any]]]:
     """Run a complete detector/crop/WiLoR batch without pipeline scheduling."""
+    if uses_local_pinhole(input_view, model, calibration):
+        if external_boxes is None:
+            detections = detector(frames, conf=confidence, iou=iou, verbose=False,
+                                  device=str(device), half=fp16_detector and device.type == "cuda")
+        else:
+            if len(external_boxes) != len(frames):
+                raise ValueError("External proposal count differs from decoded frame count")
+            detections = [_external_detection(row) for row in external_boxes]
+        stats = runtime_stats if runtime_stats is not None else {}
+        stats.setdefault("effective_hypothesis_batch_size", batch_size)
+        for name in ("cuda_oom_retries", "invalid_local_boxes", "invalid_local_projections"):
+            stats.setdefault(name, 0)
+        with ExitStack() as stack:
+            executor = preprocess_executor or stack.enter_context(ThreadPoolExecutor(max_workers=preprocess_workers))
+            return infer_boxes(frames, detections, model, model_cfg, device, calibration,
+                               save_mano_params, executor, stats, max_detections_per_class,
+                               _top_detections_per_class, _json_detector_side)
+
     prepared = _prepare_dual_batched(
         frames, detector, model_cfg, confidence, iou, rescale_factor,
         preprocess_workers, max_detections_per_class, preprocess_executor,
@@ -690,8 +732,8 @@ def _prefetched_frame_chunks(
             yield chunk_start, chunk, frames
 
 
-def main() -> int:
-    args = parse_args()
+def main(args=None) -> int:
+    args = args or parse_args()
     if args.output.exists():
         raise FileExistsError(f"output already exists: {args.output}")
     if (
@@ -757,9 +799,23 @@ def main() -> int:
     model, model_cfg = base.load_wilor_model(
         args.checkpoint, args.model_config, args.mano_model_dir, adapter=args.adapter
     )
+    calibrations = {c: CameraCalibration.load(dataset / "calibration" / f"{c}.json")
+                    if getattr(model, "physical_camera_enabled", False) else None for c in cameras}
+    local_by_camera = {c: uses_local_pinhole(args.wilor_input_view, model, cal)
+                       for c, cal in calibrations.items()}
+    local_input = any(local_by_camera.values())
+    if local_input and not all(local_by_camera.values()):
+        raise ValueError("Local-pinhole runs require KB calibration for every selected camera")
     model = model.to(device).eval()
+    if local_input:
+        import torch
+        cv2.setNumThreads(1)
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
+        print("WiLoR input: per-box local pinhole (training exporter), FP32, native KB outputs", flush=True)
     if accelerated:
-        model = model.half()
+        if not local_input:
+            model = model.half()
         if args.compile_backbone:
             import torch
             model.backbone = torch.compile(
@@ -784,12 +840,13 @@ def main() -> int:
     runtime_stats = {
         "effective_hypothesis_batch_size": args.batch_size,
         "cuda_oom_retries": 0,
+        "invalid_local_boxes": 0,
+        "invalid_local_projections": 0,
     }
     inference_started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=preprocess_workers) as preprocess_executor:
         for camera in cameras:
-            calibration = (CameraCalibration.load(dataset / "calibration" / f"{camera}.json")
-                           if getattr(model, "physical_camera_enabled", False) else None)
+            calibration = calibrations[camera]
             camera_root = output / camera
             camera_root.mkdir()
             prediction_path = camera_root / "predictions.jsonl"
@@ -803,7 +860,7 @@ def main() -> int:
             camera_started = time.perf_counter()
             try:
                 with prediction_path.open("w", encoding="utf-8") as stream:
-                    if accelerated:
+                    if accelerated or local_input:
                         result_batches = (
                             (
                                 chunk_start,
@@ -819,7 +876,8 @@ def main() -> int:
                                         chunk_start:chunk_start + len(frames)
                                     ] if external_by_camera is not None else None,
                                     save_mano_params=args.save_mano_params,
-                                    calibration=calibration,
+                                    calibration=calibration, input_view=args.wilor_input_view,
+                                    fp16_detector=accelerated,
                                 ),
                             )
                             for chunk_start, chunk, frames
@@ -841,7 +899,7 @@ def main() -> int:
                                         external_boxes=external_by_camera[camera][ordinal]
                                         if external_by_camera is not None else None,
                                         save_mano_params=args.save_mano_params,
-                                        calibration=calibration,
+                                        calibration=calibration, input_view=args.wilor_input_view,
                                     )
                                     for ordinal, frame in enumerate(
                                         frames, start=chunk_start
@@ -876,7 +934,7 @@ def main() -> int:
                                 json.dumps(record, separators=(",", ":"))
                                 + "\n"
                             )
-                            if not accelerated:
+                            if not accelerated and not local_input:
                                 gc.collect()
                                 if device.type == "cuda":
                                     torch = __import__("torch")
@@ -919,6 +977,8 @@ def main() -> int:
             "adapter": str(args.adapter.resolve()) if args.adapter else None,
             "wilor_root": str(base.WILOR_ROOT),
             "detector": str(args.detector.resolve()),
+            "input_view": "local-pinhole" if local_input else "native",
+            "mano_model_dir": str(args.mano_model_dir.resolve()),
             "camera_model": (model.physical_camera_head.camera_model
                              if getattr(model, "physical_camera_enabled", False) else "virtual_perspective"),
         },
@@ -937,10 +997,13 @@ def main() -> int:
             "effective_hypothesis_batch_size"
         ],
         "cuda_oom_retries": runtime_stats["cuda_oom_retries"],
-        "prefetched_video_decode": accelerated,
+        "prefetched_video_decode": accelerated or local_input,
         "preprocess_workers": preprocess_workers,
         "max_detections_per_class": args.max_detections_per_class,
-        "compiled_backbone": bool(args.compile_backbone),
+        "compiled_backbone": bool(accelerated and args.compile_backbone),
+        **({"local_pinhole_precision": "float32",
+            "invalid_local_boxes": runtime_stats["invalid_local_boxes"],
+            "invalid_local_projections": runtime_stats["invalid_local_projections"]} if local_input else {}),
         "inference_seconds": inference_seconds,
         "camera_frames_per_second": processed_camera_frames / inference_seconds,
         "cameras": camera_summaries,
@@ -953,4 +1016,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(cli_args))

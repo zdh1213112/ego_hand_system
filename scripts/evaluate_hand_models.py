@@ -50,7 +50,7 @@ def parse_args(argv=None):
     p.add_argument('--score-only', action='store_true', help='score existing numeric prediction chunks without loading models')
     p.add_argument('--inspect-only', action='store_true', help='validate all selected labels/images and write dataset audit')
     p.add_argument('--wilor-checkpoint', type=Path, default=ROOT / 'models/wilor/wilor_final.ckpt')
-    p.add_argument('--wilor-config', type=Path, default=ROOT / 'models/wilor/model_config.yaml')
+    p.add_argument('--wilor-config', type=Path)
     p.add_argument('--mano-dir', type=Path, default=ROOT / 'models/mano')
     p.add_argument('--gem-root', type=Path, default=ROOT.parent / 'GEM-X')
     p.add_argument('--gem-checkpoint', type=Path)
@@ -69,6 +69,14 @@ def parse_args(argv=None):
     if not np.isfinite(args.crop_scale) or args.crop_scale <= 0:
         p.error('crop-scale must be positive and finite')
     args.backend = args.backend or 'wilor'
+    from wilor_checkpoint_metadata import full_inference_checkpoint
+    use_wilor = 'wilor' in (args.backends or [args.backend])
+    full = full_inference_checkpoint(args.wilor_checkpoint) if use_wilor else None
+    if full:
+        os.environ.setdefault('EGO_WILOR_ROOT', str(ROOT / 'training'))
+    args.wilor_config = args.wilor_config or ROOT / (
+        'training/pretrained_models/model_config.yaml' if full else 'models/wilor/model_config.yaml'
+    )
     args.gem_checkpoint = args.gem_checkpoint or args.gem_root / 'weights/egohand_s060000.ckpt'
     args.soma_assets = args.soma_assets or args.gem_root / 'assets/soma'
     args.fah_weights = args.fah_weights or args.fah_root / 'weights'
@@ -91,7 +99,13 @@ def source_fingerprint(args):
     paths = [Path(__file__), *sorted((ROOT / 'scripts/hand_evaluation').glob('*.py')),
              *sorted((ROOT / 'scripts/camera_models').glob('*.py')), ROOT / 'scripts/ego_data/calibration.py']
     if args.backend == 'wilor':
-        paths += list((ROOT / 'third_party/WiLoR/wilor').rglob('*.py')) + [ROOT / 'scripts/wilor_inference.py']
+        runtime = Path(os.environ.get('EGO_WILOR_ROOT', ROOT / 'third_party/WiLoR'))
+        paths += list((runtime / 'wilor').rglob('*.py')) + [
+            ROOT / 'scripts/wilor_inference.py', ROOT / 'scripts/wilor_local_pinhole.py',
+            ROOT / 'scripts/wilor_checkpoint_metadata.py',
+        ]
+        if (runtime / 'tools/hand_finetune/crop_geometry.py').is_file():
+            paths.append(runtime / 'tools/hand_finetune/crop_geometry.py')
     elif args.backend == 'gem':
         paths += list((args.gem_root / 'gem').rglob('*.py')) + [ROOT / 'scripts/gem_multiview_inference.py']
     else:
@@ -107,7 +121,7 @@ def protocol(args):
         image_preprocessing='original exported raster; native model crop policies',
         placement=args.placement,
         absolute_metric=('translation fitted to model-predicted 2D with the actual camera; shape/orientation unchanged; no GT joints used'
-                         if args.placement == 'calibrated' else 'native model camera geometry; WiLoR synthetic intrinsics are not calibrated'),
+                         if args.placement == 'calibrated' else 'native model camera geometry without translation refitting'),
         joint_order='wrist, thumb[4], index[4], middle[4], ring[4], pinky[4]',
         root_alignment='subtract each hand wrist (joint 0); wrist included in mean',
         pa_alignment='per-hand similarity: proper rotation, scale, translation; no reflection',

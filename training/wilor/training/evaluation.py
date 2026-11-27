@@ -26,6 +26,10 @@ def group_prediction_records(
     groups: dict[FrameGroupKey, list[dict[str, Any]]] = {}
     for record in records:
         key = frame_group_key(record)
+        if "local_detection_index" in record:
+            key = (key[0], key[1], f"{key[2]}_box{record['local_detection_index']}")
+        elif "local_label_id" in record:
+            key = (key[0], key[1], f"{key[2]}_label_{record['local_label_id']}")
         groups.setdefault(key, []).append(record)
 
     for key, values in groups.items():
@@ -228,6 +232,10 @@ def evaluate_glove_set(
                 "pred_joints_3d_root_relative": pred_root.numpy().tolist(),
                 "gt_joints_3d_root_relative": gt_root.numpy().tolist(),
             }
+            if "local_detection_index" in batch:
+                record["local_detection_index"] = int(batch["local_detection_index"][index])
+            if "local_label_id" in batch:
+                record["local_label_id"] = str(batch["local_label_id"][index])
             if physical_roots is not None:
                 record["pred_root_camera_m"] = physical_roots[index].tolist()
                 record["gt_root_camera_m"] = target_roots[index].tolist()

@@ -20,8 +20,10 @@ from wilor.datasets.glove_validation import sha256_file
 from wilor.models import WiLoR, load_wilor_config, resolve_mano_model_path
 from wilor.models.adapter import (
     load_adapter_weights,
+    restore_best_mpjpe,
     resume_adapter_checkpoint,
     save_adapter_checkpoint,
+    save_best_mpjpe,
     save_full_checkpoint,
 )
 
@@ -749,6 +751,7 @@ def run_glove_training(config: GloveTrainingConfig) -> dict[str, Any]:
     )
     start_step = 0
     best_val_loss = float("inf")
+    best_mpjpe_path = config.output / "best_mpjpe_full.pt"
     resume_payload: dict[str, Any] | None = None
     if config.resume is not None:
         resume_path = Path(config.resume).expanduser().resolve()
@@ -756,6 +759,7 @@ def run_glove_training(config: GloveTrainingConfig) -> dict[str, Any]:
         checkpoint_metadata = _validate_resume_metadata(
             resume_payload, checkpoint_metadata, resume_path
         )
+        restore_best_mpjpe(best_mpjpe_path, checkpoint_metadata)
         initialized_from = checkpoint_metadata.get("initialized_from_adapter")
         start_step = int(resume_payload.get("step", 0))
         if resume_payload.get("val_loss") is not None:
@@ -792,6 +796,8 @@ def run_glove_training(config: GloveTrainingConfig) -> dict[str, Any]:
             "current_step": current_step,
             "final_step": config.max_steps if status == "passed" else None,
             "best_val_loss": best_val_loss,
+            "best_mpjpe_mm": checkpoint_metadata.get("best_mpjpe_mm"),
+            "best_mpjpe_step": checkpoint_metadata.get("best_mpjpe_step"),
             "loss_config": loss_config.as_dict(),
             "loss_reduction": "batch_mean",
             "keypoints_2d_visibility": "inside_source_image_and_crop",
@@ -834,6 +840,10 @@ def run_glove_training(config: GloveTrainingConfig) -> dict[str, Any]:
                 "val_batches": val_batches,
                 "val_loss_components": val_components,
             })
+            save_best_mpjpe(
+                best_mpjpe_path, model, step, val_mpjpe, checkpoint_metadata,
+                train_loss=train_loss, val_loss=val_loss,
+            )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 save_adapter_checkpoint(
@@ -845,7 +855,7 @@ def run_glove_training(config: GloveTrainingConfig) -> dict[str, Any]:
                     val_loss,
                     checkpoint_metadata,
                 )
-                save_full_checkpoint(config.output / "best_full.ckpt", model, step)
+                save_full_checkpoint(config.output / "best_full.pt", model, step)
             print(json.dumps(record), flush=True)
         elif step % 10 == 0:
             print(json.dumps(record), flush=True)
@@ -864,7 +874,7 @@ def run_glove_training(config: GloveTrainingConfig) -> dict[str, Any]:
                 checkpoint_metadata,
             )
 
-    save_full_checkpoint(config.output / "last_full.ckpt", model, config.max_steps)
+    save_full_checkpoint(config.output / "last_full.pt", model, config.max_steps)
     report = build_report("passed", config.max_steps)
     if evaluation_loader is not None:
         evaluation_adapter: Path | None = None

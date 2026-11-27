@@ -66,6 +66,15 @@ def _path(
 
 
 @dataclass
+class LocalViewExport:
+    native_dataset: Path
+    detector: Path | None = None
+    detector_cache: Path | None = None
+    min_iou: float = 0.5
+    detector_confidence: float = 0.3
+
+
+@dataclass
 class TrainingConfig:
     source: Path
     experiment_name: str
@@ -120,6 +129,8 @@ class TrainingConfig:
     lr_schedule: str = "constant"
     warmup_steps: int = 0
     min_lr_ratio: float = 0.05
+    pinhole_crop: str | None = None
+    local_export: LocalViewExport | None = None
 
     def augmentation_options(self) -> dict[str, Any]:
         return {key: getattr(self, key) for key in (
@@ -133,6 +144,25 @@ class TrainingConfig:
         ) if getattr(self, key) != self.__dataclass_fields__[key].default}
 
     def validate(self) -> None:
+        if self.pinhole_crop is not None:
+            if self.pinhole_crop not in {"local_pinhole", "kb_bbox_pinhole"}:
+                raise ValueError(f"Unknown data.pinhole_crop: {self.pinhole_crop}")
+            if (self.data_type != "glove_camera" or self.camera_model != "physical_perspective"
+                    or self.image_size != 256 or self.marker_inputs):
+                raise ValueError("Local views require 256px glove_camera inputs and physical_perspective")
+            if self.crop_jitter or self.augmentation_options():
+                raise ValueError("Local views use the exported image and bbox directly")
+        if self.local_export is not None:
+            export = self.local_export
+            if self.pinhole_crop is None or self.dataset_root == export.native_dataset:
+                raise ValueError("local_export requires data.pinhole_crop and a separate paths.dataset_root")
+            for name, path in (("train", self.train_manifest), ("val", self.val_manifest)):
+                if path is not None and path != self.dataset_root / f"{name}.jsonl":
+                    raise ValueError("local_export supplies both train and val manifests")
+            if export.detector is not None and export.detector_cache is not None:
+                raise ValueError("Select only one of detector and detector_cache")
+            if not 0 < export.min_iou <= 1 or not 0 < export.detector_confidence <= 1:
+                raise ValueError("Detection thresholds must be in (0, 1]")
         for name in ("color_jitter", "blur_prob", "erasing_prob"):
             if not 0 <= getattr(self, name) < 1:
                 raise ValueError(f"data.{name} must be in [0, 1)")
@@ -279,7 +309,7 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         raise ValueError(f"{source}: expected training schema_version 3")
     allowed_top = {
         "schema_version", "experiment", "paths", "data", "recipe",
-        "training", "optimization", "checkpointing", "validation", "losses",
+        "training", "optimization", "checkpointing", "validation", "losses", "local_export",
     }
     unknown = sorted(set(raw).difference(allowed_top))
     if unknown:
@@ -292,7 +322,7 @@ def load_training_config(path: str | Path) -> TrainingConfig:
     data = _section(raw, "data", {
         "type", "image_size", "rescale_factor", "npz_cache_size", "marker_inputs", "crop_jitter",
         "color_jitter", "blur_prob", "erasing_prob", "detector_cache", "offset_samples",
-        "detector_probability", "group_by_sync_frame",
+        "detector_probability", "group_by_sync_frame", "pinhole_crop",
     })
     recipe = _section(raw, "recipe", {"type", "vit_tuning", "lora", "camera_model"})
     training = _section(raw, "training", {
@@ -324,6 +354,18 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         for name, value in marker_input_raw.items()
     }
     default_vit_tuning = "lora" if recipe_type == "domain_adapt" else None
+    local_export = None
+    if "local_export" in raw:
+        export = _section(raw, "local_export", {
+            "native_dataset", "detector", "detector_cache", "min_iou", "detector_confidence",
+        })
+        local_export = LocalViewExport(
+            native_dataset=_path(export, "native_dataset", None),
+            detector=_path(export, "detector", None, nullable=True),
+            detector_cache=_path(export, "detector_cache", None, nullable=True),
+            min_iou=_value(export, "min_iou", float, 0.5),
+            detector_confidence=_value(export, "detector_confidence", float, 0.3),
+        )
     config = TrainingConfig(
         source=source,
         experiment_name=_value(experiment, "name", str, "glove_training"),
@@ -343,6 +385,8 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         rescale_factor=_value(data, "rescale_factor", float, 2.0),
         npz_cache_size=_value(data, "npz_cache_size", int, 8),
         marker_inputs=marker_inputs,
+        pinhole_crop=_value(data, "pinhole_crop", str, None, nullable=True),
+        local_export=local_export,
         crop_jitter=_value(data, "crop_jitter", float, 0.),
         color_jitter=_value(data, "color_jitter", float, 0.0),
         blur_prob=_value(data, "blur_prob", float, 0.0),
@@ -402,6 +446,13 @@ def resolved_training_config(config: TrainingConfig) -> dict[str, Any]:
     return {
         "schema_version": 3,
         "experiment": {"name": config.experiment_name},
+        **({"local_export": {
+            "native_dataset": path(config.local_export.native_dataset),
+            "detector": path(config.local_export.detector),
+            "detector_cache": path(config.local_export.detector_cache),
+            "min_iou": config.local_export.min_iou,
+            "detector_confidence": config.local_export.detector_confidence,
+        }} if config.local_export else {}),
         "paths": {
             "dataset_root": path(config.dataset_root),
             "checkpoint": path(config.checkpoint),
@@ -418,6 +469,7 @@ def resolved_training_config(config: TrainingConfig) -> dict[str, Any]:
             "image_size": config.image_size,
             "rescale_factor": config.rescale_factor,
             "npz_cache_size": config.npz_cache_size,
+            **({"pinhole_crop": config.pinhole_crop} if config.pinhole_crop else {}),
             "marker_inputs": {name: str(path) for name, path in config.marker_inputs.items()},
             **{k: str(v) if isinstance(v, Path) else v for k, v in config.augmentation_options().items()},
             **({"crop_jitter":config.crop_jitter} if config.crop_jitter else {}),

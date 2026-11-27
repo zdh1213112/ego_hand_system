@@ -20,6 +20,7 @@ from .base import TrainingRecipe
 class DomainAdaptRecipe(TrainingRecipe):
     name = "domain_adapt"
     metric_name = "local_mpjpe_normalized"
+    mpjpe_name = metric_name
 
     @staticmethod
     def _coarse_heads(model: torch.nn.Module) -> tuple[torch.nn.Module, ...]:
@@ -129,4 +130,4 @@ class DomainAdaptRecipe(TrainingRecipe):
             output["coarse_local_keypoints_3d"] - batch["local_keypoints_3d"],
             dim=-1,
         ).mean()
-        return "local_mpjpe_normalized", error
+        return self.metric_name, error

@@ -19,3 +19,16 @@ def checkpoint_metadata():
         result["adapter"] = str(adapter)
         result["adapter_sha256"] = hashlib.sha256(adapter.read_bytes()).hexdigest()
     return result
+
+
+def full_inference_checkpoint(path):
+    """Inspect the training export without materializing its CPU tensors."""
+    import zipfile
+
+    if not zipfile.is_zipfile(path):
+        return None
+    import torch
+    payload = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
+    if isinstance(payload, dict) and payload.get("format") == "wilor_full_inference_v1":
+        return payload
+    return None

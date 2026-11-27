@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
@@ -118,7 +119,10 @@ def _model_modifications(model: torch.nn.Module) -> dict[str, Any]:
     return modifications
 
 
-def save_full_checkpoint(path: Path, model: torch.nn.Module, step: int) -> None:
+def save_full_checkpoint(
+    path: Path, model: torch.nn.Module, step: int, *,
+    training_metadata: Mapping[str, Any] | None = None,
+) -> None:
     """Write all inference weights and the configuration needed to restore them."""
     checkpoint = {
         "format": FULL_FORMAT,
@@ -128,11 +132,49 @@ def save_full_checkpoint(path: Path, model: torch.nn.Module, step: int) -> None:
         "model_modifications": _model_modifications(model),
         "state_dict": model.state_dict(),
     }
+    if training_metadata is not None:
+        checkpoint["training_metadata"] = dict(training_metadata)
     # Keep the previous complete file available until the large write succeeds.
     with TemporaryDirectory(dir=path.parent, prefix=path.name + ".") as directory:
         temporary = Path(directory) / path.name
         torch.save(checkpoint, temporary)
         temporary.replace(path)
+
+
+def restore_best_mpjpe(
+    path: Path, metadata: dict[str, Any], *, metric_name: str = "mpjpe_mm",
+) -> None:
+    """An independent validation save can be newer than the resume checkpoint."""
+    if not path.is_file():
+        return
+    # Read the selection metadata without allocating the full model's tensors.
+    saved = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
+    best = saved.get("training_metadata", {})
+    score_key = f"best_{metric_name}"
+    if (best.get("signature") == metadata["signature"]
+            and best.get(score_key, math.inf) < metadata.get(score_key, math.inf)):
+        metadata[score_key] = best[score_key]
+        metadata["best_mpjpe_step"] = saved["global_step"]
+
+
+def save_best_mpjpe(
+    path: Path, model: torch.nn.Module, step: int, mpjpe: float,
+    metadata: dict[str, Any], *, train_loss: float, val_loss: float,
+    metric_name: str = "mpjpe_mm",
+) -> None:
+    """Keep the full model from the strictly lowest finite validation MPJPE."""
+    if not all(math.isfinite(value) for value in (mpjpe, train_loss, val_loss)):
+        return
+    score_key = f"best_{metric_name}"
+    if mpjpe >= metadata.get(score_key, math.inf):
+        return
+    best = {
+        "signature": metadata["signature"],
+        score_key: mpjpe,
+        "best_mpjpe_step": step,
+    }
+    save_full_checkpoint(path, model, step, training_metadata=best)
+    metadata.update(best)
 
 
 def save_trainable_checkpoint(

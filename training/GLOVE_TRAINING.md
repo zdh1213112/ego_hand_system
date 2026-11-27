@@ -19,7 +19,7 @@ python train_glove.py --mode joint_lora --config configs/glove/trainset_v1_joint
 该配置显式启用 `physical_kb`，沿用已有 4000 步实验参数，重跑输出到
 `output/trainset_v1_joint_lora/`。所需 `coarse_start.ckpt` 初始化、数据质量状态及
 已有权重见 [最新标签训练说明](docs/training/START_TRAINSET_V1_zh.md)。
-下节为 11 月 4 日历史数据的联合 LoRA 流程；单独使用 `--mode joint_lora` 默认仍走该旧配置。
+下节给出 11 月 4 日历史数据的联合 LoRA 配置。单独使用 `--mode joint_lora` 默认运行 [V5 局部针孔训练](configs/glove/nokov_v5_bbox_pinhole.yaml)。
 
 ## 新增：NOKOV 联合 LoRA 微调
 
@@ -29,7 +29,7 @@ python train_glove.py --mode joint_lora --config configs/glove/trainset_v1_joint
 python train_glove.py --mode joint_lora --config configs/glove/ego_nokov_20261104_joint_lora.yaml
 ```
 
-本机使用 `/home/p3/miniforge3/envs/ego-hand/bin/python`。`--mode joint_lora` 不给config时也默认读取上述EGO配置；通用模板 `configs/glove/joint_lora_finetune.yaml` 需先修改数据路径。
+本机使用 `/home/p3/miniforge3/envs/ego-hand/bin/python`。复现这次历史训练时请显式传入上述 EGO 配置。通用模板 `configs/glove/joint_lora_finetune.yaml` 需先修改数据路径。
 当前配置为相同的2979张训练/562张场次隔离验证、batch4×累积8、2000步。沿用源方案的32个block、rank16/alpha32/dropout0.05，LoRA/head/RefineNet学习率1e-5/1e-4/1e-5。
 后台启动及实测证据见 [联合训练说明](docs/training/START_NOKOV_JOINT_LORA_zh.md)。原有冻结ViT基线保留。
 `lora_stage1/lora_stage2/two_stage` 入口也已接入，但需要另外准备OpenTouch数据或Stage 1权重；本次真实GPU验证的是joint_lora。
@@ -235,6 +235,9 @@ schema-v3 输出：
 ```text
 best_trainable.pt
 last_trainable.pt
+best_full.pt
+last_full.pt
+best_mpjpe_full.pt        # 验证 MPJPE 最低；相机数据以毫米计，OpenTouch 按掌宽归一化
 resolved_config.yaml
 train_report.json
 loss_curves.png
@@ -244,7 +247,7 @@ val_visualization/        # 仅可选 Stage 2
 - `paths.resume`：严格续训同一 recipe、数据 manifest、loss 和优化器，恢复 step/optimizer；
 - `paths.init_weights`：只加载匹配模型的权重，从 step 0 开始新阶段。
 
-checkpoint 格式为 `wilor_glove_trainable_v2`，保存所有当前可训练参数以及需要跨阶段
+两个 `*_trainable.pt` 的格式为 `wilor_glove_trainable_v2`，保存所有当前可训练参数以及需要跨阶段
 携带的 LoRA/全量 ViT 权重。普通推理仍可用 `load_wilor(..., adapter_path=...)`
 加载该格式。
 

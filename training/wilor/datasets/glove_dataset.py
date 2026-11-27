@@ -380,7 +380,10 @@ class GloveDataset(Dataset):
         if not 0 <= crop_jitter < 1:
             raise ValueError("crop_jitter must be in [0, 1)")
         self.crop_jitter = crop_jitter
-        self.has_surface_only_rows = any(row.get("measured_surface_only", False) for row in self.rows)
+        self.has_surface_only_rows = any(
+            row.get("measured_surface_only", False) and row.get("input_view") != "local_pinhole"
+            for row in self.rows
+        )
         self.surface_targets = None
         if use_surface_markers:
             if camera_model != 'physical_kb':
@@ -534,7 +537,9 @@ class GloveDataset(Dataset):
         distortion = np.asarray(label.get('distortion', np.zeros(4)), dtype=np.float64)
         if native and (label.get('camera_model') != 'KB' or distortion.shape != (4,) or not np.isfinite(distortion).all()):
             raise ValueError(f'{label_path}: require finite KB camera parameters')
-        bbox = self._as_numpy(row.get("input_bbox_xyxy", label["bbox"])).astype(np.float32).reshape(4)
+        local_tile = label.get("input_view") == "local_pinhole"
+        box = label["bbox"] if local_tile else row.get("input_bbox_xyxy", label["bbox"])
+        bbox = self._as_numpy(box).astype(np.float32).reshape(4)
         joints_3d = self._as_numpy(label["joints_3d"]).astype(np.float32).reshape(21, 3)
         trans = self._as_numpy(label["trans"]).astype(np.float32).reshape(3)
         K = self._as_numpy(label["K"]).astype(np.float32).reshape(3, 3)
@@ -571,7 +576,13 @@ class GloveDataset(Dataset):
             points = (joints_3d + trans).astype(np.float64)
             if not np.isfinite(points).all() or (points[:, 2] <= 0).any():
                 raise ValueError('Invalid native-camera geometry')
-        if rectify:
+        if local_tile:
+            if (height, width) != (self.image_size, self.image_size):
+                raise ValueError(f"Local pinhole tile has unexpected dimensions: {image_path}")
+            crop = image[:, ::-1] if is_left else image
+            box_size = float(width)
+            transform = np.eye(2, 3, dtype=np.float32)
+        elif rectify:
             from .bbox_pinhole import rectify_hand, view_mano_orientation
 
             def sample_box(box):
@@ -615,6 +626,8 @@ class GloveDataset(Dataset):
             & (joints_2d[:, 1] >= 0.0)
             & (joints_2d[:, 1] < float(height))
         )
+        if local_tile:
+            source_visible &= np.asarray(label["native_joint_visible"], dtype=bool).reshape(21)
         camera_root = joints_3d[0] + trans
         if view is not None:
             # Rotate around the MANO wrist for pose targets; physical roots rotate about the camera.
@@ -708,13 +721,18 @@ class GloveDataset(Dataset):
             sample.update(raw_bbox=torch.from_numpy(raw_box), raw_K=torch.from_numpy(view.source_K.copy()),
                           raw_distortion=torch.from_numpy(distortion.copy()),
                           view_rotation=torch.from_numpy(view.rotation.copy()))
+        if local_tile:
+            if row.get("bbox_source") == "native_label":
+                sample["local_label_id"] = sample["sample_id"]
+            else:
+                sample["local_detection_index"] = int(row["detection_index"])
         source_experiment = str(row.get("source_experiment", ""))
         if self.surface_targets is not None:
             sample.update(self.surface_targets.sample(
                 source_group_key(row), side, int(row["sync_index"]), row["camera"]
             ))
         if self.has_surface_only_rows:
-            trusted = not row.get("measured_surface_only", False)
+            trusted = local_tile or not row.get("measured_surface_only", False)
             sample["geometry_supervised"] = trusted
             if not trusted:
                 sample["keypoints_2d"][:, -1] = 0

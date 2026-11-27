@@ -51,6 +51,42 @@ bash inference/run.sh wilor \
 
 自行训练时，可直接把上面命令的 `--adapter` 换成对应输出目录的 `best_trainable.pt`。例如路线 B 使用 `training/output/glove_v4_bbox_pinhole_15000/best_trainable.pt`。[两条训练路线](../training/README.md#wilor-训练)
 
+### v5 · 原始四目录像与精度评估
+
+以下命令从 **ego_hand_system 根目录**运行。将 v5 完整权重传给 `--checkpoint`，例如
+`wilor_pinhole_best_261126.ckpt` 或 `best_mpjpe_full.pt`。程序从导出文件恢复
+LoRA 和 `physical_perspective` 相机头，使用本仓库 `training` 的模型与裁剪代码。
+每个原始 KB 手框生成 256 × 256 局部针孔图。模型以 FP32 推理，再将 2D、3D 和 MANO 朝向变回原相机坐标，供跨视角关联和共享拟合使用。
+
+```bash
+bash inference/run.sh wilor --input /path/to/recording/part0001 \
+  --checkpoint /path/to/wilor_pinhole_best_261126.ckpt --detector /path/to/detector.pt \
+  --mano-model-dir /path/to/mano --output /path/to/v5_delivery
+```
+
+有同一段录制的原图标注时，可用实验入口同时生成预测并评价最终的共享模型。
+`--session` 对应四路 MP4，MCAP 输入使用 `--mcap`。下例处理整段并将报告写入
+`/path/to/v5_run/evaluation_shared`。
+
+```bash
+bash scripts/run_multiview_wilor_experiment.sh --session /path/to/recording/part0001 \
+  --checkpoint /path/to/wilor_pinhole_best_261126.ckpt --detector /path/to/detector.pt \
+  --mano-model-dir /path/to/mano --max-frames 0 --wilor-mode shared \
+  --evaluation-dataset /path/to/matching_labels --output /path/to/v5_run
+
+# 同一实验中，分别对检测后的逐机预测评分
+python scripts/evaluate_detected_wilor.py --run /path/to/v5_run \
+  --dataset /path/to/matching_labels --placement native --output /path/to/v5_per_camera
+
+# 单独评价姿态模型，用原始鱼眼图像、标注框与标注手侧
+python scripts/evaluate_hand_models.py --backend wilor --dataset /path/to/native_labels \
+  --wilor-checkpoint /path/to/wilor_pinhole_best_261126.ckpt --mano-dir /path/to/mano \
+  --placement native --output /path/to/v5_gt_box
+```
+
+`--placement native` 保留 v5 预测的腕部位置，标注框评估中的像素误差按原始鱼眼图计算。
+已导出局部针孔图的验证集继续使用 `training/evaluate_glove.py`，其像素误差按 256 × 256 图块计算。
+
 ### WiLoR 通用选项
 
 MCAP 使用同一命令，将 `--input` 指向 MCAP 文件或单分段目录。

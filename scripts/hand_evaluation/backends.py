@@ -30,7 +30,42 @@ class WilorBackend:
         self.description = dict(model='WiLoR', dtype='float32', mesh_topology='MANO778',
                                 camera='native WiLoR synthetic focal/principal point; calibrated placement scored separately')
 
+        self.local_pinhole = (getattr(self.model, 'physical_camera_enabled', False)
+                              and self.model.physical_camera_head.camera_model == 'physical_perspective')
+        if self.local_pinhole:
+            self.description['camera'] = 'per-box local pinhole with native KB outputs'
+
+    def predict_local(self, frames):
+        from wilor_local_pinhole import LocalSample, predict_chunk, rectify_proposal
+        from tools.hand_finetune.crop_geometry import rgb_chw
+
+        results = [[missing_prediction() for _ in frame.boxes] for frame in frames]
+        samples = []
+        for fi, frame in enumerate(frames):
+            if frame.calibration.model != 'KB':
+                raise ValueError('v5 original-image evaluation requires native KB calibration')
+            for hi, (box, side) in enumerate(zip(frame.boxes, frame.sides, strict=True)):
+                crop = rectify_proposal(frame.image, box, frame.calibration)
+                if crop is not None:
+                    view, tile = crop
+                    samples.append(LocalSample(fi, hi, int(side), view, rgb_chw(tile, side == 0)))
+        for start in range(0, len(samples), self.args.batch_size):
+            chunk = samples[start:start + self.args.batch_size]
+            predictions = predict_chunk(chunk, self.model, self.cfg, self.device,
+                                        save_mano=True, include_vertices=True)
+            for sample, hand in zip(chunk, predictions, strict=True):
+                if hand is None:
+                    continue
+                results[sample.frame_index][sample.detection_index] = dict(
+                    joints_camera_m=np.asarray(hand['joints_3d_camera_relative']) + hand['camera_translation'],
+                    joints_2d_px=np.asarray(hand['joints_2d']), vertices_camera_m=hand['vertices_camera_m'],
+                    mano=hand['mano'],
+                )
+        return results
+
     def predict(self, frames):
+        if self.local_pinhole:
+            return self.predict_local(frames)
         torch, base = self.torch, self.base
         crops, origins = [], []
         results = [[None] * len(frame.boxes) for frame in frames]

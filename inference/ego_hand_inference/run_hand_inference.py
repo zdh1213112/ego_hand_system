@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import csv
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -43,7 +44,9 @@ def parse_args(argv=None):
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--device", default="cuda")
     p.add_argument("--detector", type=Path, default=ROOT / "models/wilor/detector.pt")
-    p.add_argument("--checkpoint", type=Path, help="WiLoR checkpoint")
+    p.add_argument("--checkpoint", type=Path, help="WiLoR base checkpoint or complete v5 training export")
+    p.add_argument("--wilor-input-view", choices=("auto", "local-pinhole"), default="auto",
+                   help="auto selects per-box pinhole input for a v5 perspective checkpoint")
     p.add_argument("--adapter", type=Path, help="trained glove WiLoR adapter; its camera model selects raw or KB4-rectified hand crops")
     p.add_argument("--detector-crop-calibration", type=Path, help="recording-trained detector-to-mesh crop calibration")
     p.add_argument(
@@ -103,14 +106,18 @@ def parse_args(argv=None):
             )
     if a.detector_crop_calibration and not a.adapter:
         p.error("--detector-crop-calibration requires a native --adapter")
+    from wilor_checkpoint_metadata import full_inference_checkpoint
+    full = full_inference_checkpoint(a.checkpoint.expanduser()) if a.checkpoint else None
+    a.local_pinhole = bool(full and full.get("model_modifications", {}).get("physical_camera_model") == "physical_perspective")
     if a.adapter:
         a.adapter=a.adapter.expanduser().resolve()
         import torch
         from ego_hand_inference.orbbec_io import sha256_file
         payload=torch.load(a.adapter,map_location='cpu',weights_only=False)
         modifications=payload.get('model_modifications',{})
-        if payload.get('format')!='wilor_glove_trainable_v2' or modifications.get('physical_camera_model') not in ('physical_kb', 'kb_bbox_pinhole'):
-            p.error('--adapter requires a native physical-KB glove checkpoint')
+        if payload.get('format')!='wilor_glove_trainable_v2' or modifications.get('physical_camera_model') not in ('physical_kb', 'kb_bbox_pinhole', 'physical_perspective'):
+            p.error('--adapter requires a trained WiLoR physical camera head')
+        a.local_pinhole = modifications['physical_camera_model'] == 'physical_perspective'
         source=payload['training_metadata']['config']
         for name,key in (('checkpoint','base_checkpoint'),('model_config','model_config')):
             saved=source[key]
@@ -120,7 +127,13 @@ def parse_args(argv=None):
             if sha256_file(path)!=saved['sha256']:
                 p.error(f'{path} differs from the {key} recorded in the adapter')
             setattr(a,name,path)
-    a.model_config=a.model_config or ROOT/'models/wilor/model_config.yaml'
+    if a.wilor_input_view == "local-pinhole" and not a.local_pinhole:
+        p.error("--wilor-input-view local-pinhole requires a trained physical_perspective checkpoint or adapter")
+    if a.local_pinhole and a.detector_crop_calibration:
+        p.error('--detector-crop-calibration is for native KB adapters')
+    a.model_config = a.model_config or ROOT / (
+        'training/pretrained_models/model_config.yaml' if a.local_pinhole else 'models/wilor/model_config.yaml'
+    )
     for name in ("detector", "model_config", "mano_model_dir", "calibration", "detector_crop_calibration"):
         value = getattr(a, name)
         if value is not None:
@@ -166,13 +179,16 @@ def signature(path):
     return {"path": str(path), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
-def run_stage(script, argv):
+def run_stage(script, argv, *, training_runtime=False):
     print(f"[ego-hand] {script}", flush=True)
     environment = os.environ.copy()
+    if training_runtime:
+        environment["EGO_WILOR_ROOT"] = str(ROOT / "training")
+    entry = [str(script)] if Path(script).is_absolute() else ["-m", "ego_hand_inference." + Path(script).stem]
     paths = [str(ROOT / "inference"), str(ROOT / "scripts"), environment.get("PYTHONPATH", "")]
     environment["PYTHONPATH"] = os.pathsep.join(path for path in paths if path)
     subprocess.run(
-        [sys.executable, "-m", "ego_hand_inference." + Path(script).stem, *map(str, argv)],
+        [sys.executable, *entry, *map(str, argv)],
         check=True,
         cwd=ROOT,
         env=environment,
@@ -248,6 +264,7 @@ def prepare_dataset(a, calibration, normalized):
 
 def main(argv=None):
     a = parse_args(argv)
+    stage = partial(run_stage, training_runtime=True) if a.local_pinhole else run_stage
     cal_source = calibration_source(a)
     calibration = load_calibrations(cal_source)
     if a.kind == "mp4":
@@ -275,6 +292,7 @@ def main(argv=None):
                   for p in (ROOT / folder).rglob("*.py") if not p.is_symlink())
     if a.adapter:
         model_files.append(a.adapter)
+    if a.adapter or a.local_pinhole:
         code.extend(sorted((ROOT/'training/wilor').rglob('*.py')))
         code.append(ROOT/'training/tools/hand_finetune/crop_geometry.py')
     if a.detector_crop_calibration:
@@ -373,12 +391,16 @@ def main(argv=None):
             a.mano_model_dir,
             "--save-mano-params",
         ]
-        if a.adapter:
+        if a.local_pinhole:
+            if a.adapter:
+                infer += ["--adapter", a.adapter]
+            stage(ROOT / "scripts/wilor_multiview_inference.py", [*infer, "--wilor-input-view", "local-pinhole"])
+        elif a.adapter:
             if a.detector_crop_calibration:
                 infer += ["--detector-crop-calibration", a.detector_crop_calibration]
-            run_stage("native_glove_observations.py", [*infer,"--adapter",a.adapter])
+            stage("native_glove_observations.py", [*infer,"--adapter",a.adapter])
         else:
-            run_stage("wilor_multiview_inference.py", infer)
+            stage("wilor_multiview_inference.py", infer)
     if shared.exists() and (not (shared / "summary.json").is_file()):
         shutil.rmtree(shared)
     fit = [
@@ -402,7 +424,7 @@ def main(argv=None):
         a.shared_batch_size,
     ]
     fit += ["--mano-model-dir", a.mano_model_dir]
-    run_stage("fit_shared_wilor_multiview.py", fit)
+    stage("fit_shared_wilor_multiview.py", fit)
     video = shared / "final_shared_4view.mp4"
     render = [
         "--dataset",
@@ -421,7 +443,7 @@ def main(argv=None):
         a.video_codec,
     ]
     render += ["--detector-predictions", predictions]
-    run_stage("render_shared_wilor_multiview.py", render)
+    stage("render_shared_wilor_multiview.py", render)
     from ego_hand_inference.export_hand_results import export_results
 
     export_results(

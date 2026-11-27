@@ -13,6 +13,7 @@ from ..config import TrainingConfig
 class TrainingRecipe(ABC):
     name: str
     metric_name: str
+    mpjpe_name = "mpjpe_mm"
 
     def __init__(self, config: TrainingConfig) -> None:
         self.config = config
