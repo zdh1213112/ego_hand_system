@@ -1,30 +1,32 @@
 schema_version: 3
 experiment:
-  name: glove_v5_bbox_pinhole_15000
+  name: glove_v5_local_pinhole
+local_export:
+  native_dataset: datasets/glove_trainset_20261123_v4
+  # By default use each native label's bbox. Optionally select one detection source.
+  detector: null
+  detector_cache: null
 paths:
-  # Relative paths use the training/ directory as their base.
-  dataset_root: datasets/glove_trainset_20261123_v4
+  dataset_root: datasets/glove_v5_local_pinhole
   checkpoint: ../models/wilor/coarse_start.ckpt
   model_config: pretrained_models/model_config.yaml
   mano_path: ../models/mano
-  output: output/glove_v5_bbox_pinhole_15000
+  output: output/glove_v5_local_pinhole
   resume: null
-  init_weights: ../models/wilor/v4_step48300.pt
+  init_weights: null
+  train_manifest: null
+  val_manifest: null
 data:
   type: glove_camera
   image_size: 256
+  pinhole_crop: local_pinhole
   rescale_factor: 2.0
   npz_cache_size: 8
   marker_inputs: {}
-  crop_jitter: 0.10
-  color_jitter: 0.15
-  blur_prob: 0.15
-  erasing_prob: 0.15
-  group_by_sync_frame: true
 recipe:
   type: joint_lora_finetune
   vit_tuning: lora
-  camera_model: kb_bbox_pinhole
+  camera_model: physical_perspective
   lora:
     blocks: all
     targets:
@@ -50,9 +52,6 @@ optimization:
   camera_lr: 0.0003
   weight_decay: 0.0001
   grad_clip: 1.0
-  lr_schedule: cosine
-  warmup_steps: 500
-  min_lr_ratio: 0.05
 checkpointing:
   save_steps: 500
 validation:
@@ -71,9 +70,3 @@ losses:
   hand_pose: 0.001
   betas: 0.0005
   physical_root_3d: 0.5
-  coarse_physical_root_3d: 0.25
-  fingertips_3d: 0.05
-  fingertips_2d: 0.01
-  bone_direction_3d: 0.02
-  anatomy_bend: 0.02
-  multiview_pose_consistency: 0.05

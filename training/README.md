@@ -25,15 +25,21 @@ bash training/train.sh wilor
 bash training/train.sh wilor --config training/configs/glove/nokov_v4_bbox_pinhole.yaml
 ```
 
-**路线 B 的 v5 配方**在训练时加入手框扰动、颜色微扰、模糊和局部遮挡。同一帧同一只手的多路视角进入同一批次，损失函数额外约束指尖位置、骨段方向、指节反折、腕根粗估位置和多视角手姿一致性。它也从 v4 第 48,300 步初始化，切换相机模式时将相机头末层归零，以 500 步预热和余弦学习率训练 15,000 步。输出目录为 `training/output/glove_v5_bbox_pinhole_15000/`。[v5 配方](configs/glove/nokov_v5_bbox_pinhole.yaml)
+### v5 · 缓存局部针孔图
+
+从 **ego_hand_system 仓库根目录**运行下列命令。v5 默认读取原生 NPY 标签的手框，按 KB4 标定为每只手导出 256 × 256 紧视场针孔图和局部相机标签。左手在训练加载时镜像一次。模型从 `models/wilor/coarse_start.ckpt` 初始化，使用 `physical_perspective`、联合 LoRA 和恒定学习率，以 batch 64 训练 15,000 步，每 1,000 步验证。训练输出位于 `training/output/glove_v5_local_pinhole/`。[v5 配方](configs/glove/nokov_v5_bbox_pinhole.yaml)
 
 ```bash
 bash training/train.sh wilor --config training/configs/glove/nokov_v5_bbox_pinhole.yaml
 ```
 
+- 首次运行从 `local_export.native_dataset` 读取原始 train/val 清单和标注，完成全部导出和几何校验后发布到 `paths.dataset_root`。再次运行同一命令会核对原始清单、图片和标签的文件大小与修改时间、框来源、裁剪设置和导出完整性，然后复用图块。更换输入或发现缓存不完整时，请在 YAML 中另选缓存目录。修改学习率或训练步数可以继续使用相同图块。
+- 可在同一命令后追加 `--detector /path/to/weights.pt` 或 `--detector-cache /path/to/proposals.jsonl`，也可在 YAML 的 `local_export` 中设置对应路径。检测框与标签框按 IoU 一对一匹配，默认阈值 0.5；使用检测器时默认置信度 0.3。导出器只保留匹配的手，并写出每个划分的匹配统计。
+- 仅准备或校验缓存时追加 `--prepare-only`。如果已经独立准备好兼容的局部针孔数据，可复制该配置、移除 `local_export` 段，将 `paths.dataset_root` 指向现有导出。逐框独立评估时，将 `evaluate_glove.py --root` 指向局部数据目录，重投影误差以局部图块像素计。
+
 ### 训练输出
 
-两条路线都可将 `best_trainable.pt` 直接传给推理的 `--adapter`。续训时将 `last_trainable.pt` 填入 `paths.resume`，并把 `training.max_steps` 设为目标总步数。`best_full.ckpt` 和 `last_full.ckpt` 含完整模型，可用于 `training/evaluate_glove.py`。
+v4 的两条路线都可将 `best_trainable.pt` 直接传给推理的 `--adapter`。续训时将 `last_trainable.pt` 填入 `paths.resume`，并把 `training.max_steps` 设为目标总步数。`best_full.ckpt` 和 `last_full.ckpt` 含完整模型，可用于 `training/evaluate_glove.py`。
 
 自定义实验可复制对应 YAML、修改 `paths.output`，用 `--config` 指向新文件。命令行的配置路径相对当前目录，YAML 内的相对资源路径从 `training/` 解析。
 

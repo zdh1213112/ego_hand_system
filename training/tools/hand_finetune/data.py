@@ -86,14 +86,14 @@ class FrameManifest:
         self.groups = {(k.recording_id, k.sync_index) for k in self.keys}
         self.recordings = {k.recording_id for k in self.keys}
 
-    def read_image(self, key):
+    def read_image(self, key, *, flags=cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION):
         path = self.root / key.image
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+        image = cv2.imread(str(path), flags)
         if image is None:
             raise OSError(f"Could not read {path}")
         return image
 
-    def read_label(self, index):
+    def read_label(self, index, *, include_native_label=False):
         row = self.rows[index]
         path = self.root / row["label"]
         label = np.load(path, allow_pickle=True).item()
@@ -129,15 +129,17 @@ class FrameManifest:
             if not np.isfinite(joints).all() or not np.isfinite(vertices).all():
                 raise ValueError("Nonfinite physical camera-space points")
             hand = dict(bbox=box_array([label["bbox"]])[0], side=side, joints=joints, vertices=vertices, row=row)
+            if include_native_label:
+                hand["native_label"] = label
         except (KeyError, ValueError, TypeError) as exc:
             raise ValueError(f"Invalid label {path}: {exc}") from exc
         return hand, K, distortion
 
-    def read_frame_labels(self, indices):
-        first, frame_K, frame_D = self.read_label(indices[0])
+    def read_frame_labels(self, indices, *, include_native_label=False):
+        first, frame_K, frame_D = self.read_label(indices[0], include_native_label=include_native_label)
         hands = [first]
         for index in indices[1:]:
-            hand, K, distortion = self.read_label(index)
+            hand, K, distortion = self.read_label(index, include_native_label=include_native_label)
             if not np.array_equal(frame_K, K) or not np.array_equal(frame_D, distortion):
                 raise ValueError(f"Hand labels specify conflicting calibration for {self.row_keys[index]}")
             hands.append(hand)

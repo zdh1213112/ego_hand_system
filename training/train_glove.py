@@ -47,7 +47,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stage1-config", type=Path)
     parser.add_argument("--stage2-config", type=Path)
-    return parser.parse_args()
+    local = parser.add_argument_group("local pinhole export")
+    boxes = local.add_mutually_exclusive_group()
+    boxes.add_argument("--detector", type=Path, help="Use local YOLO weights for the export")
+    boxes.add_argument("--detector-cache", type=Path, help="Use cached native-frame proposals for the export")
+    local.add_argument("--prepare-only", action="store_true", help="Prepare or verify local views and exit")
+    args = parser.parse_args()
+    if (args.detector or args.detector_cache or args.prepare_only) and (args.mode or not args.config):
+        parser.error("Local export options require --config with a local_export section")
+    return args
 
 
 def _mode_config(path: Path, mode: str):
@@ -104,8 +112,22 @@ def main() -> int:
         raise ValueError("Provide --mode or --config")
     raw = yaml.safe_load(args.config.expanduser().read_text(encoding="utf-8"))
     schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
+    if args.detector or args.detector_cache or args.prepare_only:
+        if schema_version != 3 or "local_export" not in raw:
+            raise ValueError("Local export options require a schema-v3 config with a local_export section")
     if schema_version == 3:
-        report = run_training(load_training_config(args.config))
+        config = load_training_config(args.config)
+        if args.detector or args.detector_cache:
+            config.local_export = replace(
+                config.local_export,
+                detector=args.detector.expanduser().resolve() if args.detector else None,
+                detector_cache=args.detector_cache.expanduser().resolve() if args.detector_cache else None,
+            )
+        if args.prepare_only:
+            from wilor.datasets.local_pinhole import prepare_local_views
+            report = prepare_local_views(config)
+        else:
+            report = run_training(config)
     elif schema_version == 2:
         report = run_glove_training(load_glove_training_config(args.config))
     else:

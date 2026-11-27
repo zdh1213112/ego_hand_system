@@ -228,9 +228,12 @@ def test_optional_losses_masks_units_and_gradients():
 
 def test_recipe_and_scheduler():
     cfg = load_training_config(V5)
-    assert cfg.group_by_sync_frame
-    assert cfg.camera_model == "kb_bbox_pinhole" and cfg.max_steps == 15000
-    assert resolved_training_config(cfg)["optimization"]["lr_schedule"] == "cosine"
+    assert not cfg.group_by_sync_frame and not cfg.augmentation_options()
+    assert cfg.camera_model == "physical_perspective" and cfg.max_steps == 15000
+    assert resolved_training_config(cfg)["data"]["pinhole_crop"] == "local_pinhole"
+    assert cfg.lr_schedule == "constant" and cfg.init_weights is None
+    assert cfg.local_export.detector is None and cfg.local_export.detector_cache is None
+    assert cfg.losses["coarse_keypoints_2d"] == .005
     def scale(step):
         return engine.lr_multiplier(step, 15000, "cosine", 500, .05)
     assert scale(0) == 0 and scale(1) == pytest.approx(1 / 500)
@@ -283,9 +286,11 @@ def test_augmented_crop_falls_back_to_the_original_geometry(tmp_path, monkeypatc
 
 def test_altered_appearance_is_training_only(tmp_path, monkeypatch):
     manifest, _, _ = native_sample(tmp_path)
-    cfg = replace(load_training_config(V5), dataset_root=tmp_path, crop_jitter=0,
+    cfg = replace(load_training_config(CONFIGS / "nokov_v4_bbox_pinhole.yaml"), dataset_root=tmp_path, crop_jitter=0,
                   erasing_prob=.99, blur_prob=.99)
-    asset_hash = engine.sha256_file(cfg.mano_path / "MANO_RIGHT.pkl")
+    cfg.mano_path = tmp_path
+    (tmp_path / "MANO_RIGHT.pkl").write_bytes(b"asset identity for data-loader test")
+    asset_hash = engine.sha256_file(tmp_path / "MANO_RIGHT.pkl")
     (tmp_path / "dataset_profile.json").write_text(json.dumps({
         "mano_assets": {"MANO_RIGHT.pkl": {"sha256": asset_hash}},
         "geometry_validation": {"valid": True}
@@ -307,7 +312,8 @@ def test_altered_appearance_is_training_only(tmp_path, monkeypatch):
 def test_only_cross_mode_initialization_resets_the_last_layer(tmp_path, monkeypatch, resume, mode, expect_reset):
     path = tmp_path / "weights.pt"
     path.touch()
-    cfg = replace(load_training_config(V5), init_weights=None if resume else path, resume=path if resume else None)
+    cfg = replace(load_training_config(CONFIGS / "nokov_v4_bbox_pinhole.yaml"),
+                  init_weights=None if resume else path, resume=path if resume else None)
     net = torch.nn.Sequential(torch.nn.Linear(8, 4), torch.nn.ReLU(), torch.nn.Linear(4, 3))
     model = SimpleNamespace(physical_camera_head=SimpleNamespace(net=net))
 

@@ -74,6 +74,14 @@ def build_datasets(
     train_manifest: Path,
     val_manifest: Path,
 ) -> tuple[Dataset, Dataset, dict[str, Any]]:
+    if config.pinhole_crop:
+        for root in {train_manifest.parent, val_manifest.parent}:
+            summary = json.loads((root / "summary.json").read_text())
+            if (summary.get("input_view") != "local_pinhole"
+                    or summary.get("pinhole_crop", "local_pinhole") != config.pinhole_crop
+                    or (config.pinhole_crop == "kb_bbox_pinhole"
+                        and summary.get("rescale_factor") != config.rescale_factor)):
+                raise ValueError(f"{root}: expected a matching {config.pinhole_crop} local view export")
     profile_path = config.dataset_root / "dataset_profile.json"
     if not profile_path.is_file():
         raise FileNotFoundError(
@@ -219,6 +227,8 @@ def _training_metadata(
             "val_batches": config.val_batches,
         },
     }
+    if config.pinhole_crop:
+        semantic["data"]["pinhole_crop"] = config.pinhole_crop
     if config.camera_lr is not None:
         semantic['optimization']['camera_lr'] = config.camera_lr
     semantic["data"].update({
@@ -418,6 +428,9 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     ):
         if path is not None and not path.is_file():
             raise FileNotFoundError(f"Missing {description}: {path}")
+    if config.local_export is not None:
+        from wilor.datasets.local_pinhole import prepare_local_views
+        prepare_local_views(config)
     train_manifest, val_manifest = _manifests(config)
     config.train_manifest, config.val_manifest = train_manifest, val_manifest
     train_set, val_set, profile = build_datasets(
