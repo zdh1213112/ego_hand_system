@@ -39,7 +39,8 @@ NATIVE_CHRONOLOGY_VERSION = 'current_native_at_published_wrist_across_recovery_v
 
 
 def mano_wrapper_path():
-    root = Path(os.environ.get('EGO_WILOR_ROOT', PROJECT_ROOT / 'third_party/WiLoR'))
+    upstream = PROJECT_ROOT / 'third_party/WiLoR'
+    root = Path(os.environ.get('EGO_WILOR_ROOT', upstream if upstream.is_dir() else PROJECT_ROOT / 'training'))
     return root / 'wilor/models/mano_wrapper.py'
 
 

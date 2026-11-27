@@ -25,7 +25,10 @@ CONDA_ENV="ego-hand"
 DEVICE="cuda"
 DETECTOR="${EGO_WILOR_DETECTOR:-$ROOT/models/wilor/detector.pt}"
 WILOR_CHECKPOINT="${EGO_WILOR_CHECKPOINT:-}"
+WILOR_MANO_DIR="$ROOT/models/mano"
+WILOR_MODEL_CONFIG="$ROOT/models/wilor/model_config.yaml"
 WILOR_ADAPTER="${EGO_WILOR_ADAPTER:-}"
+WILOR_INPUT_VIEW="${EGO_WILOR_INPUT_VIEW:-auto}"
 EXTERNAL_BOXES=""
 CAMERAS=(camera0 camera1 camera2 camera3)
 REFERENCE_CAMERA="camera0"
@@ -100,6 +103,8 @@ TEMPORAL_HAND_IDENTITY_MAX_GAP="${EGO_TEMPORAL_HAND_IDENTITY_MAX_GAP:-60}"
 TORCHINDUCTOR_CACHE="${EGO_TORCHINDUCTOR_CACHE_DIR:-/tmp/ego-hand-torchinductor}"
 
 usage() {
+  echo "WiLoR assets: --mano-model-dir DIR selects the directory with MANO_RIGHT.pkl."
+  echo "WiLoR v5: pass the full export with --checkpoint. --wilor-input-view auto|native|local-pinhole selects per-box perspective input on KB recordings."
   echo "WiLoR weights: --checkpoint FILE selects the base model; --adapter FILE applies trainable/LoRA weights; --wilor-root DIR selects the matching training checkout."
   echo "--mcap FILE_OR_DIR reads Orbbec EGO4 camera topics. An EGO4 recording directory must contain one MCAP; select a part for multi-part recordings."
   echo "EGO4 optional: --calibration-json FILE uses an explicit camera_calibrations JSON when the source YAML is unavailable."
@@ -144,6 +149,8 @@ while (($#)); do
     --detector) DETECTOR="$2"; shift 2 ;;
     --checkpoint) WILOR_CHECKPOINT="$2"; shift 2 ;;
     --adapter) WILOR_ADAPTER="$2"; shift 2 ;;
+    --wilor-input-view) WILOR_INPUT_VIEW="$2"; shift 2 ;;
+    --mano-model-dir) WILOR_MANO_DIR="$2"; shift 2 ;;
     --wilor-root) export EGO_WILOR_ROOT="$2"; shift 2 ;;
     --external-boxes) EXTERNAL_BOXES="$2"; shift 2 ;;
     --cameras)
@@ -340,6 +347,20 @@ if [[ -n "$WILOR_CHECKPOINT" || -n "$WILOR_ADAPTER" ]]; then
   for WEIGHT in "$WILOR_CHECKPOINT" "$WILOR_ADAPTER"; do
     [[ -z "$WEIGHT" || -f "$WEIGHT" ]] || { echo "WiLoR weights do not exist: $WEIGHT" >&2; exit 2; }
   done
+fi
+case "$WILOR_INPUT_VIEW" in auto|native|local-pinhole) ;; *) echo "Invalid --wilor-input-view: $WILOR_INPUT_VIEW" >&2; exit 2 ;; esac
+if [[ "$WILOR_INPUT_VIEW" == local-pinhole && -n "${EGO_WILOR_UNDISTORT_FOV_DEG:-}" ]]; then
+  echo 'Local-pinhole requires the original KB recording.' >&2; exit 2
+fi
+if [[ -n "$WILOR_CHECKPOINT" ]]; then
+  if [[ "$(run_python -c 'import sys; from wilor_checkpoint_metadata import full_inference_checkpoint; print(int(full_inference_checkpoint(sys.argv[1]) is not None))' "$WILOR_CHECKPOINT")" == 1 ]]; then
+    export EGO_WILOR_ROOT="${EGO_WILOR_ROOT:-$ROOT/training}"
+    WILOR_MODEL_CONFIG="$ROOT/training/pretrained_models/model_config.yaml"
+  fi
+fi
+export EGO_WILOR_INPUT_VIEW="$WILOR_INPUT_VIEW"
+if [[ "$WILOR_MANO_DIR" != "$ROOT/models/mano" ]]; then
+  export EGO_WILOR_MANO_OVERRIDE="$WILOR_MANO_DIR"
 fi
 declare -A CAMERA_SEEN=()
 for CAMERA in "${CAMERAS[@]}"; do
@@ -647,11 +668,16 @@ if calibration_json or calibration_yaml:
     import hashlib
     calibration = Path(calibration_json or calibration_yaml).resolve()
     config["calibration_override" if calibration_json else "calibration_yaml"] = {"path": str(calibration), "sha256": hashlib.sha256(calibration.read_bytes()).hexdigest()}
-if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "wilor" and any(
-    os.environ.get(key) for key in ("EGO_WILOR_CHECKPOINT", "EGO_WILOR_ADAPTER", "EGO_WILOR_ROOT")
+if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "wilor" and (
+    os.environ["EGO_WILOR_INPUT_VIEW"] != "auto" or
+    any(os.environ.get(key) for key in ("EGO_WILOR_CHECKPOINT", "EGO_WILOR_ADAPTER", "EGO_WILOR_ROOT", "EGO_WILOR_MANO_OVERRIDE"))
 ):
     from wilor_checkpoint_metadata import checkpoint_metadata
     config["pose_backend"] = checkpoint_metadata()
+    if os.environ["EGO_WILOR_INPUT_VIEW"] != "auto":
+        config["pose_backend"]["input_view_selection"] = os.environ["EGO_WILOR_INPUT_VIEW"]
+    if os.environ.get("EGO_WILOR_MANO_OVERRIDE"):
+        config["pose_backend"]["mano_dir"] = str(Path(os.environ["EGO_WILOR_MANO_OVERRIDE"]).resolve())
 if os.environ.get("EGO_EXPERIMENT_POSE_BACKEND", "wilor") == "gem":
     checkpoint = Path(os.environ["EGO_GEM_CHECKPOINT"]).resolve()
     assets = Path(os.environ["EGO_GEM_SOMA_ASSETS"]).resolve()
@@ -846,6 +872,7 @@ if [[ ! -f "$RAW_PREDICTIONS/summary.json" ]]; then
       run_python "$ROOT/inference/fah_multiview_inference.py" "${INFERENCE_ARGS[@]}"
     fi
   else
+    INFERENCE_ARGS+=(--wilor-input-view "$WILOR_INPUT_VIEW" --mano-model-dir "$WILOR_MANO_DIR" --model-config "$WILOR_MODEL_CONFIG")
     if [[ -n "$WILOR_CHECKPOINT" ]]; then INFERENCE_ARGS+=(--checkpoint "$WILOR_CHECKPOINT"); fi
     if [[ -n "$WILOR_ADAPTER" ]]; then INFERENCE_ARGS+=(--adapter "$WILOR_ADAPTER"); fi
     if ((NEED_WILOR_MANO)); then
@@ -872,7 +899,7 @@ PY
 fi
 
 if ((RENDER_PER_CAMERA)); then
-  run_python "$ROOT/scripts/render_per_camera_wilor.py" \
+  run_python "$ROOT/scripts/render_per_camera_wilor.py" --mano-model-dir "$WILOR_MANO_DIR" --model-config "$WILOR_MODEL_CONFIG" \
     --dataset "$NORMALIZED" --predictions "$RAW_PREDICTIONS" --output "$OUTPUT/per_camera_video" \
     --cameras "${CAMERAS[@]}" --device "$DEVICE" --max-frames "$MAX_FRAMES"
 fi
@@ -1028,7 +1055,7 @@ fi
 if [[ "$POSE_BACKEND" != gem && "$WILOR_MODE" != legacy ]]; then
   SHARED_FUSION="${FUSION}_shared_${POSE_BACKEND}"
   SHARED_VIDEO="$SHARED_FUSION/final_shared_${#CAMERAS[@]}view.mp4"
-  SHARED_MANO_DIR="$ROOT/models/mano"
+  SHARED_MANO_DIR="$WILOR_MANO_DIR"
   if [[ "$POSE_BACKEND" == fah ]]; then SHARED_MANO_DIR="$EGO_FAH_MANO_DIR"; fi
   NATIVE_POLICY_ARGS=()
   if [[ "$POSE_POLICY" == native-wrist ]]; then
@@ -1075,7 +1102,7 @@ if [[ "$POSE_BACKEND" == gem ]]; then
 fi
 WILOR_NATIVE_VIDEO_ARGS=()
 if [[ "$POSE_BACKEND" == wilor ]]; then
-  WILOR_NATIVE_VIDEO_ARGS=(--wilor-native-mesh --wilor-native-predictions "$RAW_PREDICTIONS" --tile-width 960 --native-mesh-device "$DEVICE")
+  WILOR_NATIVE_VIDEO_ARGS=(--wilor-native-mesh --native-mano-model-dir "$WILOR_MANO_DIR" --native-model-config "$WILOR_MODEL_CONFIG" --wilor-native-predictions "$RAW_PREDICTIONS" --tile-width 960 --native-mesh-device "$DEVICE")
 elif [[ "$POSE_BACKEND" == fah ]]; then
   WILOR_NATIVE_VIDEO_ARGS=(--fah-mesh-predictions "$RAW_PREDICTIONS" --tile-width 960)
 fi
