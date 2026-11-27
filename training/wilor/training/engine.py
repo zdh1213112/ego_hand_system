@@ -21,7 +21,9 @@ from wilor.datasets.opentouch_dataset import OpenTouchDataset
 from wilor.models import WiLoR, load_wilor_config, resolve_mano_model_path
 from wilor.models.adapter import (
     load_trainable_weights,
+    restore_best_mpjpe,
     resume_trainable_checkpoint,
+    save_best_mpjpe,
     save_trainable_checkpoint,
     save_full_checkpoint,
 )
@@ -268,6 +270,7 @@ def _validation_errors(output, batch):
     def totals(error, mask):
         return torch.stack((error.masked_fill(~mask, 0.).sum(), mask.sum()))
     values = {
+        "val_mpjpe_mm": totals(distances, valid),
         "val_fingertip_mpjpe_mm": totals(distances[:, FINGERTIPS], valid[:, FINGERTIPS]),
         "val_pinky_tip_mm": totals(distances[:, 20], valid[:, 20]),
     }
@@ -479,6 +482,9 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     )
     best_selection_score = float("inf")
     best_selection_step = 0
+    best_mpjpe_path = config.output / "best_mpjpe_full.pt"
+    val_mpjpe_key = f"val_{recipe.mpjpe_name}"
+    best_mpjpe_key = f"best_{recipe.mpjpe_name}"
     if config.resume is not None:
         payload = resume_trainable_checkpoint(config.resume, model, optimizer)
         actual = payload.get("training_metadata", {})
@@ -488,6 +494,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 "use paths.init_weights to start a new stage"
             )
         metadata = actual
+        restore_best_mpjpe(best_mpjpe_path, metadata, metric_name=recipe.mpjpe_name)
         initialized_from = actual.get("initialized_from")
         start_step = int(payload.get("step", 0))
         if payload.get("val_loss") is not None:
@@ -561,6 +568,8 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             "selection_metric": selection_metric,
             "best_selection_score": best_selection_score,
             "best_selection_step": best_selection_step,
+            best_mpjpe_key: metadata.get(best_mpjpe_key),
+            "best_mpjpe_step": metadata.get("best_mpjpe_step"),
             "loss_config": loss_config.as_dict(),
             "training_signature": metadata["signature"],
             "initialized_from": initialized_from,
@@ -602,6 +611,13 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 "val_loss_components": val_components,
                 **trainer.validation_metrics,
             })
+            if metric_name == recipe.mpjpe_name:
+                record[val_mpjpe_key] = val_metric
+            if val_mpjpe_key in record:
+                save_best_mpjpe(
+                    best_mpjpe_path, model, step, record[val_mpjpe_key], metadata,
+                    train_loss=train_loss, val_loss=val_loss, metric_name=recipe.mpjpe_name,
+                )
             best_val_loss = min(best_val_loss, val_loss)
             selection_score = val_metric if selection_metric == "val_metric" else val_loss
             if selection_score < best_selection_score:
@@ -613,7 +629,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                     best_path, model, optimizer, step, config.checkpoint,
                     recipe.name, val_loss, metadata,
                 )
-                save_full_checkpoint(config.output / "best_full.ckpt", model, step)
+                save_full_checkpoint(config.output / "best_full.pt", model, step)
             print(json.dumps(record), flush=True)
         elif step % 10 == 0:
             print(json.dumps(record), flush=True)
@@ -627,7 +643,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 recipe.name, best_val_loss, metadata,
             )
 
-    save_full_checkpoint(config.output / "last_full.ckpt", model, config.max_steps)
+    save_full_checkpoint(config.output / "last_full.pt", model, config.max_steps)
     result = report("passed", config.max_steps)
     if config.final_visualization:
         if recipe.name not in {"refiner_finetune", "joint_lora_finetune", "physical_camera_finetune", "marker_camera_finetune", "marker_offset_finetune"}:

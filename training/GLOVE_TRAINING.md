@@ -235,6 +235,9 @@ schema-v3 输出：
 ```text
 best_trainable.pt
 last_trainable.pt
+best_full.pt
+last_full.pt
+best_mpjpe_full.pt        # 验证 MPJPE 最低；相机数据以毫米计，OpenTouch 按掌宽归一化
 resolved_config.yaml
 train_report.json
 loss_curves.png
@@ -244,7 +247,7 @@ val_visualization/        # 仅可选 Stage 2
 - `paths.resume`：严格续训同一 recipe、数据 manifest、loss 和优化器，恢复 step/optimizer；
 - `paths.init_weights`：只加载匹配模型的权重，从 step 0 开始新阶段。
 
-checkpoint 格式为 `wilor_glove_trainable_v2`，保存所有当前可训练参数以及需要跨阶段
+两个 `*_trainable.pt` 的格式为 `wilor_glove_trainable_v2`，保存所有当前可训练参数以及需要跨阶段
 携带的 LoRA/全量 ViT 权重。普通推理仍可用 `load_wilor(..., adapter_path=...)`
 加载该格式。
 

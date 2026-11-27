@@ -39,7 +39,15 @@ bash training/train.sh wilor --config training/configs/glove/nokov_v4_bbox_pinho
 
 ### 训练输出
 
-v4 的两条路线都可将 `best_trainable.pt` 直接传给推理的 `--adapter`。续训时将 `last_trainable.pt` 填入 `paths.resume`，并把 `training.max_steps` 设为目标总步数。`best_full.ckpt` 和 `last_full.ckpt` 含完整模型，可用于 `training/evaluate_glove.py`。
+所有 WiLoR 训练都在 `paths.output` 下保存权重。两阶段训练的每个阶段都有自己的输出目录。
+
+| 文件 | 选择时机和用途 |
+| --- | --- |
+| `best_trainable.pt`、`best_full.pt` | 按配方原有指标选择的可训练权重和完整模型。marker 配方使用验证集上的 marker 重投影误差，其余配方使用验证 loss。可将前者传给推理的 `--adapter`。 |
+| `best_mpjpe_full.pt` | 验证集上的 3D MPJPE 严格降低时保存的完整模型。手套相机数据使用手腕对齐后的毫米误差，OpenTouch 第一阶段（LoRA 或全量 ViT）使用按掌宽归一化的无量纲误差。 |
+| `last_trainable.pt`、`last_full.pt` | 前者按 `save_steps` 和训练结束时保存，可用于续训。后者是最后一步的完整模型。 |
+
+`train_report.json` 记录最佳步数 `best_mpjpe_step`，相机数据的最低值记为 `best_mpjpe_mm`，OpenTouch 的最低值记为 `best_local_mpjpe_normalized`。相机数据可用 `training/evaluate_glove.py --checkpoint` 评估完整模型。续训时将 `last_trainable.pt` 填入 `paths.resume`，并把 `training.max_steps` 设为目标总步数。旧版 schema-v2 配置的两份可训练权重文件名为 `best_adapter.pt` 和 `last_adapter.pt`。
 
 自定义实验可复制对应 YAML、修改 `paths.output`，用 `--config` 指向新文件。命令行的配置路径相对当前目录，YAML 内的相对资源路径从 `training/` 解析。
 
