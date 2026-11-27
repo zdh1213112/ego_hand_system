@@ -76,18 +76,22 @@ def main():
     parser.add_argument('--run', required=True, type=Path)
     parser.add_argument('--dataset', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--mano-model-dir', type=Path, help='override the MANO assets recorded by inference')
+    parser.add_argument('--placement', choices=('calibrated', 'native'), default='calibrated',
+                        help='use native to score the saved camera translation directly')
     args = parser.parse_args()
     args.backend = 'wilor'
     torch.set_num_threads(2)
     started = time.monotonic()
     dataset = LabeledDataset(args.dataset)
     frames = read_selected(args.run, dataset)
-    root = Path(__file__).resolve().parents[1]
-    layer = load_mano(root / 'models/mano')
     model = json.loads((args.run / 'wilor_multiview/summary.json').read_text())['model']
+    mano_dir = args.mano_model_dir or Path(model.get('mano_model_dir', Path(__file__).resolve().parents[1] / 'models/mano'))
+    layer = load_mano(mano_dir)
     protocol = dict(input='Original recording, detector boxes and detector handedness',
                     assignment='highest confidence per predicted side, require IoU >= 0.5 with same-side GT for scoring only',
-                    placement='calibrated translation using only predicted 2D and actual camera calibration',
+                    placement=('saved WiLoR camera translation' if args.placement == 'native' else
+                               'calibrated translation using only predicted 2D and actual camera calibration'),
                     denominator='all labeled camera/hands for coverage and PCK, valid predictions only for mean errors')
     assets = [dict(path=model[key], sha256=sha256(model[key])) for key in ('detector','checkpoint','adapter') if model[key]]
     config = dict(model=model, assets=assets, protocol=protocol, run=str(args.run.resolve()))
@@ -114,7 +118,7 @@ def main():
                 pred = dict(joints_camera_m=np.asarray(hand['joints_3d_camera_relative']) + hand['camera_translation'],
                             joints_2d_px=hand['joints_2d'], vertices_camera_m=meshes[i])
                 status = 'matched'
-            score, per_joint = measure(label, pred, placement='calibrated')
+            score, per_joint = measure(label, pred, placement=args.placement)
             score.update(match_status=status, detection_iou=overlap)
             scores.append(score)
             statuses[status] += 1

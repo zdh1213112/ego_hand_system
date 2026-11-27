@@ -64,6 +64,29 @@ bash inference/run.sh wilor --input /path/to/recording/part0001 \
   --mano-model-dir /path/to/mano --output /path/to/v5_delivery
 ```
 
+有同一段录制的原图标注时，可用实验入口同时生成预测并评价最终的共享模型。
+`--session` 对应四路 MP4，MCAP 输入使用 `--mcap`。下例处理整段并将报告写入
+`/path/to/v5_run/evaluation_shared`。
+
+```bash
+bash scripts/run_multiview_wilor_experiment.sh --session /path/to/recording/part0001 \
+  --checkpoint /path/to/wilor_pinhole_best_261126.ckpt --detector /path/to/detector.pt \
+  --mano-model-dir /path/to/mano --max-frames 0 --wilor-mode shared \
+  --evaluation-dataset /path/to/matching_labels --output /path/to/v5_run
+
+# 同一实验中，分别对检测后的逐机预测评分
+python scripts/evaluate_detected_wilor.py --run /path/to/v5_run \
+  --dataset /path/to/matching_labels --placement native --output /path/to/v5_per_camera
+
+# 单独评价姿态模型，用原始鱼眼图像、标注框与标注手侧
+python scripts/evaluate_hand_models.py --backend wilor --dataset /path/to/native_labels \
+  --wilor-checkpoint /path/to/wilor_pinhole_best_261126.ckpt --mano-dir /path/to/mano \
+  --placement native --output /path/to/v5_gt_box
+```
+
+`--placement native` 保留 v5 预测的腕部位置，标注框评估中的像素误差按原始鱼眼图计算。
+已导出局部针孔图的验证集继续使用 `training/evaluate_glove.py`，其像素误差按 256 × 256 图块计算。
+
 ### WiLoR 通用选项
 
 MCAP 使用同一命令，将 `--input` 指向 MCAP 文件或单分段目录。
