@@ -22,14 +22,12 @@ def training_env(tmp_path):
 
 
 @pytest.mark.parametrize("opts", [[], ["--mode", "joint_lora"], ["--mode=joint_lora"]])
-def test_public_wilor_default_is_v4(tmp_path, training_env, opts):
+def test_public_wilor_delegates_default_to_training_cli(tmp_path, training_env, opts):
     result = subprocess.run(
         ["bash", ROOT / "training/train.sh", "wilor", *opts],
         cwd=tmp_path, env=training_env, text=True, capture_output=True, check=True,
     )
-    assert result.stdout.splitlines()[-2:] == [
-        "--config", str(ROOT / "training/configs/glove/nokov_v4_joint_lora.yaml")
-    ]
+    assert result.stdout.splitlines() == ["-B", str(ROOT / "training/train_glove.py"), *opts]
 
 
 @pytest.mark.parametrize("backend,script", [

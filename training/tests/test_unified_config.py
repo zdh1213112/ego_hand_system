@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 import yaml
@@ -9,6 +10,42 @@ from wilor.training.config import load_training_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(("args", "recipe"), [
+    ([], "nokov_v5_bbox_pinhole"),
+    (["--mode", "joint_lora"], "nokov_v5_bbox_pinhole"),
+    (["--mode=joint_lora"], "nokov_v5_bbox_pinhole"),
+    (["--config", "configs/glove/nokov_v4_joint_lora.yaml"], "nokov_v4_joint_lora"),
+    (["--config", "configs/glove/nokov_v4_bbox_pinhole.yaml"], "nokov_v4_bbox_pinhole"),
+])
+def test_training_cli_selects_recipe(monkeypatch, args, recipe):
+    import train_glove
+
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setattr(sys, "argv", ["train_glove.py", *args])
+    configs = []
+    monkeypatch.setattr(train_glove, "run_training", configs.append)
+    assert train_glove.main() == 0
+    config, = configs
+    assert config.source == REPO_ROOT / "configs/glove" / f"{recipe}.yaml"
+    if recipe == "nokov_v5_bbox_pinhole":
+        assert config.local_export is not None
+        assert config.camera_model == "physical_perspective"
+
+
+def test_prepare_only_uses_default_v5_config(monkeypatch, tmp_path):
+    import train_glove
+    from wilor.datasets import local_pinhole
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["train_glove.py", "--prepare-only", "--detector-cache", "boxes.jsonl"])
+    configs = []
+    monkeypatch.setattr(local_pinhole, "prepare_local_views", configs.append)
+    assert train_glove.main() == 0
+    config, = configs
+    assert config.source == REPO_ROOT / "configs/glove/nokov_v5_bbox_pinhole.yaml"
+    assert config.local_export.detector_cache == tmp_path / "boxes.jsonl"
 
 
 def test_schema_v3_configs_select_explicit_data_and_recipe() -> None:
